@@ -168,6 +168,27 @@ class HarnessTest(unittest.TestCase):
                     "p50 2.0 ms, p95 2.0 ms"):
             self.assertIn(row, text)
 
+    def test_live_expansions(self):
+        self.assertEqual(harness.fnv("a"), "af63dc4c8601ec8c")
+        turn = user("2026-01-08T09:00:00Z", "why did the export fail on ABC-12", "feat-a")
+        expand = said("2026-01-08T09:01:00Z", "Reading it.", "feat-a", "m12")
+        expand["message"]["content"].append(dict(type="tool_use", id="t1", name=harness.MCP_RECALL,
+                                                 input=dict(query="github.com/x/app/export-null-rows")))
+        with open(os.path.join(harness.PROJECTS, "-w-app", "live.jsonl"), "w") as fh:
+            fh.writelines(json.dumps(o) + "\n" for o in (turn, expand))
+        log = os.path.join(os.path.dirname(harness.EVAL), "log")
+        os.makedirs(log)
+        with open(os.path.join(log, "openrecall.jsonl"), "w") as fh:
+            fh.writelines(json.dumps(e) + "\n" for e in (
+                dict(event="recall", session="live", prompt_hash=harness.fnv("why did the export fail on ABC-12"),
+                     injected=["github.com/x/app/export-null-rows"]),
+                dict(event="recall", session="new", prompt_hash=harness.fnv("check src/export.py again"), injected=["global/x"]),
+                dict(event="recall", session="new", prompt_hash="0000000000000000", injected=["global/y"]),
+                dict(event="recall", session="gone", prompt_hash="0", injected=["global/z"]),
+                dict(event="recall", session="live", prompt_hash="0", injected=[])))
+        sessions, _ = harness.load()
+        self.assertEqual(harness.live_expansions({s["sid"]: s for s in sessions}), (2, 1))
+
     @unittest.skipUnless(os.path.exists(harness.BINARY), "needs cargo build --release")
     def test_replay_cases_through_the_binary(self):
         tmp = tempfile.mkdtemp(dir="/var/tmp")

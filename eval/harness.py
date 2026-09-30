@@ -45,6 +45,7 @@ GOAL = 0.67
 HAND = ["useful", "useful", "useful", "partly", "partly", "useful", "noise", "noise", "useful", "partly", "noise",
         "noise", "noise", "noise"]
 BINARY = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "target", "release", "openrecall")
+MCP_RECALL = "mcp__plugin_openrecall_openrecall__recall"
 NOT_A_PROMPT = ("<local-command-stdout>", "<local-command-caveat>", "<system-reminder>", "<bash-input>",
                 "This session is being continued from a previous conversation")
 
@@ -678,6 +679,31 @@ def used_signal(case, s, path):
     return any(i in after for i in ids)
 
 
+def fnv(text):
+    """FNV-1a 64, the hash the binary logs a prompt under."""
+    h = 0xCBF29CE484222325
+    for b in text.encode("utf-8"):
+        h = ((h ^ b) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return "%016x" % h
+
+
+def live_expansions(by_sid):
+    """Ticket 19: over the live recall log, the prompts that got an injection, and how many of them saw the model
+    call `recall` on an injected address in that turn. The frame's tool sentence goes if the first 100 show none."""
+    log = os.path.join(os.path.dirname(EVAL), "log", "openrecall.jsonl")
+    prompts = expanded = 0
+    for e in read(log) if os.path.exists(log) else []:
+        if e.get("event") != "recall" or not e.get("injected"):
+            continue
+        s = by_sid.get(e.get("session"))
+        t = next((t for t in s["turns"] if fnv(t["ask"]) == e.get("prompt_hash")), None) if s else None
+        if not t:
+            continue
+        prompts += 1
+        expanded += any(n == MCP_RECALL and (i or {}).get("query") in e["injected"] for n, i in t["tools"])
+    return prompts, expanded
+
+
 def agreement(rows):
     """Jev against the hand labels of spec Appendix A (ticket 09): rows of {case, hand, jev}."""
     judged = [r for r in rows if r.get("jev")]
@@ -721,6 +747,7 @@ def level2_lines(cases, results, labels, by_sid, gate):
             if x["address"] in r["injected"] or label == "partly" or (label == "noise" and fired):
                 confirm.append("%s %s (%sjev %s, used signal %s)" % (c["id"], x["address"],
                                                                   "injected, " if x["address"] in r["injected"] else "", label, fired))
+    live, expanded = live_expansions(by_sid)
     timings = sorted(r["ms"] for _, r in searched)
     step = max(1, len(rows) // 12)
     shown = sorted({rows[i][0] for i in range(0, len(rows), step)} | {pick, rows[-1][0]})
@@ -742,6 +769,8 @@ def level2_lines(cases, results, labels, by_sid, gate):
         "- Used signal over the injected line's identifiers (ticket 19): fired %d, silent %d, no transcript %d. To confirm by hand "
         "(injected, or Jev says partly, or noise while the signal fired): %d%s" % (used[True], used[False], used[None], len(confirm),
                                                                        ": " + "; ".join(confirm[:15]) + (" …" if len(confirm) > 15 else "") if confirm else "."),
+        "- Live, from the recall log: %d prompts got an injection, and in %d of them the model then called `recall` on "
+        "an injected address (ticket 19: the frame's tool sentence goes if the first 100 show none)." % (live, expanded),
         "",
         "At the binary's gate (%s and above), injections %d on %d cases: precision %s, misses %d, false injections %s, "
         "unlabeled %d. Goals: precision 0.67 or more, false injections 0."

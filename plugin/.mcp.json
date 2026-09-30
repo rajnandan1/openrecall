@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "openrecall": {
+      "command": "openrecall",
+      "args": ["mcp"]
+    }
+  }
+}

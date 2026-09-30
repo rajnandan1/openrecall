@@ -1,5 +1,6 @@
 mod git;
 mod index;
+mod mcp;
 mod record;
 mod scan;
 mod turn;
@@ -29,10 +30,16 @@ fn main() {
 }
 
 fn run(args: &[String], started: u128) {
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    if args == ["mcp"] {
+        if let Err(e) = mcp::serve() {
+            log(json!({"event": "error", "cmd": "mcp", "error": e.to_string()}));
+        }
+        return;
+    }
     if session_skipped() {
         return;
     }
-    let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let result = match args.as_slice() {
         ["handoff"] => handoff(),
         ["recall"] => recall(started),

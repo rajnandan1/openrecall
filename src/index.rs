@@ -12,8 +12,9 @@ pub const GATE: f64 = 4.3;
 pub const MAX_LINES: usize = 3;
 /// 400 tokens at 2.6 characters a token, the ratio build step 2 measured.
 pub const MAX_CHARS: usize = 1040;
-pub const FRAME: &str =
-    "Recalled memories from earlier sessions (OpenRecall). They reflect what was true when written.";
+/// Ticket 19's three sentences; the third names the MCP tool by the exact name Claude loads it under.
+pub const FRAME: &str = "Recalled memories from earlier sessions (OpenRecall). They reflect what was true when written. \
+                         Full text: mcp__plugin_openrecall_openrecall__recall with the address.";
 /// Claude Code's own MEMORY.md line rule (ticket 19).
 const LINE_TEXT: usize = 200;
 const TERMS: usize = 40;
