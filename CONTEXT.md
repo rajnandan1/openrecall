@@ -168,6 +168,14 @@ _Avoid_: vendor, backend, model (one provider serves many models)
 A session whose transcript has not changed for 30 minutes. A quiet session can still resume; its later turns are extracted when it goes quiet again.
 _Avoid_: idle, finished, stale
 
+**Cursor**:
+How far extraction has read a session's transcript. The next run sends the whole session again, with the part before the cursor marked as context, and asks only for facts from the turns past it.
+_Avoid_: offset, checkpoint, watermark
+
+**Strike**:
+A failed extraction run that is the session's own fault: too long for the model, a reply still invalid after one retry, a reply cut off or filtered. The cursor stays; after 3 strikes the session is marked failed and never taken again. Any other failure stops the whole run instead, with every cursor where it was.
+_Avoid_: error, retry
+
 **Suggestion**:
 A line that extraction proposes for a repo's CLAUDE.md, kept in a per-repo file for the user to copy by hand. It is never a fact and never recalled.
 _Avoid_: rule (a rule lives in CLAUDE.md), tip, recommendation

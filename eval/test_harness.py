@@ -5,6 +5,7 @@ import os
 import random
 import tempfile
 import unittest
+from datetime import datetime, timezone
 
 import harness
 
@@ -188,6 +189,64 @@ class HarnessTest(unittest.TestCase):
                 dict(event="recall", session="live", prompt_hash="0", injected=[])))
         sessions, _ = harness.load()
         self.assertEqual(harness.live_expansions({s["sid"]: s for s in sessions}), (2, 1))
+
+    def test_extraction_lines(self):
+        home = os.path.dirname(harness.EVAL)
+        repo = os.path.join(home, "repos", "github.com", "x", "app")
+        os.makedirs(os.path.join(repo, "replaced"))
+        os.makedirs(os.path.join(repo, "handoffs"))
+        for rel, text in (("a.md", "---\ndescription: A\n---\n\nnew fact a"), ("b.md", "---\ndescription: B\n---\n\nmerged b"),
+                          ("c.md", "---\ndescription: C\n---\n\nown c"), ("replaced/b.2026-01-02T000000Z.md", "old b"),
+                          ("handoffs/feat.md", "record"),
+                          ("claude-md-suggestions.md", "- Run cargo fmt. (S1, 2026-01-01)\n- Use uv. (S2, 2026-01-03)\n")):
+            with open(os.path.join(repo, rel), "w") as fh:
+                fh.write(text)
+        mem = os.path.join(harness.PROJECTS, "-w-app", "memory")
+        with open(os.path.join(mem, "note.md"), "w") as fh:
+            fh.write("builtin note")
+        os.makedirs(os.path.join(home, "log"))
+        ms = 1767225600000
+        with open(os.path.join(home, "log", "openrecall.jsonl"), "w") as fh:
+            fh.writelines(json.dumps(e) + "\n" for e in (
+                dict(event="extract", off="no extract.toml", at=ms),
+                dict(event="extract", session="S1", **{"from": 0}, to=10, proposed=3, new=1, replaced=1, skipped=0,
+                     dropped={"secret": 1}, normalized=1, suggestions=1, tokens_in=100, tokens_out=20, cost=0.05, at=ms + 1),
+                dict(event="dedupe", session="S1", name="a", action="new", address="github.com/x/app/a", at=ms + 2,
+                     candidates=[dict(address="github.com/x/app/c", score=9), dict(address="builtin/-w-app/note", score=5)]),
+                dict(event="dedupe", session="S1", name="b", action="replace", address="github.com/x/app/b", at=ms + 3,
+                     copy="b.2026-01-02T000000Z.md", candidates=[dict(address="github.com/x/app/b", score=9)]),
+                dict(event="dedupe", session="S1", name="z", action="skip", address="github.com/x/app/c", at=ms + 4, candidates=[]),
+                dict(event="extract", session="S2", strike="context length", strikes=3, failed=True, at=ms + 5),
+                dict(event="extract", session="S3", stop="http 401", at=ms + 6)))
+        asked = []
+
+        def check(fact, candidates, old):
+            asked.append((fact, candidates, old))
+            return dict(repeat=[0.9, 0.1][:len(candidates)], supersede=[0.8, 0.75][:len(candidates)],
+                        kept=0.2 if old is not None else None)
+
+        since = datetime(2026, 1, 2, tzinfo=timezone.utc)
+        text = "\n".join(harness.extraction_lines(since, check))
+        self.assertEqual(asked, [("A\n\nnew fact a", ["C\n\nown c", "builtin note"], None), ("B\n\nmerged b", [], "old b")])
+        for part in ("1 runs over 1 sessions, last success 2026-01-01 00:00 UTC; strikes 1; sessions marked failed 1: S2;",
+                     "last stop: http 401 at", "last start with extraction off: no extract.toml at",
+                     "proposed 3, new 1, replaced 1, skipped 0, dropped 1 (secret 1); names normalized 1; tokens 100 in, 20 out; cost $0.05.",
+                     "2 of 2 written facts checked. Repeats that got through: 1: github.com/x/app/a (github.com/x/app/c).",
+                     "Missed replaces of an own fact: 1: github.com/x/app/a (github.com/x/app/c).",
+                     "out of date: 1: github.com/x/app/a (builtin/-w-app/note).", "Merges that lost old detail: 1 of 1: github.com/x/app/b.",
+                     "Store size: github.com/x/app 3.",
+                     "since the last report (2026-01-02): 1: `repos/github.com/x/app/claude-md-suggestions.md`: Use uv. (S2, 2026-01-03)."):
+            self.assertIn(part, text)
+        harness.extraction_lines(since, check)
+        self.assertEqual(len(asked), 2, "each written fact is asked once")
+
+        fact = os.path.join(repo, "state.md")
+        for expires, kept in (("2026-01-10", False), ("2026-01-05", True)):
+            with open(fact, "w") as fh:
+                fh.write("---\nname: s\nexpires: %s\n---\n\nPR #1 waits.\n" % expires)
+            harness.unexpired(fact, datetime(2026, 1, 5, 12, tzinfo=timezone.utc))
+            with open(fact) as fh:
+                self.assertEqual("expires:" in fh.read(), kept)
 
     @unittest.skipUnless(os.path.exists(harness.BINARY), "needs cargo build --release")
     def test_replay_cases_through_the_binary(self):

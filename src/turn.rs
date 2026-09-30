@@ -130,13 +130,67 @@ pub fn last_turn(transcript: &[u8], last_message: &str) -> Option<Turn> {
             tail.push(line);
             continue;
         };
+        tail.reverse();
+        let mut turn = Turn::new(ask, &tail);
+        let last = last_message.trim();
+        if !last.is_empty()
+            && !turn
+                .events
+                .iter()
+                .any(|e| matches!(e, Event::Text(t) if t.trim() == last))
+        {
+            turn.events.push(Event::Text(last.to_string()));
+        }
+        return Some(turn);
+    }
+    None
+}
+
+/// Every turn of a transcript, oldest first, each with the byte offset just past its last line (ticket 17's cursor).
+pub fn turns(transcript: &[u8]) -> Vec<(Turn, usize)> {
+    let mut out: Vec<(Turn, usize)> = vec![];
+    let mut open: Option<(String, usize)> = None;
+    let mut lines = vec![];
+    let mut at = 0;
+    for raw in transcript.split_inclusive(|&b| b == b'\n') {
+        at += raw.len();
+        let Ok(line) = serde_json::from_slice::<Value>(raw) else {
+            continue;
+        };
+        if line["isSidechain"] == true {
+            continue;
+        }
+        match prompt_of(&line) {
+            Some(ask) => {
+                if let Some((ask, end)) = open.replace((ask, at)) {
+                    out.push((Turn::new(ask, &lines), end));
+                }
+                lines.clear();
+            }
+            None => {
+                if let Some((_, end)) = open.as_mut() {
+                    *end = at;
+                    lines.push(line);
+                }
+            }
+        }
+    }
+    if let Some((ask, end)) = open {
+        out.push((Turn::new(ask, &lines), end));
+    }
+    out
+}
+
+impl Turn {
+    /// A turn from its prompt and the transcript lines after it, in order.
+    fn new(ask: String, lines: &[Value]) -> Turn {
         let mut turn = Turn {
             real: !is_notification(&ask),
             ask,
             events: vec![],
         };
         let mut tools: HashMap<String, (String, Value)> = HashMap::new();
-        for line in tail.iter().rev() {
+        for line in lines {
             let Some(blocks) = line["message"]["content"].as_array() else {
                 continue;
             };
@@ -174,21 +228,9 @@ pub fn last_turn(transcript: &[u8], last_message: &str) -> Option<Turn> {
                 }
             }
         }
-        let last = last_message.trim();
-        if !last.is_empty()
-            && !turn
-                .events
-                .iter()
-                .any(|e| matches!(e, Event::Text(t) if t.trim() == last))
-        {
-            turn.events.push(Event::Text(last.to_string()));
-        }
-        return Some(turn);
+        turn
     }
-    None
-}
 
-impl Turn {
     /// The last text block, or the last two when the last is too short to carry the state.
     pub fn answer(&self) -> String {
         let texts: Vec<&str> = self
@@ -453,5 +495,17 @@ mod tests {
         ]);
         let turn = last_turn(&note, "").unwrap();
         assert!(!turn.real && turn.mine("/w", "/h").aliases.is_empty());
+
+        let all = turns(&data);
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].0.ask, "Build ABC-12 so exports stop failing on empty rows");
+        let first_turn_end = data.split_inclusive(|&b| b == b'\n').take(2).map(<[u8]>::len).sum::<usize>();
+        assert_eq!(all[0].1, first_turn_end);
+        assert_eq!(all[1].1, data.len() - lines(&[data_last_sidechain()]).len(), "a sidechain line ends no turn");
+        assert_eq!(all[1].0.events.len(), 4);
+    }
+
+    fn data_last_sidechain() -> Value {
+        json!({"type": "assistant", "isSidechain": true, "message": {"content": [{"type": "text", "text": "src/side.py"}]}})
     }
 }

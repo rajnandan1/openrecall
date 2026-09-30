@@ -1,3 +1,4 @@
+mod extract;
 mod git;
 mod index;
 mod mcp;
@@ -45,6 +46,8 @@ fn run(args: &[String], started: u128) {
         ["recall"] => recall(started),
         ["capture"] => capture_hook(),
         ["capture", "--job"] => capture_job(),
+        ["extract"] => extract_hook(),
+        ["extract", "--job"] => extract::work(),
         _ => return,
     };
     if let Err(e) = result {
@@ -83,6 +86,10 @@ fn handoff() -> Result<()> {
     s["source"] = json!(source);
     save_session(&sid, &s)?;
     sweep();
+    if source == "resume" {
+        extract::mark_ended(&sid, false)?;
+    }
+    detach(&["extract", "--job"], Stdio::null())?;
     Ok(())
 }
 
@@ -230,7 +237,7 @@ fn recall(started: u128) -> Result<()> {
 }
 
 /// Ticket 15's last steps: search the scope, drop what must not be injected (the ledger, this session's own facts,
-/// a pointer whose path is gone: ticket 09), keep at most 3 lines above the gate within the 400-token budget. Returns the lines with their addresses, and the log detail.
+/// a state fact past its `expires`, a pointer whose path is gone: ticket 09), keep at most 3 lines above the gate within the 400-token budget. Returns the lines with their addresses, and the log detail.
 fn level2(
     query: &str,
     repo: Option<&git::Repo>,
@@ -238,7 +245,13 @@ fn level2(
     s: &Value,
 ) -> Result<(Vec<(String, String)>, Value)> {
     let terms = index::terms(query);
-    let scopes = index::scopes(&home(), &user_home(), repo);
+    let scopes = index::scopes(
+        &home(),
+        &user_home(),
+        repo.map(|r| r.identity.as_str()),
+        repo.and_then(git::Repo::main_checkout),
+    );
+    let today = &record::iso(now_secs())[..10];
     let mut ix = index::Index::open(&home())?;
     ix.sync(&scopes)?;
     let own = |stamp: &str| stamp.split_whitespace().next() == Some(sid);
@@ -249,6 +262,8 @@ fn level2(
             Some("ledger")
         } else if own(&c.source) || own(&c.updated) {
             Some("own")
+        } else if !c.expires.is_empty() && c.expires.as_str() <= today {
+            Some("expired")
         } else if c.kind == "pointer"
             && index::rotted(&c.body, repo.map(|r| r.folder.as_path()), &user_home())
         {
@@ -344,19 +359,31 @@ fn capture_hook() -> Result<()> {
     session_id(&job)?;
     let transcript = job["transcript_path"].as_str().unwrap_or("").to_string();
     job["transcript_len"] = json!(fs::metadata(&transcript).map_or(0, |m| m.len()));
-    let mut child = Command::new(std::env::current_exe()?)
-        .args(["capture", "--job"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .process_group(0)
-        .spawn()?;
-    child
+    detach(&["capture", "--job"], Stdio::piped())?
         .stdin
         .take()
         .ok_or("no stdin")?
         .write_all(job.to_string().as_bytes())?;
     Ok(())
+}
+
+/// SessionEnd: mark the session ended and start the extraction worker, then return (ticket 17).
+fn extract_hook() -> Result<()> {
+    let input = read_input()?;
+    extract::mark_ended(&session_id(&input)?, true)?;
+    detach(&["extract", "--job"], Stdio::null())?;
+    Ok(())
+}
+
+/// A child in its own process group with null output, started through the binary's own path (ticket 18).
+fn detach(args: &[&str], stdin: Stdio) -> Result<std::process::Child> {
+    Ok(Command::new(std::env::current_exe()?)
+        .args(args)
+        .stdin(stdin)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()?)
 }
 
 /// The detached writer: settle bookkeeping for the session, then the turn into its task's record.
@@ -375,6 +402,9 @@ fn capture_job() -> Result<()> {
         return Ok(());
     };
     let repo = git::Repo::find(job["cwd"].as_str().unwrap_or(""));
+    if let Some(repo) = &repo {
+        extract::enqueue(&sid, job["transcript_path"].as_str().unwrap_or(""), repo)?;
+    }
     let branch = repo.as_ref().and_then(|r| r.branch()).unwrap_or_default();
     let mut s = load_session(&sid);
     let last = s["branch"].as_str().map(str::to_string);

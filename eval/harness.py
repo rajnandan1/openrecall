@@ -454,7 +454,8 @@ def replay(binary, sessions, snapshot=()):
         log = os.path.join(env["OPENRECALL_HOME"], "log", "openrecall.jsonl")
         events = read(log) if os.path.exists(log) else []
     finally:
-        shutil.rmtree(tmp)
+        # Each `handoff` starts a detached extraction worker, which finds no extract.toml here and exits.
+        shutil.rmtree(tmp, ignore_errors=True)
     return pushes, timings, events, snaps
 
 
@@ -501,6 +502,121 @@ def rot_of(path, main):
     missing = [p for p in cited if not os.path.exists(
         os.path.join(HOME, p[2:]) if p.startswith("~/") else p if p.startswith("/") else os.path.join(main, p))]
     return None if not missing else "all" if len(missing) == len(cited) else "any"
+
+
+def unexpired(path, at):
+    """The binary drops a state fact whose `expires` is today or earlier; a replayed prompt judges it at its own time,
+    so a fact still live then loses the field in the stand-in world."""
+    with open(path) as fh:
+        text = fh.read()
+    m = re.search(r"^expires: (\d{4}-\d{2}-\d{2})\n", text, re.M)
+    if m and m.group(1) > at.date().isoformat():
+        with open(path, "w") as fh:
+            fh.write(text.replace(m.group(0), "", 1))
+
+
+def address_path(address, orhome):
+    """Ticket 19: the file behind an address."""
+    parts = address.split("/")
+    if parts[0] == "builtin" and len(parts) == 3:
+        return os.path.join(PROJECTS, parts[1], "memory", parts[2] + ".md")
+    if parts[0] == "global":
+        return os.path.join(orhome, "global", parts[1] + ".md")
+    return os.path.join(orhome, "repos", address + ".md")
+
+
+def when(ms):
+    return datetime.fromtimestamp(ms / 1000, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def extraction_lines(since, dedupe_fn=None, yes=0.7):
+    """Tickets 17, 21 and 26 from the live log: extraction health, the facts written, Jev's check of each written fact
+    against its logged candidates (asked once, cached in dedupe.jsonl), store size and the CLAUDE.md suggestions added
+    since the last report. `dedupe_fn(fact, candidates, old)` returns judge.dedupe_check's answer; None asks nothing."""
+    orhome = os.path.dirname(EVAL)
+    log = os.path.join(orhome, "log", "openrecall.jsonl")
+    events = read(log) if os.path.exists(log) else []
+    extract = [e for e in events if e.get("event") == "extract"]
+    runs = [e for e in extract if "to" in e]
+    strikes = [e for e in extract if "strike" in e]
+    stops = [e for e in extract if "stop" in e]
+    off = [e for e in extract if "off" in e]
+    failed = sorted({e["session"] for e in strikes if e.get("failed")})
+    total = Counter()
+    dropped = Counter()
+    for e in runs:
+        total.update({k: e.get(k, 0) for k in ("proposed", "new", "replaced", "skipped", "normalized", "suggestions",
+                                              "tokens_in", "tokens_out")})
+        dropped.update(e.get("dropped") or {})
+    cost = sum(e.get("cost", 0) for e in runs)
+
+    cache_path = os.path.join(EVAL, "dedupe.jsonl")
+    cache = {(r["session"], r["name"], r["at"]): r for r in (read(cache_path) if os.path.exists(cache_path) else [])}
+    written = [e for e in events if e.get("event") == "dedupe" and e.get("action") in ("new", "replace")]
+    fresh = []
+    for e in written:
+        key = (e["session"], e["name"], e["at"])
+        path = address_path(e["address"], orhome)
+        if key in cache or dedupe_fn is None or not os.path.exists(path):
+            continue
+        cands = [c["address"] for c in e.get("candidates", []) if c["address"] != e["address"]
+                 and os.path.exists(address_path(c["address"], orhome))]
+        copy = os.path.join(os.path.dirname(path), "replaced", e.get("copy") or "")
+        old = memory_text(copy) if e["action"] == "replace" and os.path.isfile(copy) else None
+        got = dedupe_fn(memory_text(path), [memory_text(address_path(a, orhome)) for a in cands], old)
+        fresh.append(dict(session=e["session"], name=e["name"], at=e["at"], address=e["address"], action=e["action"],
+                          candidates=cands, **got))
+    if fresh:
+        with open(cache_path, "a") as fh:
+            fh.writelines(json.dumps(r) + "\n" for r in fresh)
+        cache.update({(r["session"], r["name"], r["at"]): r for r in fresh})
+    checked = [cache[k] for k in ((e["session"], e["name"], e["at"]) for e in written) if k in cache]
+    flag = lambda kind, own: ["%s (%s)" % (r["address"], a) for r in checked if r["action"] == "new"
+                              for a, p in zip(r["candidates"], r[kind]) if p >= yes and own(a)]
+    repeats = flag("repeat", lambda a: True)
+    missed = flag("supersede", lambda a: not a.startswith(("builtin/", "global/")))
+    builtin = flag("supersede", lambda a: a.startswith("builtin/"))
+    merges = [r for r in checked if r["action"] == "replace" and r.get("kept") is not None]
+    lost = [r["address"] for r in merges if r["kept"] < 0.5]
+
+    sizes = Counter()
+    repos = os.path.join(orhome, "repos")
+    for f in glob.glob(os.path.join(repos, "**", "*.md"), recursive=True):
+        rel = os.path.relpath(os.path.dirname(f), repos)
+        if os.path.basename(f) != "claude-md-suggestions.md" and not re.search(r"(^|/)(handoffs|replaced)(/|$)", rel):
+            sizes[rel] += 1
+    added = []
+    for f in sorted(glob.glob(os.path.join(repos, "**", "claude-md-suggestions.md"), recursive=True)):
+        with open(f) as fh:
+            for line in fh:
+                m = re.search(r" \([\w-]+, (\d{4}-\d{2}-\d{2})\)$", line.rstrip())
+                if m and (since is None or m.group(1) >= since.date().isoformat()):
+                    added.append("`%s`: %s" % (os.path.relpath(f, orhome), line.rstrip()[2:]))
+    listed = lambda xs: ": " + "; ".join(xs[:10]) + (" …" if len(xs) > 10 else "") if xs else ""
+    return [
+        "", "## Extraction", "",
+        "From the live log, `%s`; nothing here is replayed." % os.path.relpath(log, orhome),
+        "",
+        "- Health: %d runs over %d sessions, last success %s; strikes %d; sessions marked failed %d%s; last stop: %s; "
+        "last start with extraction off: %s." % (
+            len(runs), len({e["session"] for e in runs}), when(max(e["at"] for e in runs)) if runs else "never",
+            len(strikes), len(failed), listed(failed),
+            "%s at %s" % (stops[-1]["stop"], when(stops[-1]["at"])) if stops else "none",
+            "%s at %s" % (off[-1]["off"], when(off[-1]["at"])) if off else "none"),
+        "- Facts: proposed %d, new %d, replaced %d, skipped %d, dropped %d (%s); names normalized %d; tokens %d in, %d "
+        "out; cost $%.2f." % (total["proposed"], total["new"], total["replaced"], total["skipped"], sum(dropped.values()),
+                             ", ".join("%s %d" % kv for kv in sorted(dropped.items())) or "none", total["normalized"],
+                             total["tokens_in"], total["tokens_out"], cost),
+        "- Dedupe check (ticket 26; Jev, yes at %.1f or more): %d of %d written facts checked. Repeats that got "
+        "through: %d%s. Missed replaces of an own fact: %d%s. New facts that make a built-in file out of date: %d%s. "
+        "Merges that lost old detail: %d of %d%s. Whether a merge kept the new fact's detail is not checked: the "
+        "proposed text is never stored." % (yes, len(checked), len(written), len(repeats), listed(repeats), len(missed),
+                                            listed(missed), len(builtin), listed(builtin), len(lost), len(merges),
+                                            listed(lost)),
+        "- Store size: %s." % (", ".join("%s %d" % kv for kv in sorted(sizes.items())) or "no OpenRecall facts yet"),
+        "- CLAUDE.md suggestions added since the last report%s: %d%s." % (
+            " (%s)" % since.strftime("%Y-%m-%d") if since else "", len(added), listed(added)),
+    ]
 
 
 def mains_of(cases):
@@ -552,7 +668,8 @@ def replay_cases(binary, cases, mains):
                     d = fact_date(f)
                     if d and d < at:
                         os.makedirs(os.path.join(home, ".openrecall", rel), exist_ok=True)
-                        shutil.copy2(f, os.path.join(home, ".openrecall", rel))
+                        copy = shutil.copy2(f, os.path.join(home, ".openrecall", rel))
+                        unexpired(copy, at)
                         memories[prefix + os.path.basename(f)[:-3]] = f
             env = dict(HOME=home, OPENRECALL_HOME=os.path.join(home, ".openrecall"), CLAUDE_CODE_ENTRYPOINT="cli",
                        CLAUDE_PROJECT_DIR=folder, PATH="/usr/bin:/bin")
@@ -907,10 +1024,13 @@ def rate(k, n):
     return "%.0f%% (%d/%d, %.0f–%.0f%%)" % (100.0 * k / n, k, n, max(0.0, 100 * lo), 100 * hi) if n else "n/a"
 
 
-def report(now=None, binary=BINARY, label_fn=None, gate=None):
+def report(now=None, binary=BINARY, label_fn=None, gate=None, dedupe_fn=None):
     """`label_fn(case, candidates, memories, earlier_prompts)` returns label rows (judge.label_case); None labels
-    nothing new. `gate` is the score the binary injects at, printed beside its results."""
+    nothing new. `gate` is the score the binary injects at, printed beside its results. `dedupe_fn` checks written
+    facts (judge.dedupe_check); None checks nothing new."""
     now = now or datetime.now(timezone.utc)
+    earlier = sorted(d for d in glob.glob(os.path.join(EVAL, "runs", "*")) if os.path.isdir(d))
+    since = datetime.strptime(os.path.basename(earlier[-1]), "%Y-%m-%dT%H%M%SZ").replace(tzinfo=timezone.utc) if earlier else None
     cases = read(os.path.join(EVAL, "cases.jsonl"))
     rows = read(os.path.join(EVAL, "pairs.jsonl"))
     sessions, recalled = load()
@@ -1028,6 +1148,7 @@ def report(now=None, binary=BINARY, label_fn=None, gate=None):
         ]
         labels = label_candidates(cases, results, by_sid, label_fn)
         lines += level2_lines(cases, results, labels, by_sid, gate)[0]
+    lines += extraction_lines(since, dedupe_fn)
     lines += [
         "",
         "## Flags",
@@ -1057,6 +1178,7 @@ if __name__ == "__main__":
         freeze()
     elif cmd == "report" and rest[:1] in ([], ["--binary"]) and len(rest) in (0, 2):
         import judge
-        report(binary=os.path.abspath(rest[1]) if rest else BINARY, label_fn=judge.label_case, gate=binary_gate())
+        report(binary=os.path.abspath(rest[1]) if rest else BINARY, label_fn=judge.label_case, gate=binary_gate(),
+               dedupe_fn=judge.dedupe_check)
     else:
         sys.exit(__doc__)

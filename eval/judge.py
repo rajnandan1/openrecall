@@ -79,6 +79,27 @@ def label_case(case, candidates, memories, earlier):
                  note=got[k][1]) for k, c in keys.items() if k in got]
 
 
+def dedupe_check(fact, candidates, old=None):
+    """Ticket 26's questions for one written fact, one call: per candidate, does it already state the fact (repeat)
+    and does the fact make it out of date (supersede); for a replace, does the merged fact keep the old copy's detail."""
+    keys = ["c%d" % i for i in range(len(candidates))]
+    state = dict(fact=fact[:MEMORY_CHARS], candidates={k: t[:MEMORY_CHARS] for k, t in zip(keys, candidates)})
+    questions = {}
+    for k in keys:
+        questions["repeat_" + k] = dict(type="noul", instructions="Does `candidates.%s` already state what `fact` says, "
+                                        "so a reader of it would learn nothing new from `fact`?" % k)
+        questions["supersede_" + k] = dict(type="noul", instructions="Is `candidates.%s` about the same thing as `fact`, "
+                                           "and does `fact` make it wrong or out of date?" % k)
+    if old is not None:
+        state["old"] = old[:MEMORY_CHARS]
+        questions["kept"] = dict(type="noul", instructions="`fact` replaced `old`. Does `fact` keep every detail of `old` "
+                                                           "that is still true?")
+    answers = ask(state, questions) if questions else {}
+    p = lambda k: answers.get(k, {}).get("noul", 0.0)
+    return dict(repeat=[p("repeat_" + k) for k in keys], supersede=[p("supersede_" + k) for k in keys],
+                kept=p("kept") if old is not None else None)
+
+
 def openviking_block(session, at):
     """The digest lines OpenViking injected after the prompt at `at`, from the transcript."""
     for path in glob.glob(os.path.join(harness.PROJECTS, "*", session + ".jsonl")):

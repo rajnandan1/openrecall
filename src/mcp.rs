@@ -6,11 +6,8 @@ use serde_json::{Value, json};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-const KINDS: [&str; 5] = ["decision", "preference", "pointer", "state", "gotcha"];
-const NAME_CHARS: usize = 64;
 const DEFAULT_K: usize = 5;
 const MAX_K: usize = 20;
-const EXPIRES_SECS: u64 = 14 * 86400;
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct RecallParams {
@@ -69,7 +66,12 @@ impl Server {
             return Ok(format!("{}\n\n{text}", path.display()));
         }
         let repo = git::Repo::find(&self.cwd);
-        let scopes = index::scopes(&self.home, &self.user_home, repo.as_ref());
+        let scopes = index::scopes(
+            &self.home,
+            &self.user_home,
+            repo.as_ref().map(|r| r.identity.as_str()),
+            repo.as_ref().and_then(git::Repo::main_checkout),
+        );
         let mut ix = index::Index::open(&self.home).map_err(|e| e.to_string())?;
         ix.sync(&scopes).map_err(|e| e.to_string())?;
         let k = p.k.unwrap_or(DEFAULT_K).clamp(1, MAX_K);
@@ -91,8 +93,8 @@ impl Server {
         description = "Store one fact for later sessions, as a Markdown memory file. Use it when the user says \"remember this\". A text that holds a secret is refused."
     )]
     fn remember(&self, Parameters(p): Parameters<RememberParams>) -> Result<String, String> {
-        if !KINDS.contains(&p.kind.as_str()) {
-            return Err(format!("type must be one of {}", KINDS.join(", ")));
+        if !index::KINDS.contains(&p.kind.as_str()) {
+            return Err(format!("type must be one of {}", index::KINDS.join(", ")));
         }
         let text = p.text.trim();
         if text.is_empty() {
@@ -114,34 +116,30 @@ impl Server {
                 "not stored: the text holds a secret (gitleaks rule {rule}); rotate it"
             ));
         }
-        let base = name_of(
-            p.name
-                .as_deref()
-                .filter(|n| !n.trim().is_empty())
-                .unwrap_or(text),
+        let stem = index::free_stem(
+            &dir,
+            &index::name_of(
+                p.name
+                    .as_deref()
+                    .filter(|n| !n.trim().is_empty())
+                    .unwrap_or(text),
+            ),
         );
-        let mut stem = base.clone();
-        let mut n = 1;
-        while dir.join(format!("{stem}.md")).exists() {
-            n += 1;
-            stem = format!("{base}-{n}");
-        }
         let now = crate::now_ms();
-        let expires = if p.kind == "state" {
-            format!(
-                "expires: {}\n",
-                &record::iso((now / 1000) as u64 + EXPIRES_SECS)[..10]
-            )
-        } else {
-            String::new()
-        };
-        let file = format!(
-            "---\nname: {stem}\ndescription: {}\nmetadata:\n  type: {}\nscope: {scope}\nsource: {} {}\n{expires}---\n\n{text}\n",
-            description_of(text),
-            p.kind,
-            self.session,
-            record::iso_ms(now)
-        );
+        let file = index::render(&index::Memory {
+            name: stem.clone(),
+            description: description_of(text),
+            expires: if p.kind == "state" {
+                index::expires_from((now / 1000) as u64)
+            } else {
+                String::new()
+            },
+            kind: p.kind,
+            scope: scope.clone(),
+            source: format!("{} {}", self.session, record::iso_ms(now)),
+            updated: String::new(),
+            body: text.to_string(),
+        });
         let path = dir.join(format!("{stem}.md"));
         crate::write_atomic(&path, &file).map_err(|e| e.to_string())?;
         let address = format!("{scope}/{stem}");
@@ -282,31 +280,6 @@ fn replaced_copies(path: &Path, stem: &str) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Ticket 21's name rule: lowercase, each run of other characters becomes `-`, trimmed, cut at 64 characters.
-fn name_of(text: &str) -> String {
-    let mut out = String::new();
-    let mut n = 0;
-    for c in text.chars().flat_map(char::to_lowercase) {
-        if c.is_alphanumeric() {
-            out.push(c);
-        } else if !out.is_empty() && !out.ends_with('-') {
-            out.push('-');
-        } else {
-            continue;
-        }
-        n += 1;
-        if n >= NAME_CHARS {
-            break;
-        }
-    }
-    let out = out.trim_end_matches('-');
-    if out.is_empty() {
-        "memory".into()
-    } else {
-        out.into()
-    }
-}
-
 /// The first line, single-spaced and cut to the injection line's 200 characters.
 fn description_of(text: &str) -> String {
     let first: Vec<&str> = text
@@ -387,13 +360,7 @@ mod tests {
     }
 
     #[test]
-    fn names_and_descriptions() {
-        assert_eq!(
-            name_of("  The Asana slug: hard-coded (ABC-1234)! "),
-            "the-asana-slug-hard-coded-abc-1234"
-        );
-        assert_eq!(name_of("!!!"), "memory");
-        assert_eq!(name_of(&"ab ".repeat(40)).chars().count(), 64);
+    fn descriptions() {
         assert_eq!(description_of("first  line\nsecond"), "first line");
         assert_eq!(description_of(&"x".repeat(300)).chars().count(), 200);
     }

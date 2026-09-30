@@ -37,6 +37,20 @@
           }
         ]
       }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "openrecall",
+            "args": [
+              "extract"
+            ],
+            "timeout": 5
+          }
+        ]
+      }
     ]
   }
 }

@@ -1,9 +1,9 @@
 use serde_json::{Value, json};
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 // macOS sets close-on-exec on a new pipe in a second step, so a parallel test's spawn can inherit it.
@@ -595,4 +595,191 @@ fn mcp_tools_remember_recall_and_forget() {
         assert!(log.contains(event), "{event}\n{log}");
     }
     assert!(!log.contains(&token));
+}
+
+/// A stand-in for an OpenAI-compatible provider on localhost: answers each request with the next canned reply and
+/// keeps each request's headers and body.
+struct Provider {
+    port: u16,
+    seen: Arc<Mutex<Vec<(String, Value)>>>,
+}
+
+impl Provider {
+    fn start(replies: Vec<(u16, Value)>) -> Provider {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(Mutex::new(vec![]));
+        let kept = seen.clone();
+        std::thread::spawn(move || {
+            for (status, reply) in replies {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let (mut head, mut len) = (String::new(), 0);
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                    let low = line.to_ascii_lowercase();
+                    if let Some(n) = low.strip_prefix("content-length:") {
+                        len = n.trim().parse().unwrap();
+                    }
+                    if low.starts_with("expect: 100-continue") {
+                        stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").unwrap();
+                    }
+                    head += &line;
+                }
+                let mut body = vec![0; len];
+                reader.read_exact(&mut body).unwrap();
+                kept.lock().unwrap().push((head, serde_json::from_slice(&body).unwrap()));
+                let text = reply.to_string();
+                write!(stream, "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}", text.len()).unwrap();
+            }
+        });
+        Provider { port, seen }
+    }
+
+    fn requests(&self) -> Vec<(String, Value)> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+fn answer(content: Value) -> (u16, Value) {
+    (
+        200,
+        json!({"choices": [{"finish_reason": "stop", "message": {"content": content.to_string()}}],
+               "usage": {"prompt_tokens": 1000, "completion_tokens": 200, "completion_tokens_details": {"reasoning_tokens": 50}, "cost": 0.01}}),
+    )
+}
+
+fn wait_for(path: &Path, needle: &str) -> String {
+    let started = Instant::now();
+    loop {
+        let text = fs::read_to_string(path).unwrap_or_default();
+        if text.contains(needle) {
+            return text;
+        }
+        assert!(started.elapsed() < Duration::from_secs(20), "no {needle} in {text}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn extraction_writes_dedupes_and_moves_the_cursor() {
+    let w = World::new("extract");
+    w.branch("feat/x");
+    let home = w.home.join(".openrecall");
+    let repo = home.join("repos/github.com/someone/app");
+    let log = home.join("log/openrecall.jsonl");
+    w.memory(&repo, "export-empty-rows", "gotcha", "source: E0 2026-01-01T00:00:00.000Z\n", "Exports fail on empty rows", "Exports fail on empty rows in src/export.py.");
+    w.memory(&repo, "cargo-fmt-rule", "preference", "source: E0 2026-01-01T00:00:00.000Z\n", "Run cargo fmt", "Run cargo fmt before pushing.");
+    let fmt_rule = fs::read_to_string(repo.join("cargo-fmt-rule.md")).unwrap();
+    let token = format!("ghp_{}", "Zq8Xw3Kp9Lm2Nv7Bc4Rt6Yh1Jd5Fg0Sa3Ew8");
+    let facts = json!({"facts": [
+        {"type": "gotcha", "name": "Export Empty Rows", "description": "Exports fail on empty rows unless src/export.py skips them",
+         "body": "src/export.py now skips empty rows before writing; exports failed on them."},
+        {"type": "state", "name": "pr-345-review", "description": "PR #345 waits for review", "body": "PR #345 for ABC-12 is open and waits for review."},
+        {"type": "decision", "name": "leaky", "description": "The CI token", "body": format!("CI pushes with {token}.")},
+        {"type": "chat", "name": "x", "description": "d", "body": "b"},
+        {"type": "preference", "name": "fmt-before-commit", "description": "Run cargo fmt before each commit", "body": "The user wants cargo fmt run before each commit."}],
+        "claude_md_rules": ["Always run cargo fmt before committing."]});
+    let merged = json!({"decisions": [
+        {"fact": 0, "action": "replace", "address": "github.com/someone/app/export-empty-rows",
+         "description": "Exports fail on empty rows unless src/export.py skips them",
+         "body": "Exports failed on empty rows. src/export.py now skips empty rows before writing."},
+        {"fact": 1, "action": "new", "address": "", "description": "", "body": ""},
+        {"fact": 2, "action": "replace", "address": "github.com/someone/app/cargo-fmt-rule",
+         "description": "Run cargo fmt before each commit", "body": format!("Run cargo fmt before each commit; CI pushes with {token}.")}]});
+    let p = Provider::start(vec![
+        answer(facts),
+        answer(merged),
+        answer(json!({"facts": [], "claude_md_rules": []})),
+        (400, json!({"error": {"code": 400, "message": "too long", "metadata": {"error_type": "context_length_exceeded"}}})),
+    ]);
+    fs::write(home.join("extract.toml"), format!("base_url = \"http://127.0.0.1:{}/v1/\"\nmodel = \"test/model\"\n", p.port)).unwrap();
+    let key = home.join("api-key");
+    fs::write(&key, "sk-test-123\n").unwrap();
+
+    let edit = json!({"type": "tool_use", "id": "t1", "name": "Edit", "input": {"file_path": w.folder.join("src/export.py")}});
+    w.turn("S1", &[user(&format!("Build ABC-12 so exports stop failing on empty rows; CI uses {token}")), said("Fixed src/export.py; PR #345 is open.", Some(edit))], "");
+    let entry = home.join("extract/S1.json");
+    assert!(entry.exists(), "capture queues the session");
+
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&key, fs::Permissions::from_mode(0o644)).unwrap();
+    w.run(&["extract", "--job"], "");
+    assert!(fs::read_to_string(&log).unwrap().contains("\"off\":\"api-key is readable by group or others: chmod 600 it\""));
+    fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).unwrap();
+    w.run(&["extract", "--job"], "");
+    assert!(p.requests().is_empty(), "a live session is left alone until it ends or goes quiet");
+
+    w.hook(&["extract"], "S1", json!({"hook_event_name": "SessionEnd"}));
+    let text = wait_for(&log, "\"event\":\"extract\",\"from\":0");
+    let reqs = p.requests();
+    assert_eq!(reqs.len(), 2);
+    assert!(reqs[0].0.starts_with("POST /v1/chat/completions ") && reqs[0].0.contains("Authorization: Bearer sk-test-123\r\n"));
+    let body = &reqs[0].1;
+    assert_eq!((body["model"].as_str(), body["response_format"]["json_schema"]["strict"].as_bool()), (Some("test/model"), Some(true)));
+    let input = body["messages"][1]["content"].as_str().unwrap();
+    assert!(input.starts_with("Repository: github.com/someone/app\nSession date: 20") && input.contains("\n\nTranscript:\n[user] Build ABC-12"), "{input}");
+    assert!(input.contains("[REDACTED:github-pat]") && !input.contains(&token) && input.contains("[tool] Edit ") && !input.contains("NEW TURNS"));
+    let dedupe = reqs[1].1["messages"][1]["content"].as_str().unwrap();
+    assert!(dedupe.contains("\n\ngithub.com/someone/app/export-empty-rows [gotcha] 2026-01-01\nExports fail on empty rows\n"), "{dedupe}");
+    assert!(dedupe.contains("\n\nFact 0 [gotcha] export-empty-rows\n") && dedupe.contains("Looks like: github.com/someone/app/export-empty-rows"), "{dedupe}");
+
+    let fact = fs::read_to_string(repo.join("export-empty-rows.md")).unwrap();
+    assert!(fact.contains("\nsource: E0 2026-01-01T00:00:00.000Z\nupdated: S1 20") && fact.ends_with("src/export.py now skips empty rows before writing.\n"), "{fact}");
+    let copies: Vec<PathBuf> = fs::read_dir(repo.join("replaced")).unwrap().map(|e| e.unwrap().path()).collect();
+    assert_eq!(copies.len(), 1);
+    assert!(fs::read_to_string(&copies[0]).unwrap().contains("Exports fail on empty rows in src/export.py."));
+    let state = fs::read_to_string(repo.join("pr-345-review.md")).unwrap();
+    assert!(state.contains("\nscope: github.com/someone/app\nsource: S1 20") && state.contains("\nexpires: 20"), "{state}");
+    assert!(!repo.join("leaky.md").exists() && !repo.join("export-empty-rows-2.md").exists());
+    assert_eq!(fs::read_to_string(repo.join("cargo-fmt-rule.md")).unwrap(), fmt_rule, "a merge holding a key leaves the old fact as it was");
+    assert!(!repo.join("fmt-before-commit.md").exists());
+    let suggestions = fs::read_to_string(repo.join("claude-md-suggestions.md")).unwrap();
+    assert!(suggestions.starts_with("- Always run cargo fmt before committing. (S1, 20") && suggestions.lines().count() == 1);
+    for event in [
+        "\"dropped\":{\"secret\":2,\"type\":1}",
+        "\"action\":\"dropped\",\"address\":\"github.com/someone/app/cargo-fmt-rule\"",
+        "\"secret_rules\":[\"github-pat\",\"github-pat\"]",
+        "\"normalized\":1",
+        "\"cost\":0.02",
+        "\"action\":\"replace\",\"address\":\"github.com/someone/app/export-empty-rows\"",
+        "\"action\":\"new\",\"address\":\"github.com/someone/app/pr-345-review\"",
+        "\"rule\":\"github-pat\",\"section\":\"extract\"",
+    ] {
+        assert!(text.contains(event), "{event}\n{text}");
+    }
+    assert!(!text.contains(&token) && !text.contains("skips empty rows"), "the log holds no text");
+    let transcript = w.root.join("S1.jsonl");
+    let queued: Value = serde_json::from_str(&fs::read_to_string(&entry).unwrap()).unwrap();
+    assert_eq!((queued["cursor"].as_u64(), queued["ended"].as_bool()), (Some(fs::metadata(&transcript).unwrap().len()), Some(true)));
+
+    w.run(&["extract", "--job"], "");
+    assert_eq!(p.requests().len(), 2, "nothing new past the cursor, no call");
+    w.hook(&["handoff"], "S1", json!({"source": "resume"}));
+    w.turn("S1", &[user("also document the export fix in the README"), said("Documented.", None)], "");
+    w.hook(&["extract"], "S1", json!({}));
+    let text = wait_for(&log, &format!("\"to\":{},\"tokens_in\"", fs::metadata(&transcript).unwrap().len()));
+    let resumed = p.requests()[2].1["messages"][1]["content"].as_str().unwrap().to_string();
+    assert!(resumed.contains("was already extracted in an earlier run") && resumed.contains("=== NEW TURNS ===\n[user] also document"), "{resumed}");
+    assert!(resumed.find("[user] Build ABC-12").unwrap() < resumed.find("\n=== NEW TURNS ===\n").unwrap());
+    assert_eq!(p.requests().len(), 3, "no candidates, no dedupe call: {text}");
+
+    w.turn("S3", &[user("A session far too long for the model's context window"), said("ok", None)], "");
+    w.hook(&["extract"], "S3", json!({}));
+    wait_for(&log, "\"strike\":\"context length\",\"strikes\":1");
+    let queued: Value = serde_json::from_str(&fs::read_to_string(home.join("extract/S3.json")).unwrap()).unwrap();
+    assert_eq!((queued["cursor"].as_u64(), queued["failed"].as_bool()), (Some(0), Some(false)));
+
+    let mut past = fs::read_to_string(repo.join("pr-345-review.md")).unwrap();
+    let at = past.find("\nexpires: ").unwrap() + 10;
+    past.replace_range(at..at + 10, "2020-01-01");
+    fs::write(repo.join("pr-345-review.md"), past).unwrap();
+    w.hook(&["recall"], "S2", json!({"prompt": "what is the state of the PR #345 review for ABC-12"}));
+    assert!(fs::read_to_string(&log).unwrap().lines().last().unwrap().contains("\"expired\":1"), "an expired state fact is never injected");
 }

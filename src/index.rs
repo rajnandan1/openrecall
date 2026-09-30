@@ -1,4 +1,4 @@
-use crate::{git, record, turn};
+use crate::{record, turn};
 use regex::Regex;
 use rusqlite::{Connection, params};
 use std::collections::HashMap;
@@ -23,6 +23,11 @@ const TERMS: usize = 40;
 const BODY_BYTES: usize = 4096;
 /// bm25 weights for name, description, body and identifiers (ticket 06).
 const WEIGHTS: &str = "2.0, 2.0, 1.0, 4.0";
+/// Bumped when the cache's tables change; an older `index.db` is rebuilt.
+const SCHEMA: i64 = 1;
+pub const KINDS: [&str; 5] = ["decision", "preference", "pointer", "state", "gotcha"];
+const NAME_CHARS: usize = 64;
+const EXPIRES_SECS: u64 = 14 * 86400;
 
 static URL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"https?://\S+").unwrap());
 static BACKTICK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`([^`\s]{3,})`").unwrap());
@@ -43,20 +48,21 @@ pub struct Candidate {
     pub date: String,
     pub source: String,
     pub updated: String,
+    pub expires: String,
     pub description: String,
     pub body: String,
 }
 
 /// Ticket 11: the repo's facts, the repo's built-in topic files (read-only) and the global memories.
-pub fn scopes(home: &Path, user_home: &Path, repo: Option<&git::Repo>) -> Vec<Scope> {
+pub fn scopes(home: &Path, user_home: &Path, identity: Option<&str>, main: Option<PathBuf>) -> Vec<Scope> {
     let mut out = vec![];
-    if let Some(r) = repo {
+    if let Some(identity) = identity {
         out.push(Scope {
-            dir: home.join("repos").join(&r.identity),
-            prefix: format!("{}/", r.identity),
+            dir: home.join("repos").join(identity),
+            prefix: format!("{identity}/"),
             builtin: false,
         });
-        if let Some(main) = r.main_checkout() {
+        if let Some(main) = main {
             let slug = slug(&main);
             out.push(Scope {
                 dir: user_home
@@ -85,18 +91,21 @@ pub fn slug(path: &Path) -> String {
         .collect()
 }
 
+/// A memory file: Claude Code's frontmatter (`name`, `description`, `metadata.type`) plus OpenRecall's flat fields.
 #[derive(Default)]
-struct Memory {
-    name: String,
-    description: String,
-    kind: String,
-    source: String,
-    updated: String,
-    body: String,
+pub struct Memory {
+    pub name: String,
+    pub description: String,
+    pub kind: String,
+    pub scope: String,
+    pub source: String,
+    pub updated: String,
+    pub expires: String,
+    pub body: String,
 }
 
 /// Flat frontmatter by hand: `key: value` lines, with `type` also read from under `metadata:`.
-fn parse(text: &str) -> Memory {
+pub fn parse(text: &str) -> Memory {
     let mut m = Memory::default();
     let Some((front, body)) = text
         .strip_prefix("---\n")
@@ -114,13 +123,74 @@ fn parse(text: &str) -> Memory {
             "name" => m.name = value,
             "description" => m.description = value,
             "type" => m.kind = value,
+            "scope" => m.scope = value,
             "source" => m.source = value,
             "updated" => m.updated = value,
+            "expires" => m.expires = value,
             _ => {}
         }
     }
     m.body = body.trim().to_string();
     m
+}
+
+/// The one writer of a fact file's text: `remember` and extraction both go through it (tickets 21 and 26).
+pub fn render(m: &Memory) -> String {
+    let mut s = format!(
+        "---\nname: {}\ndescription: {}\nmetadata:\n  type: {}\nscope: {}\nsource: {}\n",
+        m.name,
+        squash(&m.description),
+        m.kind,
+        m.scope,
+        m.source
+    );
+    for (key, value) in [("updated", &m.updated), ("expires", &m.expires)] {
+        if !value.is_empty() {
+            s += &format!("{key}: {value}\n");
+        }
+    }
+    s + &format!("---\n\n{}\n", m.body.trim())
+}
+
+/// Ticket 21's name rule: lowercase, each run of other characters becomes `-`, trimmed, cut at 64 characters.
+pub fn name_of(text: &str) -> String {
+    let mut out = String::new();
+    let mut n = 0;
+    for c in text.chars().flat_map(char::to_lowercase) {
+        if c.is_alphanumeric() {
+            out.push(c);
+        } else if !out.is_empty() && !out.ends_with('-') {
+            out.push('-');
+        } else {
+            continue;
+        }
+        n += 1;
+        if n >= NAME_CHARS {
+            break;
+        }
+    }
+    let out = out.trim_end_matches('-');
+    if out.is_empty() {
+        "memory".into()
+    } else {
+        out.into()
+    }
+}
+
+/// Ticket 26: a name already taken on disk gets `-2`, `-3`.
+pub fn free_stem(dir: &Path, base: &str) -> String {
+    let mut stem = base.to_string();
+    let mut n = 1;
+    while dir.join(format!("{stem}.md")).exists() {
+        n += 1;
+        stem = format!("{base}-{n}");
+    }
+    stem
+}
+
+/// A state fact's `expires`: 14 days after it was written or replaced, as YYYY-MM-DD (ticket 21).
+pub fn expires_from(secs: u64) -> String {
+    record::iso(secs + EXPIRES_SECS)[..10].to_string()
 }
 
 /// The date in `<session id> <date>`, as YYYY-MM-DD.
@@ -138,14 +208,19 @@ impl Index {
         let _ = fs::create_dir_all(home);
         let conn = Connection::open(home.join("index.db"))?;
         conn.busy_timeout(std::time::Duration::from_millis(200))?;
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version < SCHEMA {
+            conn.execute_batch("DROP TABLE IF EXISTS files; DROP TABLE IF EXISTS ft;")?;
+        }
         conn.execute_batch(
             "PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;
              CREATE TABLE IF NOT EXISTS files (id INTEGER PRIMARY KEY, path TEXT UNIQUE, dir TEXT, mtime INTEGER,
-                 size INTEGER, address TEXT, kind TEXT, date TEXT, source TEXT, updated TEXT, hash TEXT);
+                 size INTEGER, address TEXT, kind TEXT, date TEXT, source TEXT, updated TEXT, expires TEXT, hash TEXT);
              CREATE INDEX IF NOT EXISTS files_dir ON files(dir);
              CREATE VIRTUAL TABLE IF NOT EXISTS ft USING fts5(name, description, body, idents,
                  tokenize = \"unicode61 remove_diacritics 0 tokenchars '-_'\");",
         )?;
+        conn.pragma_update(None, "user_version", SCHEMA)?;
         Ok(Index { conn })
     }
 
@@ -179,13 +254,14 @@ impl Index {
                 };
                 let kind = if m.kind.is_empty() { "memory" } else { &m.kind };
                 let id: i64 = tx.query_row(
-                    "INSERT INTO files (path, dir, mtime, size, address, kind, date, source, updated, hash)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                    "INSERT INTO files (path, dir, mtime, size, address, kind, date, source, updated, expires, hash)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
                      ON CONFLICT(path) DO UPDATE SET mtime = excluded.mtime, size = excluded.size,
                          address = excluded.address, kind = excluded.kind, date = excluded.date,
-                         source = excluded.source, updated = excluded.updated, hash = excluded.hash
+                         source = excluded.source, updated = excluded.updated, expires = excluded.expires,
+                         hash = excluded.hash
                      RETURNING id",
-                    params![key, dir, mtime, size, format!("{}{stem}", scope.prefix), kind, date, m.source, m.updated, crate::fnv(&text)],
+                    params![key, dir, mtime, size, format!("{}{stem}", scope.prefix), kind, date, m.source, m.updated, m.expires, crate::fnv(&text)],
                     |r| r.get(0),
                 )?;
                 tx.execute("DELETE FROM ft WHERE rowid = ?1", [id])?;
@@ -226,7 +302,7 @@ impl Index {
                 .map_or(String::new(), |s| s.dir.to_string_lossy().into_owned())
         };
         let sql = format!(
-            "SELECT f.address, m.score, f.hash, f.kind, f.date, f.source, f.updated, m.description, m.body
+            "SELECT f.address, m.score, f.hash, f.kind, f.date, f.source, f.updated, f.expires, m.description, m.body
              FROM (SELECT rowid AS id, -bm25(ft, {WEIGHTS}) / ?6 AS score, description, body FROM ft WHERE ft MATCH ?1) m
              JOIN files f ON f.id = m.id
              WHERE f.dir IN (?2, ?3, ?4)
@@ -245,8 +321,9 @@ impl Index {
                         date: r.get(4)?,
                         source: r.get(5)?,
                         updated: r.get(6)?,
-                        description: r.get(7)?,
-                        body: r.get(8)?,
+                        expires: r.get(7)?,
+                        description: r.get(8)?,
+                        body: r.get(9)?,
                     })
                 },
             )?
@@ -432,6 +509,7 @@ mod tests {
             date: "2026-01-02".into(),
             source: String::new(),
             updated: String::new(),
+            expires: String::new(),
             description: description.into(),
             body: body.into(),
         }
@@ -447,6 +525,34 @@ mod tests {
         assert_eq!(date_of(&m.source).as_deref(), Some("2026-01-02"));
         assert_eq!(parse("no frontmatter").body, "no frontmatter");
         assert_eq!(slug(Path::new("/Users/x/Code/app.v2")), "-Users-x-Code-app-v2");
+        let fact = Memory {
+            name: "pr-345".into(),
+            description: "PR #345\nis merged".into(),
+            kind: "state".into(),
+            scope: "github.com/a/b".into(),
+            source: "S1 2026-01-02T03:04:05.000Z".into(),
+            updated: "S2 2026-01-03T00:00:00.000Z".into(),
+            expires: "2026-01-17".into(),
+            body: "PR #345 is merged.\n".into(),
+        };
+        let text = render(&fact);
+        assert!(text.starts_with("---\nname: pr-345\ndescription: PR #345 is merged\nmetadata:\n  type: state\n"));
+        let back = parse(&text);
+        assert_eq!(
+            (back.scope.as_str(), back.updated.as_str(), back.expires.as_str(), back.body.as_str()),
+            ("github.com/a/b", "S2 2026-01-03T00:00:00.000Z", "2026-01-17", "PR #345 is merged.")
+        );
+    }
+
+    #[test]
+    fn names() {
+        assert_eq!(
+            name_of("  The Asana slug: hard-coded (ABC-1234)! "),
+            "the-asana-slug-hard-coded-abc-1234"
+        );
+        assert_eq!(name_of("!!!"), "memory");
+        assert_eq!(name_of(&"ab ".repeat(40)).chars().count(), 64);
+        assert_eq!(expires_from(0), "1970-01-15");
     }
 
     #[test]
