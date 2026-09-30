@@ -917,7 +917,7 @@ def level2_lines(cases, results, labels, by_sid, gate):
                         ("every cited path missing", gate_metrics(cases, results, labels, pick, "all")))]
     lines += [
         "",
-        "Rot (ticket 09): the binary drops a pointer fact whose path is gone; dropped in this replay: %d. Candidates "
+        "Rot (ticket 09): the binary drops a pointer fact whose path or symbol is gone; dropped in this replay: %d. Candidates "
         "citing a path the main checkout lacks: %d of %d (every cited path missing: %d). Dropping them too, at the "
         "pick: %s." % (dropped["rot"], sum(1 for _, x in cands if x.get("rot")), len(cands),
                        sum(1 for _, x in cands if x.get("rot") == "all"), "; ".join(variants)),

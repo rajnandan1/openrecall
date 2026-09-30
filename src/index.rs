@@ -8,7 +8,7 @@ use std::sync::LazyLock;
 use std::time::UNIX_EPOCH;
 
 /// Inject a memory only at this score or above: the eval's threshold sweep picks it (ticket 16).
-pub const GATE: f64 = 4.3;
+pub const GATE: f64 = 4.0;
 pub const MAX_LINES: usize = 3;
 /// 400 tokens at 2.6 characters a token, the ratio build step 2 measured.
 pub const MAX_CHARS: usize = 1040;
@@ -24,7 +24,7 @@ const BODY_BYTES: usize = 4096;
 /// bm25 weights for name, description, body and identifiers (ticket 06).
 const WEIGHTS: &str = "2.0, 2.0, 1.0, 4.0";
 /// Bumped when the cache's tables change; an older `index.db` is rebuilt.
-const SCHEMA: i64 = 1;
+const SCHEMA: i64 = 2;
 pub const KINDS: [&str; 5] = ["decision", "preference", "pointer", "state", "gotcha"];
 const NAME_CHARS: usize = 64;
 const EXPIRES_SECS: u64 = 14 * 86400;
@@ -32,6 +32,13 @@ const EXPIRES_SECS: u64 = 14 * 86400;
 static URL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"https?://\S+").unwrap());
 static BACKTICK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`([^`\s]{3,})`").unwrap());
 static WORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[\w-]+").unwrap());
+static SYMBOL: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[A-Za-z_]\w*(::[A-Za-z_]\w*)*$").unwrap());
+/// A pointer's symbol is looked up only in these; a config file rarely holds the names a fact mentions beside it.
+const SOURCE: [&str; 22] = [
+    "rs", "py", "ts", "tsx", "js", "jsx", "mjs", "go", "rb", "java", "kt", "swift", "c", "h", "cc",
+    "cpp", "hpp", "cs", "php", "scala", "sh", "sql",
+];
 
 /// One directory the search reads: flat `*.md` files, addressed under `prefix` (ticket 19).
 pub struct Scope {
@@ -218,7 +225,7 @@ impl Index {
                  size INTEGER, address TEXT, kind TEXT, date TEXT, source TEXT, updated TEXT, expires TEXT, hash TEXT);
              CREATE INDEX IF NOT EXISTS files_dir ON files(dir);
              CREATE VIRTUAL TABLE IF NOT EXISTS ft USING fts5(name, description, body, idents,
-                 tokenize = \"unicode61 remove_diacritics 0 tokenchars '-_'\");",
+                 tokenize = \"unicode61 remove_diacritics 0 tokenchars '_'\");",
         )?;
         conn.pragma_update(None, "user_version", SCHEMA)?;
         Ok(Index { conn })
@@ -414,6 +421,11 @@ pub fn terms(query: &str) -> Vec<String> {
         .into_iter()
         .map(|i| i.trim_start_matches('#').to_string())
         .collect();
+    for t in turn::tickets(query) {
+        if !out.contains(&t) {
+            out.push(t);
+        }
+    }
     for w in WORD.find_iter(&URL.replace_all(query, " ")) {
         let w = w.as_str().trim_matches(['-', '_']).to_lowercase();
         if w.chars().count() >= 2 && !out.iter().any(|o| o.eq_ignore_ascii_case(&w)) {
@@ -424,26 +436,54 @@ pub fn terms(query: &str) -> Vec<String> {
     out
 }
 
-/// Ticket 09: a pointer whose cited path no longer exists is never injected.
+/// Ticket 09: a pointer is never injected when a path it cites no longer exists, or when a code-shaped symbol it
+/// names in backticks is in none of the source files it cites.
+// ken: reads each cited source file whole; cap the size if a pointer to a large generated file moves recall p95.
 pub fn rotted(body: &str, folder: Option<&Path>, home: &Path) -> bool {
     let text = URL.replace_all(body, " ");
     let folder_s = folder.map_or(String::new(), |f| f.to_string_lossy().into_owned());
     let home_s = home.to_string_lossy();
-    turn::paths_in(&text)
+    let mut sources = vec![];
+    for p in turn::paths_in(&text)
         .into_iter()
         .filter_map(|p| turn::norm_path(p, &folder_s, &home_s))
-        .any(|p| {
-            let full = if let Some(rest) = p.strip_prefix("~/") {
-                home.join(rest)
-            } else if p.starts_with('/') {
-                PathBuf::from(&p)
-            } else if let Some(f) = folder {
-                f.join(&p)
-            } else {
-                return false;
-            };
-            !full.exists()
-        })
+    {
+        let full = if let Some(rest) = p.strip_prefix("~/") {
+            home.join(rest)
+        } else if p.starts_with('/') {
+            PathBuf::from(&p)
+        } else if let Some(f) = folder {
+            f.join(&p)
+        } else {
+            continue;
+        };
+        if !full.exists() {
+            return true;
+        }
+        if full.extension().is_some_and(|e| SOURCE.iter().any(|s| e == *s))
+            && let Ok(code) = fs::read_to_string(&full)
+        {
+            sources.push(code);
+        }
+    }
+    !sources.is_empty()
+        && BACKTICK
+            .captures_iter(&text)
+            .filter_map(|c| symbol(c.get(1).unwrap().as_str()))
+            .any(|s| !sources.iter().any(|code| code.contains(s)))
+}
+
+/// The name a backticked token looks up, when the token is shaped like code: `snake_case`, `camelCase`, `Type::item`
+/// or `call()`. A plain word such as `curl` is often a command, not a symbol, so it is never checked.
+fn symbol(token: &str) -> Option<&str> {
+    let bare = token.strip_suffix("()").unwrap_or(token);
+    let last = bare.rsplit("::").next()?;
+    let camel = bare
+        .as_bytes()
+        .windows(2)
+        .any(|w| w[0].is_ascii_lowercase() && w[1].is_ascii_uppercase());
+    let code = bare.contains('_') || bare.contains("::") || bare.len() < token.len() || camel;
+    (code && SYMBOL.is_match(bare)).then_some(last)
 }
 
 /// Tickets 19 and 21: `- <type> <date> <address>: <text>`, the body when it fits in 200 characters, else the
@@ -589,11 +629,38 @@ mod tests {
     fn rot() {
         let tmp = std::env::temp_dir().join(format!("openrecall-rot-{}", std::process::id()));
         fs::create_dir_all(tmp.join("src")).unwrap();
-        fs::write(tmp.join("src/a.py"), "").unwrap();
+        fs::write(tmp.join("src/a.py"), "def run_export():\n    Exporter.flush_rows()\n").unwrap();
+        fs::write(tmp.join("src/b.toml"), "base_url = 1\n").unwrap();
         assert!(!rotted("see src/a.py and https://x/y.md", Some(&tmp), &tmp));
         assert!(rotted("see src/gone.py", Some(&tmp), &tmp));
         assert!(!rotted("see src/gone.py", None, &tmp));
         assert!(rotted("see ~/notes/gone.md", None, &tmp));
+        assert!(!rotted("`run_export()` in src/a.py calls `Exporter::flush_rows`", Some(&tmp), &tmp));
+        assert!(rotted("`run_import` lives in src/a.py", Some(&tmp), &tmp));
+        assert!(rotted("`exportAll` lives in src/a.py", Some(&tmp), &tmp));
+        assert!(!rotted("run `curl` and `index.db` beside src/a.py", Some(&tmp), &tmp));
+        assert!(!rotted("`ANTHROPIC_API_KEY` is never in src/b.toml", Some(&tmp), &tmp));
+        assert!(!rotted("`run_import` is named, no file cited", Some(&tmp), &tmp));
+        fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn hyphens_split_in_the_index() {
+        let tmp = std::env::temp_dir().join(format!("openrecall-ix-{}", std::process::id()));
+        fs::create_dir_all(tmp.join("global")).unwrap();
+        let fact = |name: &str, body: &str| {
+            format!("---\nname: {name}\ndescription: d\nmetadata:\n  type: decision\nsource: S 2026-01-02\n---\n\n{body}\n")
+        };
+        fs::write(tmp.join("global/a.md"), fact("export-queue-retry-limits", "Limits live there.")).unwrap();
+        fs::write(tmp.join("global/b.md"), fact("abc-1234-slug-list", "Hard-code the slug.")).unwrap();
+        let scopes = scopes(&tmp, &tmp, None, None);
+        let mut ix = Index::open(&tmp).unwrap();
+        ix.sync(&scopes).unwrap();
+        let top = |q: &str| ix.search(&terms(q), &scopes, 5).unwrap().first().map(|c| c.address.clone());
+        assert_eq!(top("change the export queue limits").as_deref(), Some("global/a"));
+        assert_eq!(top("https://tracker.example/issue/ABC-1234/slug").as_deref(), Some("global/b"));
+        assert_eq!(top("queue-retry-limits").as_deref(), Some("global/a"));
+        assert_eq!(top("limits-queue"), None);
         fs::remove_dir_all(tmp).unwrap();
     }
 }

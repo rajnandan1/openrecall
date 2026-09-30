@@ -19,7 +19,7 @@ A fact that says where something lives: a repo-relative path plus a symbol name,
 _Avoid_: reference, citation, location
 
 **Rot**:
-The state of a pointer whose path or symbol no longer exists in the repo. A rotted pointer is never injected.
+The state of a pointer whose cited path no longer exists, or whose code symbol none of its cited source files still contains. A rotted pointer is never injected.
 _Avoid_: stale, broken link, drift
 
 **State**:
