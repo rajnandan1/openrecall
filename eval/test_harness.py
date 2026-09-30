@@ -84,6 +84,14 @@ class HarnessTest(unittest.TestCase):
         with open(os.path.join(harness.EVAL, "appendix-a.jsonl"), "w") as fh:
             fh.write(json.dumps(dict(id="A00", session="headless", at="2026-01-05T11:00:00Z")) + "\n")
 
+    def report(self, binary):
+        harness.report(binary=binary)
+        [path] = glob.glob(os.path.join(harness.EVAL, "runs", "*", "report.md"))
+        with open(path) as fh:
+            text = fh.read()
+        os.remove(path)
+        return text
+
     def test_freeze_then_report(self):
         harness.freeze()
         cases = harness.read(os.path.join(harness.EVAL, "cases.jsonl"))
@@ -98,14 +106,23 @@ class HarnessTest(unittest.TestCase):
         harness.freeze()
         self.assertEqual(harness.read(os.path.join(harness.EVAL, "cases.jsonl")), cases)
         self.assertEqual(harness.read(os.path.join(harness.EVAL, "pairs.jsonl")), pairs)
-        harness.report()
-        [path] = glob.glob(os.path.join(harness.EVAL, "runs", "*", "report.md"))
-        with open(path) as fh:
-            report = fh.read()
-        for row in ("| tickets | 100% (1/1,", "| PR numbers | 100% (1/1,", "| commits | 0% (0/1,", "| paths | 0% (0/1,",
-                    "| all | 50% (2/4, 15–85%) | 25% (1/4,", "| branch | 1 | 50% (2/4,",
+        report = self.report("/nonexistent/openrecall")
+        for row in ("| tickets | not replayed | 100% (1/1,", "| PR numbers | not replayed | 100% (1/1,",
+                    "| commits | not replayed | 0% (0/1,", "| paths | not replayed | 0% (0/1,",
+                    "| all | not replayed | 50% (2/4, 15–85%) | not replayed | 25% (1/4,", "| branch | 1 | not replayed | 50% (2/4,",
                     "`relevant_memories` attachment: 1: headless.", "lower bound is 40% (2/5, 12–77%)",
                     "Largest of 1 `MEMORY.md` files: %d bytes, 2 lines." % len(INDEX)):
+            self.assertIn(row, report)
+
+    @unittest.skipUnless(os.path.exists(harness.BINARY), "needs cargo build --release")
+    def test_replay_through_the_binary(self):
+        harness.freeze()
+        report = self.report(harness.BINARY)
+        for row in ("| all | 100% (4/4, 51–100%) | 50% (2/4, 15–85%) | 100% (4/4,", "| branch | 1 | 100% (4/4,",
+                    "read when the new session started (the writer alone, before the push rule): 100% (4/4,",
+                    "first push at prompt 1: 0, 2: 1, 3: 0.", "3 pushes in 3 sessions of 4", "Right, by ticket 13's test",
+                    "the session shares an alias with the record, or does 2 or more real turns on its branch): 67% (2/3,",
+                    "By rule: settle 3.", "At real prompt 1: 0, 2: 3, 3: 0, later: 0.", "Binary errors in the replay: none."):
             self.assertIn(row, report)
 
     def test_rules(self):

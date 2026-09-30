@@ -137,6 +137,12 @@ def main():
     ap.add_argument("--expect", required=True, help="carried/identifiers, for example 150/160")
     a = ap.parse_args()
     sessions, _ = h.load(h.ts_of(a.until))
+    for s in sessions:
+        # Ticket 13 counted built-in commands (/model, /effort) as prompts; its set is kept as it was measured.
+        for t in s["turns"]:
+            t["real"] = "<task-notification>" not in t["ask"]
+        s["real"] = [t for t in s["turns"] if t["real"]]
+        s["first3"] = {tk for t in s["real"][:3] for tk in h.TICKET.findall(t["ask"])}
     found = h.pairs(sessions, match=lambda S, E: "alias" if S["first3"] & E["tickets"] else None,
                     window=timedelta(hours=12))
     measured = exact = matched = total = 0

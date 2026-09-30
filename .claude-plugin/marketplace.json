@@ -1,0 +1,14 @@
+{
+  "name": "openrecall",
+  "description": "OpenRecall, a recall layer for Claude Code",
+  "owner": {
+    "name": "Raj Nandan Sharma"
+  },
+  "plugins": [
+    {
+      "name": "openrecall",
+      "source": "./plugin",
+      "description": "Hands a new Claude Code session the state its task was left in by the last session"
+    }
+  ]
+}

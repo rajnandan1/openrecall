@@ -1,0 +1,42 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v openrecall >/dev/null 2>&1 || { printf '%s\\n' '{\"systemMessage\": \"OpenRecall is off: no openrecall on PATH. Install: cargo install --locked --git https://github.com/rajnandan1/openrecall --root ~/.local\"}'; exit 0; }; exec openrecall handoff"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "openrecall",
+            "args": [
+              "recall"
+            ],
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "openrecall",
+            "args": [
+              "capture"
+            ],
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

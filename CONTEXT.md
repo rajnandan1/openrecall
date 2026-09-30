@@ -81,7 +81,7 @@ The worktree root, the directory that holds `.git`. Never the hook's working dir
 _Avoid_: cwd, directory, path
 
 **Settled**:
-The state of a session's branch after one completed turn with no change since the session started. Only a settled branch can match a handoff record by folder and branch.
+The state of a session's branch after one completed turn on it, counted from the session's start or from its last branch change. Only a settled branch can match a handoff record by folder and branch.
 _Avoid_: stable, confirmed
 
 **Task hop**:
@@ -126,6 +126,10 @@ _Avoid_: ignored prompt, filtered prompt
 A user turn that Claude Code sends itself when background work finishes. It is not a prompt: it never triggers recall and never counts as a turn.
 _Avoid_: system prompt, background message
 
+**Real prompt**:
+A prompt the user typed that reaches the model. A task notification is not one, and neither is a built-in command such as `/model` or `/effort`, which never fires a hook.
+_Avoid_: user message, turn (a turn also follows a task notification)
+
 **Headless session**:
 A session started by `claude -p` or the SDK, with no person typing. OpenRecall does nothing in it.
 _Avoid_: batch session, non-interactive run, sdk session
@@ -139,13 +143,13 @@ Handing recalled memories to Claude as extra context.
 _Avoid_: digest, push (only when contrasting with pull)
 
 **Session ledger**:
-The per-context-window record of which memories were already injected, so none is injected twice. It is cleared with the context, on clear and compact.
+The per-context-window record of which memories were already injected, and which handoff records the window created, so none is injected twice. It is cleared with the context, on clear and compact.
 _Avoid_: seen-set, cache
 
 ### Writing
 
 **Capture**:
-Writing the handoff record at the end of each turn, without an LLM: identifiers from the turn's tool calls and assistant text, the last ask, the last answer.
+Writing the handoff record at the end of each turn, without an LLM: identifiers from the turn's tool calls and assistant text, the last ask, the last answer. Until a session is pushed a record that others wrote, it adds only identifiers and aliases, behind the record's own.
 _Avoid_: extraction, snapshot
 
 **Extraction**:

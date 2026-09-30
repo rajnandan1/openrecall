@@ -1,0 +1,10 @@
+[package]
+name = "openrecall"
+version = "0.1.0"
+edition = "2024"
+description = "A recall layer for Claude Code: hands a session the right past context, fast"
+repository = "https://github.com/rajnandan1/openrecall"
+
+[dependencies]
+regex = "1"
+serde_json = "1"
