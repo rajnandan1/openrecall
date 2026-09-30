@@ -43,7 +43,7 @@ const CMD_VERBS: [&str; 25] = [
     "railway", "linear",
 ];
 
-static TICKET: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b[A-Z]{2,5}-\d{2,5}\b").unwrap());
+pub(crate) static TICKET: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b[A-Z]{2,5}-\d{2,5}\b").unwrap());
 static PR: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(\bPR\s*#?|pull/|#)(\d{2,6})\b").unwrap());
 static GH_PR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bgh pr \w+ (\d{2,6})\b").unwrap());
@@ -55,7 +55,7 @@ static PATH: LazyLock<Regex> = LazyLock::new(|| {
     )
     .unwrap()
 });
-static LINE_SUFFIX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r":\d+(?:-\d+)?$").unwrap());
+pub(crate) static LINE_SUFFIX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r":\d+(?:-\d+)?$").unwrap());
 
 pub fn is_notification(prompt: &str) -> bool {
     prompt.contains("<task-notification>")
@@ -264,7 +264,7 @@ impl Turn {
                 }
                 Event::Text(text) => {
                     f.tickets.extend(tickets(text));
-                    f.prs.extend(prs_in(text));
+                    f.prs.extend(prs_in(text).into_iter().map(|(_, p)| p));
                     f.commits.extend(commits_in(text).map(str::to_string));
                     f.paths.extend(paths_in(text).into_iter().filter_map(path));
                 }
@@ -295,7 +295,7 @@ fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
-fn prs_in(text: &str) -> Vec<String> {
+pub(crate) fn prs_in(text: &str) -> Vec<(usize, String)> {
     let mut out = vec![];
     for c in PR.captures_iter(text).chain(GH_PR.captures_iter(text)) {
         let whole = c.get(0).unwrap();
@@ -308,13 +308,13 @@ fn prs_in(text: &str) -> Vec<String> {
         {
             continue;
         }
-        out.push(c[c.len() - 1].to_string());
+        out.push((whole.start(), c[c.len() - 1].to_string()));
     }
     out
 }
 
 /// Tokens of 7 to 40 hex characters with at least one letter and one digit, not part of a longer word.
-fn commits_in(text: &str) -> impl Iterator<Item = &str> {
+pub(crate) fn commits_in(text: &str) -> impl Iterator<Item = &str> {
     WORD.find_iter(text).map(|m| m.as_str()).filter(|t| {
         let hex = |b: u8| b.is_ascii_digit() || (b'a'..=b'f').contains(&b);
         (7..=40).contains(&t.len())
@@ -325,7 +325,7 @@ fn commits_in(text: &str) -> impl Iterator<Item = &str> {
 }
 
 /// Path-like tokens: not after a word character, `/`, `:`, `@` or `$`, and not followed by a word character or `/`.
-fn paths_in(text: &str) -> Vec<&str> {
+pub(crate) fn paths_in(text: &str) -> Vec<&str> {
     let mut out = vec![];
     let mut at = 0;
     while let Some(m) = PATH.find_at(text, at) {
@@ -350,7 +350,7 @@ fn paths_in(text: &str) -> Vec<&str> {
 }
 
 /// A path relative to the worktree root, `~/`-relative under home, or None for noise.
-fn norm_path(raw: &str, folder: &str, home: &str) -> Option<String> {
+pub(crate) fn norm_path(raw: &str, folder: &str, home: &str) -> Option<String> {
     let p = raw.trim().trim_matches(|c| "`'\"(),;:".contains(c));
     let p = LINE_SUFFIX.replace(p, "");
     let noise = [
@@ -400,7 +400,7 @@ mod tests {
     #[test]
     fn miners() {
         let text = "PR #345 at abc1234 in /w/app/src/export.py:12, see $HOME/x/y.py and a#99 or deadbeefcafe0000000000000000000000000000000";
-        assert_eq!(prs_in(text), ["345"]);
+        assert_eq!(prs_in(text), [(0, "345".to_string())]);
         assert_eq!(commits_in(text).collect::<Vec<_>>(), ["abc1234"]);
         assert_eq!(paths_in(text), ["/w/app/src/export.py:12"]);
         assert_eq!(

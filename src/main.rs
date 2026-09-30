@@ -1,4 +1,5 @@
 mod git;
+mod index;
 mod record;
 mod scan;
 mod turn;
@@ -6,6 +7,7 @@ mod turn;
 use record::Record;
 use serde_json::{Value, json};
 use std::cell::OnceCell;
+use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
@@ -142,7 +144,8 @@ fn handoff_dirs(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// UserPromptSubmit: push the task's handoff record once the prompt proves the task (ticket 12).
+/// UserPromptSubmit: push the task's handoff record once the prompt proves the task (ticket 12), then
+/// search the level-2 memories for the prompt (ticket 15's order).
 fn recall(started: u128) -> Result<()> {
     let input = read_input()?;
     let sid = session_id(&input)?;
@@ -160,40 +163,124 @@ fn recall(started: u128) -> Result<()> {
         );
         return status(&sid, "recall skipped");
     }
+    let repo = git::Repo::find(input["cwd"].as_str().unwrap_or(""));
+    let mut s = load_session(&sid);
+    let mut context = vec![];
     let mut injected = vec![];
-    if let Some(repo) = git::Repo::find(input["cwd"].as_str().unwrap_or("")) {
-        let mut s = load_session(&sid);
-        if let Some((path, rec, how)) = pick(&repo, &s, &sid, prompt) {
-            let address = address_of(&repo.identity, &path);
-            let text = fs::read_to_string(&path)?;
-            let body = text.split_once("\n---\n").map_or(text.as_str(), |(_, b)| b);
-            let context = format!(
-                "Handoff record for branch {}, last written {} by an earlier session on this task ({address}). \
-                 It reflects what was true then; check the working tree before acting on it.\n\n{body}",
-                rec.branch, rec.updated_at
-            );
-            println!(
-                "{}",
-                json!({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": context}})
-            );
-            see(&mut s, &address);
-            save_session(&sid, &s)?;
-            log(json!({"event": "pushed", "session": sid, "address": address, "how": how}));
-            injected.push(address);
-        }
+    if let Some(repo) = &repo
+        && let Some((path, rec, how)) = pick(repo, &s, &sid, prompt)
+    {
+        let address = address_of(&repo.identity, &path);
+        let text = fs::read_to_string(&path)?;
+        let body = text.split_once("\n---\n").map_or(text.as_str(), |(_, b)| b);
+        context.push(format!(
+            "Handoff record for branch {}, last written {} by an earlier session on this task ({address}). \
+             It reflects what was true then; check the working tree before acting on it.\n\n{body}",
+            rec.branch, rec.updated_at
+        ));
+        see(&mut s, &address);
+        log(json!({"event": "pushed", "session": sid, "address": address, "how": how}));
+        injected.push(address);
     }
+    let mut searched = json!({});
+    match index::query_of(prompt) {
+        Err(reason) => log(
+            json!({"event": "skipped", "session": sid, "reason": reason, "prompt_hash": fnv(prompt)}),
+        ),
+        Ok(query) => match level2(query, repo.as_ref(), &sid, &s) {
+            Ok((lines, detail)) => {
+                if !lines.is_empty() {
+                    let block: Vec<&str> = lines.iter().map(|(_, l)| l.as_str()).collect();
+                    context.push(format!("{}\n{}", index::FRAME, block.join("\n")));
+                }
+                for (address, _) in lines {
+                    see(&mut s, &address);
+                    injected.push(address);
+                }
+                searched = detail;
+            }
+            Err(e) => log(json!({"event": "error", "cmd": "recall search", "error": e.to_string()})),
+        },
+    }
+    if !context.is_empty() {
+        println!(
+            "{}",
+            json!({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": context.join("\n\n")}})
+        );
+    }
+    save_session(&sid, &s)?;
     let ended = now_ms();
-    log(
-        json!({"event": "recall", "session": sid, "started_at": started, "ended_at": ended, "prompt_hash": fnv(prompt),
-               "injected": injected}),
-    );
+    let mut line = json!({"event": "recall", "session": sid, "started_at": started, "ended_at": ended,
+                          "prompt_hash": fnv(prompt), "injected": injected});
+    if let (Some(line), Some(searched)) = (line.as_object_mut(), searched.as_object()) {
+        line.extend(searched.clone());
+    }
+    log(line);
     status(
         &sid,
         &format!("recall {} · {} ms", injected.len(), ended - started),
     )
 }
 
-/// The record to push, if any: an alias the prompt names first, then the settled branch's record.
+/// Ticket 15's last steps: search the scope, drop what must not be injected (the ledger, this session's own facts,
+/// a pointer whose path is gone: ticket 09), keep at most 3 lines above the gate within the 400-token budget. Returns the lines with their addresses, and the log detail.
+fn level2(
+    query: &str,
+    repo: Option<&git::Repo>,
+    sid: &str,
+    s: &Value,
+) -> Result<(Vec<(String, String)>, Value)> {
+    let terms = index::terms(query);
+    let scopes = index::scopes(&home(), &user_home(), repo);
+    let mut ix = index::Index::open(&home())?;
+    ix.sync(&scopes)?;
+    let own = |stamp: &str| stamp.split_whitespace().next() == Some(sid);
+    let mut dropped: HashMap<&str, usize> = HashMap::new();
+    let mut kept = vec![];
+    for c in ix.search(&terms, &scopes, 10)? {
+        let reason = if seen(s, &c.address) {
+            Some("ledger")
+        } else if own(&c.source) || own(&c.updated) {
+            Some("own")
+        } else if c.kind == "pointer"
+            && index::rotted(&c.body, repo.map(|r| r.folder.as_path()), &user_home())
+        {
+            Some("rot")
+        } else {
+            None
+        };
+        match reason {
+            Some(r) => *dropped.entry(r).or_default() += 1,
+            None => kept.push(c),
+        }
+    }
+    kept.truncate(5);
+    let mut lines = vec![];
+    let mut chars = index::FRAME.chars().count();
+    for c in kept
+        .iter()
+        .filter(|c| c.score >= index::GATE)
+        .take(index::MAX_LINES)
+    {
+        let line = index::line(c);
+        if chars + line.chars().count() + 1 > index::MAX_CHARS {
+            break;
+        }
+        chars += line.chars().count() + 1;
+        lines.push((c.address.clone(), line));
+    }
+    let candidates: Vec<Value> = kept
+        .iter()
+        .map(|c| json!({"address": c.address, "score": (c.score * 100.0).round() / 100.0, "text_hash": c.text_hash}))
+        .collect();
+    Ok((
+        lines,
+        json!({"terms": terms.len(), "candidates": candidates, "dropped": dropped}),
+    ))
+}
+
+/// The record to push, if any: an alias the prompt names first (several records may share a ticket: the newest
+/// wins, and the one written from this folder breaks a tie, ticket 12), then the settled branch's record.
 fn pick(
     repo: &git::Repo,
     s: &Value,
@@ -217,7 +304,12 @@ fn pick(
         let hit = record::live(&dir)
             .into_iter()
             .filter(|(p, r)| usable(p, r) && r.aliases.iter().any(|a| named.contains(a)))
-            .max_by(|a, b| a.1.updated_at.cmp(&b.1.updated_at));
+            .max_by_key(|(_, r)| {
+                (
+                    r.updated_at.clone(),
+                    r.folder == repo.folder.to_string_lossy(),
+                )
+            });
         if let Some((path, rec)) = hit {
             return Some((path, rec, "alias"));
         }
@@ -346,7 +438,7 @@ fn write_record(
     } else {
         (String::new(), String::new())
     };
-    rec.merge(&found, &ask, &answer, full, sid, &record::iso(now_secs()));
+    rec.merge(&found, &ask, &answer, full, sid, &record::iso_ms(now_ms()));
     write_atomic(&path, &rec.render())?;
     if existing.is_none() {
         see(s, &address);
@@ -478,7 +570,7 @@ pub fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
 }
 
 /// FNV-1a 64: the log joins a line to its prompt without holding the prompt's text.
-fn fnv(text: &str) -> String {
+pub fn fnv(text: &str) -> String {
     let h = text.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
         (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3)
     });

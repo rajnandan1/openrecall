@@ -61,6 +61,11 @@ impl Repo {
             .map(str::to_string)
     }
 
+    /// The main checkout, the directory that holds the common `.git`: Claude Code keys its memory on it (ticket 11).
+    pub fn main_checkout(&self) -> Option<PathBuf> {
+        self.common.parent().map(Path::to_path_buf)
+    }
+
     pub fn has_branch(&self, name: &str) -> bool {
         self.common.join("refs/heads").join(name).is_file()
             || fs::read_to_string(self.common.join("packed-refs")).is_ok_and(|p| {
@@ -173,6 +178,7 @@ mod tests {
         assert_eq!(repo.folder, wt);
         assert_eq!(repo.identity, "github.com/someone/app");
         assert_eq!(repo.branch().as_deref(), Some("feat/one"));
+        assert_eq!(repo.main_checkout().as_deref(), Some(main.as_path()));
         assert!(repo.has_branch("feat/one") && repo.has_branch("old") && !repo.has_branch("gone"));
 
         fs::write(main.join(".git/config"), "[core]\n").unwrap();

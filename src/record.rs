@@ -405,6 +405,13 @@ fn cut_answer(text: &str, cap: usize) -> String {
     )
 }
 
+/// `updated_at` to the millisecond: an alias push takes the newest of several records sharing a ticket, and two
+/// writes in one second are common when sessions are replayed (build step 3).
+pub fn iso_ms(ms: u128) -> String {
+    let s = iso((ms / 1000) as u64);
+    format!("{}.{:03}Z", &s[..s.len() - 1], ms % 1000)
+}
+
 pub fn iso(secs: u64) -> String {
     let (y, m, d) = civil_from_days((secs / 86400) as i64);
     let s = secs % 86400;
@@ -453,6 +460,8 @@ mod tests {
     fn time_round_trip() {
         assert_eq!(iso(0), "1970-01-01T00:00:00Z");
         assert_eq!(iso(1_790_763_307), "2026-09-30T10:15:07Z");
+        assert_eq!(iso_ms(1_790_763_307_042), "2026-09-30T10:15:07.042Z");
+        assert_eq!(parse_iso("2026-09-30T10:15:07.042Z"), Some(1_790_763_307));
         assert_eq!(parse_iso("2026-09-30T10:15:07Z"), Some(1_790_763_307));
         assert_eq!(
             parse_iso("2024-02-29T00:00:00Z").map(iso).as_deref(),

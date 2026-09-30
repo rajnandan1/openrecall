@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -107,6 +107,25 @@ impl World {
                 .join(format!("{stem}.md")),
         )
         .ok()
+    }
+
+    fn memory(&self, dir: &Path, stem: &str, kind: &str, source: &str, description: &str, body: &str) {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(
+            dir.join(format!("{stem}.md")),
+            format!("---\nname: {stem}\ndescription: {description}\nmetadata:\n  type: {kind}\n{source}---\n\n{body}\n"),
+        )
+        .unwrap();
+    }
+
+    fn builtin_dir(&self) -> PathBuf {
+        let slug: String = self
+            .folder
+            .to_string_lossy()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        self.home.join(".claude/projects").join(slug).join("memory")
     }
 
     fn pushed(&self, sid: &str, prompt: &str) -> Option<String> {
@@ -354,5 +373,78 @@ fn the_stop_hook_returns_before_the_writer_finishes() {
             "the detached writer never wrote the record"
         );
         std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn level_two_recalls_the_repos_memories_above_the_gate() {
+    let w = World::new("level2");
+    w.branch("feat/x");
+    fs::create_dir_all(w.folder.join("src")).unwrap();
+    fs::write(w.folder.join("src/export.py"), "").unwrap();
+    let builtin = w.builtin_dir();
+    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    // Forty unrelated memories, so the subject words are rare enough to score above the gate (bm25 idf).
+    let bank = [
+        "deploy", "standup", "linter", "wildcard", "review", "staging", "billing", "release", "titles",
+        "browser", "retries", "runner", "branch", "slug", "rota", "monday", "cache", "queue", "worker",
+        "metric", "alert", "quota", "invoice", "tenant",
+    ];
+    for i in 0..40 {
+        let word = |k: usize| bank[(i * 7 + k * 5) % bank.len()];
+        let text = format!("The {} {} runs the {} before the {} step.", word(0), word(1), word(2), word(3));
+        w.memory(&builtin, &format!("note-{i}"), "project", "", &text, &text);
+    }
+    fs::write(builtin.join("MEMORY.md"), "- ABC-12 exports: src/export.py\n").unwrap();
+    let long = format!(
+        "The export job wrote empty rows because the null check in src/export.py ran after the batch was \
+         sealed; ABC-12 tracks it and PR #345 moved the check ahead of the seal. {}",
+        "More detail on the batch sealing order and its retries. ".repeat(4)
+    );
+    w.memory(&builtin, "export-empty-rows", "project", "", "Exports fail on empty rows until the null check moves", &long);
+    w.memory(&repo, "old-export-notes", "pointer", "source: E 2026-01-02T03:04:05Z\n", "Empty rows and ABC-12 in src/gone.py", "Empty rows: ABC-12 was first seen in src/gone.py before the export moved.");
+    w.memory(&repo, "export-null-rows", "gotcha", "source: E 2026-01-02T03:04:05Z\n", "Null rows", "Exports fail on empty rows: ABC-12 needs a null check in src/export.py before the batch seals.");
+    w.memory(&repo, "own-export-note", "state", "source: S 2026-01-03T00:00:00Z\n", "Own", "ABC-12 export empty rows: this session's own fact about src/export.py.");
+    fs::write(repo.join("claude-md-suggestions.md"), "- ABC-12 exports empty rows src/export.py\n").unwrap();
+    w.memory(&w.home.join(".openrecall/global"), "empty-rows-rule", "preference", "source: G 2026-01-01T00:00:00Z\n", "Rule", "Treat empty rows as a bug in every export, never as data (ABC-12 style).");
+
+    let ctx = w.pushed("S", "exports fail on empty rows in ABC-12").expect("level 2 injects");
+    assert!(ctx.starts_with("Recalled memories from earlier sessions (OpenRecall). They reflect what was true when written.\n- "), "{ctx}");
+    let lines: Vec<&str> = ctx.lines().skip(1).collect();
+    assert!(lines.len() <= 3 && ctx.chars().count() <= 1040, "{ctx}");
+    assert!(
+        lines.iter().any(|l| l.starts_with("- project 20")
+            && l.contains("builtin/") && l.ends_with("/export-empty-rows: Exports fail on empty rows until the null check moves (src/export.py, ABC-12, #345)")),
+        "{ctx}"
+    );
+    assert!(
+        lines.contains(&"- gotcha 2026-01-02 github.com/someone/app/export-null-rows: Exports fail on empty rows: ABC-12 needs a null check in src/export.py before the batch seals."),
+        "{ctx}"
+    );
+    for gone in ["own-export-note", "old-export-notes", "claude-md-suggestions", "MEMORY"] {
+        assert!(!ctx.contains(gone), "{gone} must not be injected: {ctx}");
+    }
+    assert!(fs::read_to_string(w.home.join(".openrecall/status/S")).unwrap().starts_with(&format!("recall {} · ", lines.len())));
+    let again = w.pushed("S", "exports fail on empty rows in ABC-12").unwrap_or_default();
+    assert!(
+        !again.contains("export-empty-rows") && !again.contains("export-null-rows"),
+        "the ledger stops a repeat: {again}"
+    );
+
+    w.hook(&["recall"], "S", json!({"prompt": "fix it now"}));
+    w.hook(&["recall"], "S", json!({"prompt": "/implement"}));
+    let ctx = w.pushed("T", "/implement ABC-12 export empty rows").expect("slash arguments are the query");
+    assert!(ctx.contains("own-export-note"), "another session may recall S's fact: {ctx}");
+
+    let path = builtin.join("export-empty-rows.md");
+    let edited = fs::read_to_string(&path).unwrap().replace("until the null check moves", "since the seal moved");
+    fs::write(&path, edited).unwrap();
+    fs::remove_file(repo.join("export-null-rows.md")).unwrap();
+    let ctx = w.pushed("U", "exports fail on empty rows in ABC-12").unwrap();
+    assert!(ctx.contains("since the seal moved") && !ctx.contains("export-null-rows"), "the index follows the files: {ctx}");
+
+    let log = fs::read_to_string(w.home.join(".openrecall/log/openrecall.jsonl")).unwrap();
+    for event in ["\"reason\":\"short\"", "\"reason\":\"empty-args\"", "\"candidates\":[{\"address\":\"", "\"text_hash\":\"", "\"rot\":1", "\"own\":1", "\"ledger\":"] {
+        assert!(log.contains(event), "{event}\n{log}");
     }
 }
