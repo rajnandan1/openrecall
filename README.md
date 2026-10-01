@@ -55,4 +55,4 @@ sid=$(printf '%s' "$input" | jq -r .session_id)
 or=$(cat "${OPENRECALL_HOME:-$HOME/.openrecall}/status/$sid" 2>/dev/null)
 ```
 
-`third_party/gitleaks/` holds gitleaks v8.30.1's default rules, under the MIT license next to them.
+OpenRecall is under the MIT license, in `LICENSE`. `third_party/gitleaks/` holds gitleaks v8.30.1's default rules, under the MIT license next to them.
