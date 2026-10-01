@@ -86,7 +86,7 @@ impl Server {
         if found.is_empty() {
             return Ok("No memory matches.".into());
         }
-        Ok(found.iter().map(index::line).collect::<Vec<_>>().join("\n"))
+        Ok(found.iter().map(|c| index::line(c, 0)).collect::<Vec<_>>().join("\n"))
     }
 
     #[tool(

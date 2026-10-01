@@ -91,7 +91,7 @@ Each prompt also searches three places:
 - the repo's Claude Code memory files, `~/.claude/projects/<slug>/memory/` (read-only, `MEMORY.md` left out)
 - global memories, under `~/.openrecall/global/`
 
-It injects at most 3 memories, about 400 tokens in all, and only memories that score 4.0 or more. If nothing scores that high, it injects nothing. Each memory arrives as one line of at most 200 characters of text: `- <type> <date> <address>: <text>`.
+It injects at most 3 memories, about 400 tokens in all, and only memories that score 4.0 or more. If nothing scores that high, it injects nothing. Each memory arrives as one line: `- <type> <date> <address>: <text>`. The text is the whole memory when it fits in the room the other lines leave in those 400 tokens. Otherwise it is at most 200 characters.
 
 These limits are not settings. They are constants in `src/index.rs`: `MAX_LINES` (3), `MAX_CHARS` (1040 characters, about 400 tokens) and `GATE` (4.0, the score cut-off the eval picked). To change one, edit it in a clone and reinstall from there:
 
@@ -115,7 +115,7 @@ The hooks only push, and they push very little: one handoff record and at most 3
 
 So the plugin also starts an MCP server, `openrecall mcp`. It is the same binary reading the same `~/.openrecall/`, and installing the plugin sets it up. It gives Claude three tools:
 
-- `recall` reads the whole memory at an address, or searches with any other words. A recalled line is cut to 200 characters and ends with its address, so this is how Claude gets the rest. A search here skips the score cut-off and returns 5 memories, or up to 20 if Claude asks for more.
+- `recall` reads the whole memory at an address, or searches with any other words. A recalled line that does not fit whole is cut to 200 characters and carries its address, so this is how Claude gets the rest. A search here skips the score cut-off and returns 5 memories, or up to 20 if Claude asks for more.
 - `remember` stores a fact: type `decision`, `preference`, `pointer`, `state` or `gotcha`; scope `repo` or `global`. A text that holds a secret is refused. Without [extraction](#extraction-optional), this is the only way OpenRecall's own facts get written.
 - `forget` deletes one of OpenRecall's own facts by address.
 

@@ -486,11 +486,13 @@ fn symbol(token: &str) -> Option<&str> {
     (code && SYMBOL.is_match(bare)).then_some(last)
 }
 
-/// Tickets 19 and 21: `- <type> <date> <address>: <text>`, the body when it fits in 200 characters, else the
-/// description plus the body's identifiers the description lacks, in parentheses, up to 200 characters.
-pub fn line(c: &Candidate) -> String {
+/// Tickets 19 and 21: `- <type> <date> <address>: <text>`, the body when it fits in 200 characters or the whole line
+/// fits in `room` characters, else the description plus the body's identifiers the description lacks, in
+/// parentheses, up to 200 characters.
+pub fn line(c: &Candidate, room: usize) -> String {
+    let prefix = format!("- {} {} {}: ", c.kind, c.date, c.address);
     let body = squash(&c.body);
-    let text = if body.chars().count() <= LINE_TEXT {
+    let text = if body.chars().count() <= LINE_TEXT.max(room.saturating_sub(prefix.chars().count())) {
         body
     } else if c.description.trim().is_empty() {
         cut(&body, LINE_TEXT)
@@ -513,7 +515,7 @@ pub fn line(c: &Candidate) -> String {
             format!("{desc} ({})", extra.join(", "))
         }
     };
-    format!("- {} {} {}: {text}", c.kind, c.date, c.address)
+    prefix + &text
 }
 
 fn head(s: &str, bytes: usize) -> &str {
@@ -612,16 +614,19 @@ mod tests {
     #[test]
     fn lines() {
         let short = candidate("d", "PR #345 is merged.");
-        assert_eq!(line(&short), "- gotcha 2026-01-02 global/x: PR #345 is merged.");
+        assert_eq!(line(&short, 0), "- gotcha 2026-01-02 global/x: PR #345 is merged.");
         let long_body = format!("See src/export.py and ABC-12 at abc1234def. {}", "x ".repeat(120));
         let long = candidate("Exports fail on empty rows", &long_body);
         assert_eq!(
-            line(&long),
+            line(&long, 0),
             "- gotcha 2026-01-02 global/x: Exports fail on empty rows (src/export.py, ABC-12, abc1234def)"
         );
+        let whole = format!("- gotcha 2026-01-02 global/x: {}", long_body.trim());
+        assert_eq!(line(&long, whole.chars().count()), whole);
+        assert_eq!(line(&long, whole.chars().count() - 1), line(&long, 0));
         let wide = candidate(&"w".repeat(250), &long_body);
-        assert_eq!(line(&wide).chars().count(), "- gotcha 2026-01-02 global/x: ".len() + 200);
-        assert!(line(&wide).ends_with('…'));
+        assert_eq!(line(&wide, 0).chars().count(), "- gotcha 2026-01-02 global/x: ".len() + 200);
+        assert!(line(&wide, 0).ends_with('…'));
         assert_eq!(idents("`a_b` then a/b.md:3 and https://h/x.md and ABC-12"), ["a_b", "a/b.md", "ABC-12"]);
     }
 

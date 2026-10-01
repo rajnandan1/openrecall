@@ -124,6 +124,20 @@ impl World {
         .unwrap();
     }
 
+    /// Forty unrelated memories, so a test's subject words are rare enough to score above the gate (bm25 idf).
+    fn fillers(&self, dir: &Path) {
+        let bank = [
+            "deploy", "standup", "linter", "wildcard", "review", "staging", "billing", "release", "titles",
+            "browser", "retries", "runner", "branch", "slug", "rota", "monday", "cache", "queue", "worker",
+            "metric", "alert", "quota", "invoice", "tenant",
+        ];
+        for i in 0..40 {
+            let word = |k: usize| bank[(i * 7 + k * 5) % bank.len()];
+            let text = format!("The {} {} runs the {} before the {} step.", word(0), word(1), word(2), word(3));
+            self.memory(dir, &format!("note-{i}"), "project", "", &text, &text);
+        }
+    }
+
     fn builtin_dir(&self) -> PathBuf {
         let slug: String = self
             .folder
@@ -400,17 +414,7 @@ fn level_two_recalls_the_repos_memories_above_the_gate() {
     fs::write(w.folder.join("src/export.py"), "").unwrap();
     let builtin = w.builtin_dir();
     let repo = w.home.join(".openrecall/repos/github.com/someone/app");
-    // Forty unrelated memories, so the subject words are rare enough to score above the gate (bm25 idf).
-    let bank = [
-        "deploy", "standup", "linter", "wildcard", "review", "staging", "billing", "release", "titles",
-        "browser", "retries", "runner", "branch", "slug", "rota", "monday", "cache", "queue", "worker",
-        "metric", "alert", "quota", "invoice", "tenant",
-    ];
-    for i in 0..40 {
-        let word = |k: usize| bank[(i * 7 + k * 5) % bank.len()];
-        let text = format!("The {} {} runs the {} before the {} step.", word(0), word(1), word(2), word(3));
-        w.memory(&builtin, &format!("note-{i}"), "project", "", &text, &text);
-    }
+    w.fillers(&builtin);
     fs::write(builtin.join("MEMORY.md"), "- ABC-12 exports: src/export.py\n").unwrap();
     let long = format!(
         "The export job wrote empty rows because the null check in src/export.py ran after the batch was \
@@ -428,9 +432,10 @@ fn level_two_recalls_the_repos_memories_above_the_gate() {
     assert!(ctx.starts_with("Recalled memories from earlier sessions (OpenRecall). They reflect what was true when written. Full text: mcp__plugin_openrecall_openrecall__recall with the address.\n- "), "{ctx}");
     let lines: Vec<&str> = ctx.lines().skip(1).collect();
     assert!(lines.len() <= 3 && ctx.chars().count() <= 1040, "{ctx}");
+    let whole = long.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
         lines.iter().any(|l| l.starts_with("- project 20")
-            && l.contains("builtin/") && l.ends_with("/export-empty-rows: Exports fail on empty rows until the null check moves (src/export.py, ABC-12, #345)")),
+            && l.contains("builtin/") && l.ends_with(&format!("/export-empty-rows: {whole}"))),
         "{ctx}"
     );
     assert!(
@@ -453,16 +458,49 @@ fn level_two_recalls_the_repos_memories_above_the_gate() {
     assert!(ctx.contains("own-export-note"), "another session may recall S's fact: {ctx}");
 
     let path = builtin.join("export-empty-rows.md");
-    let edited = fs::read_to_string(&path).unwrap().replace("until the null check moves", "since the seal moved");
+    let edited = fs::read_to_string(&path).unwrap().replace("moved the check ahead of the seal", "moved the seal after the check");
     fs::write(&path, edited).unwrap();
     fs::remove_file(repo.join("export-null-rows.md")).unwrap();
     let ctx = w.pushed("U", "exports fail on empty rows in ABC-12").unwrap();
-    assert!(ctx.contains("since the seal moved") && !ctx.contains("export-null-rows"), "the index follows the files: {ctx}");
+    assert!(ctx.contains("moved the seal after the check") && !ctx.contains("export-null-rows"), "the index follows the files: {ctx}");
 
     let log = fs::read_to_string(w.home.join(".openrecall/log/openrecall.jsonl")).unwrap();
     for event in ["\"reason\":\"short\"", "\"reason\":\"empty-args\"", "\"candidates\":[{\"address\":\"", "\"text_hash\":\"", "\"rot\":1", "\"own\":1", "\"ledger\":"] {
         assert!(log.contains(event), "{event}\n{log}");
     }
+}
+
+#[test]
+fn a_memory_goes_in_whole_only_in_the_room_the_other_lines_leave() {
+    let w = World::new("whole");
+    w.branch("feat/y");
+    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    w.fillers(&repo);
+    let source = "source: E 2026-01-02T03:04:05Z\n";
+    let history = "Ledger totals round half-even since ABC-77, because half-up rounding drifted one cent per thousand \
+                   postings. The rule lives in `ledger::round_total`; every caller passes the minor unit of its \
+                   currency. Settlement exports keep half-even too, since the bank file expects it. Older ledger notes \
+                   that say half-up are wrong now, and ledger rounding tests pin the cents.";
+    w.memory(&repo, "ledger-rounding-history", "decision", source, "Ledger totals round half-even since ABC-77", history);
+    w.memory(&repo, "ledger-rounding-test", "gotcha", source, "The rounding test needs its fixture first",
+        "The ledger rounding test needs the ABC-77 fixture loaded first, or it compares against half-up totals and \
+         fails on the third posting. Load it in the test setup, never by hand.");
+    w.memory(&repo, "ledger-cents-column", "decision", source, "The cents column stays an integer",
+        "The ledger cents column stays an integer; ABC-77 rounding happens before the write, so the database never \
+         sees a fraction of a cent. Reports divide by a hundred only when they print.");
+    let head = "- decision 2026-01-02 github.com/someone/app/ledger-rounding-history: ";
+
+    let ctx = w.pushed("S", "ledger rounding ABC-77 cents").expect("level 2 injects");
+    let lines: Vec<&str> = ctx.lines().skip(1).collect();
+    assert_eq!(lines.len(), 3, "a whole memory never pushes a line out: {ctx}");
+    let short = format!("{head}Ledger totals round half-even since ABC-77 (ledger::round_total)");
+    assert!(lines.contains(&short.as_str()), "{ctx}");
+
+    fs::remove_file(repo.join("ledger-rounding-test.md")).unwrap();
+    fs::remove_file(repo.join("ledger-cents-column.md")).unwrap();
+    let ctx = w.pushed("T", "ledger rounding ABC-77 cents").expect("level 2 injects");
+    let whole = format!("{head}{}", history.split_whitespace().collect::<Vec<_>>().join(" "));
+    assert_eq!(ctx.lines().skip(1).collect::<Vec<_>>(), [whole], "alone, it goes in whole: {ctx}");
 }
 
 /// One JSON-RPC client over the server's pipes: each call reads lines until the reply with its id.

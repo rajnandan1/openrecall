@@ -239,6 +239,7 @@ fn recall(started: u128) -> Result<()> {
 
 /// Ticket 15's last steps: search the scope, drop what must not be injected (the ledger, this session's own facts,
 /// a state fact past its `expires`, a pointer whose path is gone: ticket 09), keep at most 3 lines above the gate within the 400-token budget. Returns the lines with their addresses, and the log detail.
+/// The lines are picked first; then each, best first, takes its whole memory if that fits in the room they leave.
 fn level2(
     query: &str,
     repo: Option<&git::Repo>,
@@ -285,13 +286,22 @@ fn level2(
         .filter(|c| c.score >= index::GATE)
         .take(index::MAX_LINES)
     {
-        let line = index::line(c);
+        let line = index::line(c, 0);
         if chars + line.chars().count() + 1 > index::MAX_CHARS {
             break;
         }
         chars += line.chars().count() + 1;
-        lines.push((c.address.clone(), line));
+        lines.push((c, line));
     }
+    for (c, line) in &mut lines {
+        let whole = index::line(c, index::MAX_CHARS - chars + line.chars().count());
+        chars = chars - line.chars().count() + whole.chars().count();
+        *line = whole;
+    }
+    let lines: Vec<(String, String)> = lines
+        .into_iter()
+        .map(|(c, line)| (c.address.clone(), line))
+        .collect();
     let candidates: Vec<Value> = kept
         .iter()
         .map(|c| json!({"address": c.address, "score": (c.score * 100.0).round() / 100.0, "text_hash": c.text_hash}))
