@@ -1,4 +1,4 @@
-use crate::turn::Found;
+use crate::turn::{Found, TICKET};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -15,6 +15,8 @@ pub struct Record {
     pub aliases: Vec<String>,
     pub writers: Vec<String>,
     pub updated_at: String,
+    /// When the last answer was written. `updated_at` also moves on a partial merge: it is the retirement clock.
+    pub answered_at: String,
     pub goal: String,
     /// `## ` sections the writer does not own, written by a person; kept word for word.
     pub kept: String,
@@ -53,6 +55,7 @@ impl Record {
                         "aliases" => r.aliases = list(),
                         "writers" => r.writers = list(),
                         "updated_at" => r.updated_at = value,
+                        "answered_at" => r.answered_at = value,
                         _ => {}
                     }
                 }
@@ -121,13 +124,16 @@ impl Record {
         session: &str,
         now: &str,
     ) {
+        if self.answered_at.is_empty() && !self.answer.is_empty() {
+            self.answered_at = self.updated_at.clone();
+        }
         for a in &found.aliases {
             if !self.aliases.contains(a) {
                 self.aliases.push(a.clone());
             }
         }
         if full {
-            if self.goal.is_empty() && ask.chars().count() >= 40 {
+            if self.sets_goal(ask) {
                 self.goal = cut(ask, 300);
             }
             if !ask.is_empty() {
@@ -135,6 +141,7 @@ impl Record {
             }
             if !answer.is_empty() {
                 self.answer = cut_answer(answer, 1600);
+                self.answered_at = now.to_string();
             }
         }
         let fold = |new: &Vec<String>, old: &Vec<String>, cap| {
@@ -165,6 +172,14 @@ impl Record {
         }
         self.updated_at = now.to_string();
         self.fit();
+    }
+
+    /// The Goal is the first ask that names a ticket or has 40 or more characters. A Goal that is a question and
+    /// names no ticket gives way to the next such ask: a side question came before the task (build step 7).
+    fn sets_goal(&self, ask: &str) -> bool {
+        let sets_a_task = ask.chars().count() >= 40 || TICKET.is_match(ask);
+        let side_question = !TICKET.is_match(&self.goal) && self.goal.trim_end().ends_with('?');
+        sets_a_task && (self.goal.is_empty() || side_question)
     }
 
     /// Ticket 13's cut ladder: the generous caps above hold until the body passes 800 tokens, then
@@ -252,13 +267,14 @@ impl Record {
 
     pub fn render(&self) -> String {
         format!(
-            "---\nrepo: {}\nbranch: {}\nfolder: {}\naliases: {}\nwriters: {}\nupdated_at: {}\n---\n{}",
+            "---\nrepo: {}\nbranch: {}\nfolder: {}\naliases: {}\nwriters: {}\nupdated_at: {}\nanswered_at: {}\n---\n{}",
             self.repo,
             self.branch,
             self.folder,
             self.aliases.join(", "),
             self.writers.join(", "),
             self.updated_at,
+            self.answered_at,
             self.body()
         )
     }
@@ -533,9 +549,51 @@ mod tests {
             "a partial merge adds behind the record's own"
         );
         assert_eq!(r2.writers, ["s1", "s2"]);
+        assert_eq!(
+            (r2.updated_at.as_str(), r2.answered_at.as_str()),
+            ("2026-09-30T11:00:00Z", "2026-09-30T10:00:00Z"),
+            "a partial merge moves the retirement clock, not the answer's time"
+        );
         assert!(r2.render().contains(
             "## Goal\nBuild ABC-12 so exports stop failing on empty rows\n## Done\nShipped the parser.\n## Identifiers"
         ));
+
+        let mut old_record = Record::parse(&text.replace("answered_at: 2026-09-30T10:00:00Z\n", ""));
+        assert!(old_record.answered_at.is_empty());
+        old_record.merge(&later, "", "", false, "s2", "2026-09-30T11:00:00Z");
+        assert_eq!(
+            old_record.answered_at, "2026-09-30T10:00:00Z",
+            "a record from before `answered_at` keeps its last write as the answer's time"
+        );
+    }
+
+    #[test]
+    fn the_goal_is_the_ask_that_sets_the_task() {
+        let none = Found::default();
+        let ask = |r: &mut Record, text: &str| r.merge(&none, text, "ok", true, "s", "2026-09-30T10:00:00Z");
+
+        let mut r = Record::default();
+        for text in ["go", "/implement ABC-12", "/pr-comments https://example.com/someone/app/pull/345"] {
+            ask(&mut r, text);
+        }
+        assert_eq!(r.goal, "/implement ABC-12", "a short ask that names a ticket is a Goal");
+        ask(&mut r, &"and a far longer follow-up about the review ".repeat(4));
+        assert_eq!(r.goal, "/implement ABC-12", "a Goal that names a ticket stays");
+
+        let mut r = Record::default();
+        ask(&mut r, "Is the cleanup setting still on in the settings file?");
+        let work = "Read src/export.py and src/batch.py and explain where the null check runs, without editing.";
+        ask(&mut r, work);
+        assert_eq!(r.goal, work, "a side question gives way to the next ask that sets a task");
+        ask(&mut r, &format!("{work} Then say whether the export tests cover it?"));
+        assert_eq!(r.goal, work, "a Goal that is not a question stays");
+        r.merge(&none, &"x".repeat(400), "ok", false, "s2", "2026-09-30T11:00:00Z");
+        assert_eq!(r.goal, work, "a partial merge never sets the Goal");
+
+        let mut r = Record::default();
+        ask(&mut r, "Why does ABC-12 fail on empty rows?");
+        ask(&mut r, work);
+        assert_eq!(r.goal, "Why does ABC-12 fail on empty rows?", "a question that names a ticket is the task");
     }
 
     #[test]

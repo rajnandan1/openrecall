@@ -14,10 +14,9 @@ use std::time::{Duration, SystemTime};
 
 const QUIET: Duration = Duration::from_secs(30 * 60);
 const STRIKES: u32 = 3;
-/// Ticket 26: the top 5 holds 89% of what the top 10 holds.
-const CANDIDATES: usize = 5;
-/// Built-in files are never replaced, so the dedupe call reads only their start (ticket 26).
-const BUILTIN_CHARS: usize = 1200;
+/// Ticket 26 took the top 5 and set the switch to 10 for when a target showed up at ranks 6 to 10: the live test's
+/// repeated built-in file ranked 8th (build step 7).
+const CANDIDATES: usize = 10;
 const TOOL_CHARS: usize = 200;
 const TOOL_KEYS: [&str; 8] = [
     "command",
@@ -39,14 +38,16 @@ The transcript is condensed. [user] lines are the person's prompts. [assistant] 
 Write only facts that a later session would still need after this session is gone. Each fact has one of five types:
 - decision: what was decided and why, and who decided it (the user or Claude). Always keep the reason.
 - preference: how the user wants work done.
-- pointer: where something lives, as a repo-relative path plus a symbol name. Never a line number.
-- state: the status or next step of a ticket or PR. Name the ticket or PR.
+- pointer: where something lives in this repository, as a repo-relative path plus a symbol name. Never a line number, and never a path outside the repository (a home directory or an absolute path).
+- state: the status or next step of a ticket, PR or branch. Name the ticket, PR or branch. A next step counts only when the user asked for it or agreed to it.
 - gotcha: surprising behavior someone discovered, with the condition that triggers it.
 
 Never write:
 - a summary of what the session did ("we fixed X", "the session explored Y")
 - the task's own instructions restated as a fact
-- things only true inside this session: the current branch, open files, a test run's output
+- things only true inside this session: which branch is checked out, open files, a test run's output
+- the progress or next step of a check, test run or experiment that the session itself was carrying out
+- a change or next step that Claude offered or proposed and the user did not ask for or accept
 - secrets, keys, tokens or passwords, or anything marked [REDACTED:...]
 - general knowledge that any engineer already has
 
@@ -501,7 +502,8 @@ fn session_date(transcript: &str) -> String {
     record::iso(secs)[..10].to_string()
 }
 
-/// The dedupe call's input: every candidate once, then each new fact with the addresses it looks like (ticket 26).
+/// The dedupe call's input: every candidate once, as much of it as the index holds, then each new fact with the
+/// addresses it looks like (ticket 26). A built-in file goes in whole too: what a fact repeats is often past its start.
 fn merge_input(identity: &str, facts: &[Fact], found: &[Vec<Candidate>]) -> String {
     let mut seen = HashSet::new();
     let memories: Vec<String> = found
@@ -509,14 +511,9 @@ fn merge_input(identity: &str, facts: &[Fact], found: &[Vec<Candidate>]) -> Stri
         .flatten()
         .filter(|c| seen.insert(c.address.as_str()))
         .map(|c| {
-            let body: String = if c.address.starts_with("builtin/") {
-                c.body.chars().take(BUILTIN_CHARS).collect()
-            } else {
-                c.body.clone()
-            };
             format!(
-                "{} [{}] {}\n{}\n{body}",
-                c.address, c.kind, c.date, c.description
+                "{} [{}] {}\n{}\n{}",
+                c.address, c.kind, c.date, c.description, c.body
             )
         })
         .collect();
@@ -672,7 +669,8 @@ fn extracted(content: &str) -> Option<(Vec<Value>, Vec<String>)> {
     Some((facts, rules))
 }
 
-/// One proposed fact, or why it is dropped (ticket 21). A bad name is normalized later, never a reason.
+/// One proposed fact, or why it is dropped (ticket 21). A bad name is normalized later, never a reason. A pointer
+/// that cites a home path and no repo-relative path points at nothing in the repository (build step 7).
 fn fact_of(v: &Value) -> Result<Fact, &'static str> {
     let o = v.as_object().filter(|o| o.len() == 4).ok_or("shape")?;
     let field = |k: &str| {
@@ -692,6 +690,13 @@ fn fact_of(v: &Value) -> Result<Fact, &'static str> {
     }
     if description.is_empty() || body.is_empty() {
         return Err("empty");
+    }
+    if kind == "pointer" {
+        let text = format!("{description}\n{body}");
+        let in_repo = turn::paths_in(&text).iter().any(|p| !p.starts_with(['/', '~']));
+        if text.contains("~/") && !in_repo {
+            return Err("pointer");
+        }
     }
     Ok(Fact {
         kind: kind.into(),
@@ -993,6 +998,17 @@ mod tests {
             got,
             [Ok("A B".into()), Err("type"), Err("empty"), Err("shape")]
         );
+        let pointer = |body: &str| fact_of(&json!({"type": "pointer", "name": "x", "description": "d", "body": body})).map(|f| f.body);
+        assert_eq!(
+            pointer("Facts are files at ~/.config/app/repos/<name>.md with frontmatter."),
+            Err("pointer"),
+            "a pointer into the home directory names nothing in the repository"
+        );
+        assert!(pointer("`load_settings` in src/settings.py reads ~/.config/app/settings.toml.").is_ok());
+        assert!(pointer("`run_export` lives in src/export.py.").is_ok());
+        for rule in ["did not ask for or accept", "outside the repository", "a check, test run or experiment"] {
+            assert!(EXTRACT.contains(rule), "{rule}");
+        }
         let d = decisions(
             r#"{"decisions": [{"fact": 1, "action": "replace", "address": " a/b/c ", "description": "d", "body": "b"},
                               {"fact": "f0", "action": "new", "address": "", "description": "", "body": ""}]}"#,

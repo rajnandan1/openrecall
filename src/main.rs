@@ -187,10 +187,11 @@ fn recall(started: u128) -> Result<()> {
         let address = address_of(&repo.identity, &path);
         let text = fs::read_to_string(&path)?;
         let body = text.split_once("\n---\n").map_or(text.as_str(), |(_, b)| b);
+        let written = if rec.answered_at.is_empty() { &rec.updated_at } else { &rec.answered_at };
         context.push(format!(
             "Handoff record for branch {}, last written {} by an earlier session on this task ({address}). \
              It reflects what was true then; check the working tree before acting on it.\n\n{body}",
-            rec.branch, rec.updated_at
+            rec.branch, written
         ));
         see(&mut s, &address);
         log(json!({"event": "pushed", "session": sid, "address": address, "how": how}));

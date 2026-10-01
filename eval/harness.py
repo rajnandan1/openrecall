@@ -37,7 +37,7 @@ TICKET = re.compile(r"\b[A-Z]{2,5}-\d{2,5}\b")
 PR = re.compile(r"(?:\bPR\s*#?|pull/|(?<![\w/])#)(\d{2,6})\b")
 GH_PR = re.compile(r"\bgh pr \w+ (\d{2,6})\b")
 COMMIT = re.compile(r"(?<![\w-])(?=[0-9a-f]*[a-f])(?=[0-9a-f]*\d)[0-9a-f]{7,40}(?![\w-])")
-PATH = re.compile(r"(?<![\w/:@$])(?:~/|/)?(?:[\w.@-]+/)+[\w.@-]*[A-Za-z][\w.@-]*\.[A-Za-z]\w{0,7}(?::\d+(?:-\d+)?)?(?![\w/])")
+PATH = re.compile(r"(?<![\w/:@$.})\]-])(?<![\w})][\"'])(?!(?<=\*)/)(?:~/|/)?(?:[\w.@-]+/)+[\w.@-]*[A-Za-z][\w.@-]*\.[A-Za-z]\w{0,7}(?::\d+(?:-\d+)?)?(?![\w/])")
 FRAME = re.compile(r"^Handoff record for branch (.*), last written .* on this task \((.*)\)\. It reflects")
 IDENT = re.compile(r"\b[A-Z]{2,5}-\d{2,5}\b|#\d{2,6}\b|/pull/\d+|\b[\w.-]+/[\w./-]+|`[^`\s]{3,}`|\b[0-9a-f]{7,40}\b|https?://\S+")
 GOAL = 0.67
@@ -529,10 +529,34 @@ def when(ms):
     return datetime.fromtimestamp(ms / 1000, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
 
+def unranked(e, orhome, n=10):
+    """Build step 7: the `n` memories that share the most words with a written fact and were not among its logged
+    candidates, from its repo's facts and the built-in files of its session's main checkout (the extraction queue
+    entry names it). The check then also sees a repeat the binary's own search ranked too low."""
+    path = address_path(e["address"], orhome)
+    identity = e["address"].rsplit("/", 1)[0]
+    pool = {"%s/%s" % (identity, os.path.basename(f)[:-3]): f for f in glob.glob(os.path.join(os.path.dirname(path), "*.md"))
+            if os.path.basename(f) != "claude-md-suggestions.md"}
+    try:
+        with open(os.path.join(orhome, "extract", e["session"] + ".json")) as fh:
+            main = json.load(fh).get("main")
+    except (OSError, ValueError):
+        main = None
+    if main:
+        pool.update(("builtin/%s/%s" % (slug(main), os.path.basename(f)[:-3]), f)
+                    for f in glob.glob(os.path.join(PROJECTS, slug(main), "memory", "*.md")) if os.path.basename(f) != "MEMORY.md")
+    words = lambda text: set(re.findall(r"[\w-]{4,}", text.lower()))
+    fact = words(memory_text(path))
+    logged = {c["address"] for c in e.get("candidates", [])} | {e["address"]}
+    shared = sorted(((len(fact & words(memory_text(f))), a) for a, f in pool.items() if a not in logged), reverse=True)
+    return [a for k, a in shared[:n] if k]
+
+
 def extraction_lines(since, dedupe_fn=None, yes=0.7):
     """Tickets 17, 21 and 26 from the live log: extraction health, the facts written, Jev's check of each written fact
-    against its logged candidates (asked once, cached in dedupe.jsonl), store size and the CLAUDE.md suggestions added
-    since the last report. `dedupe_fn(fact, candidates, old)` returns judge.dedupe_check's answer; None asks nothing."""
+    against its logged candidates and the unranked memories most like it (asked once, cached in dedupe.jsonl), store
+    size and the CLAUDE.md suggestions added since the last report. `dedupe_fn(fact, candidates, old)` returns
+    judge.dedupe_check's answer; None asks nothing."""
     orhome = os.path.dirname(EVAL)
     log = os.path.join(orhome, "log", "openrecall.jsonl")
     events = read(log) if os.path.exists(log) else []
@@ -551,7 +575,9 @@ def extraction_lines(since, dedupe_fn=None, yes=0.7):
     cost = sum(e.get("cost", 0) for e in runs)
 
     cache_path = os.path.join(EVAL, "dedupe.jsonl")
-    cache = {(r["session"], r["name"], r["at"]): r for r in (read(cache_path) if os.path.exists(cache_path) else [])}
+    # A row from before build step 7 was checked against the logged candidates alone: it is asked again, once.
+    cache = {(r["session"], r["name"], r["at"]): r for r in (read(cache_path) if os.path.exists(cache_path) else [])
+             if r.get("unranked")}
     written = [e for e in events if e.get("event") == "dedupe" and e.get("action") in ("new", "replace")]
     fresh = []
     for e in written:
@@ -560,12 +586,12 @@ def extraction_lines(since, dedupe_fn=None, yes=0.7):
         if key in cache or dedupe_fn is None or not os.path.exists(path):
             continue
         cands = [c["address"] for c in e.get("candidates", []) if c["address"] != e["address"]
-                 and os.path.exists(address_path(c["address"], orhome))]
+                 and os.path.exists(address_path(c["address"], orhome))] + unranked(e, orhome)
         copy = os.path.join(os.path.dirname(path), "replaced", e.get("copy") or "")
         old = memory_text(copy) if e["action"] == "replace" and os.path.isfile(copy) else None
         got = dedupe_fn(memory_text(path), [memory_text(address_path(a, orhome)) for a in cands], old)
         fresh.append(dict(session=e["session"], name=e["name"], at=e["at"], address=e["address"], action=e["action"],
-                          candidates=cands, **got))
+                          candidates=cands, unranked=True, **got))
     if fresh:
         with open(cache_path, "a") as fh:
             fh.writelines(json.dumps(r) + "\n" for r in fresh)
@@ -607,8 +633,9 @@ def extraction_lines(since, dedupe_fn=None, yes=0.7):
         "out; cost $%.2f." % (total["proposed"], total["new"], total["replaced"], total["skipped"], sum(dropped.values()),
                              ", ".join("%s %d" % kv for kv in sorted(dropped.items())) or "none", total["normalized"],
                              total["tokens_in"], total["tokens_out"], cost),
-        "- Dedupe check (ticket 26; Jev, yes at %.1f or more): %d of %d written facts checked. Repeats that got "
-        "through: %d%s. Missed replaces of an own fact: %d%s. New facts that make a built-in file out of date: %d%s. "
+        "- Dedupe check (ticket 26; Jev, yes at %.1f or more): %d of %d written facts checked, each against its logged "
+        "candidates and up to 10 unranked memories that share the most words with it. Repeats that got through: %d%s. "
+        "Missed replaces of an own fact: %d%s. New facts that make a built-in file out of date: %d%s. "
         "Merges that lost old detail: %d of %d%s. Whether a merge kept the new fact's detail is not checked: the "
         "proposed text is never stored." % (yes, len(checked), len(written), len(repeats), listed(repeats), len(missed),
                                             listed(missed), len(builtin), listed(builtin), len(lost), len(merges),

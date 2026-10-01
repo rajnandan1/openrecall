@@ -23,7 +23,7 @@ The state of a pointer whose cited path no longer exists, or whose code symbol n
 _Avoid_: stale, broken link, drift
 
 **State**:
-A fact about the current status or next step of a ticket or PR. It expires.
+A fact about the current status or next step of a ticket, PR or branch. It expires.
 _Avoid_: progress, status note
 
 **Gotcha**:

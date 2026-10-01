@@ -204,6 +204,11 @@ class HarnessTest(unittest.TestCase):
         mem = os.path.join(harness.PROJECTS, "-w-app", "memory")
         with open(os.path.join(mem, "note.md"), "w") as fh:
             fh.write("builtin note")
+        with open(os.path.join(mem, "far.md"), "w") as fh:
+            fh.write("the same fact, stated in a file the search never ranked")
+        os.makedirs(os.path.join(home, "extract"))
+        with open(os.path.join(home, "extract", "S1.json"), "w") as fh:
+            json.dump(dict(main="/w/app"), fh)
         os.makedirs(os.path.join(home, "log"))
         ms = 1767225600000
         with open(os.path.join(home, "log", "openrecall.jsonl"), "w") as fh:
@@ -222,16 +227,19 @@ class HarnessTest(unittest.TestCase):
 
         def check(fact, candidates, old):
             asked.append((fact, candidates, old))
-            return dict(repeat=[0.9, 0.1][:len(candidates)], supersede=[0.8, 0.75][:len(candidates)],
+            return dict(repeat=[0.9, 0.1, 0.95][:len(candidates)], supersede=[0.8, 0.75, 0.0][:len(candidates)],
                         kept=0.2 if old is not None else None)
 
         since = datetime(2026, 1, 2, tzinfo=timezone.utc)
         text = "\n".join(harness.extraction_lines(since, check))
-        self.assertEqual(asked, [("A\n\nnew fact a", ["C\n\nown c", "builtin note"], None), ("B\n\nmerged b", [], "old b")])
+        far = "the same fact, stated in a file the search never ranked"
+        self.assertEqual(asked, [("A\n\nnew fact a", ["C\n\nown c", "builtin note", far], None), ("B\n\nmerged b", [], "old b")],
+                         "a memory that shares words with the fact is checked though the binary never ranked it")
         for part in ("1 runs over 1 sessions, last success 2026-01-01 00:00 UTC; strikes 1; sessions marked failed 1: S2;",
                      "last stop: http 401 at", "last start with extraction off: no extract.toml at",
                      "proposed 3, new 1, replaced 1, skipped 0, dropped 1 (secret 1); names normalized 1; tokens 100 in, 20 out; cost $0.05.",
-                     "2 of 2 written facts checked. Repeats that got through: 1: github.com/x/app/a (github.com/x/app/c).",
+                     "2 of 2 written facts checked, each against its logged candidates and up to 10 unranked memories",
+                     "Repeats that got through: 2: github.com/x/app/a (github.com/x/app/c); github.com/x/app/a (builtin/-w-app/far).",
                      "Missed replaces of an own fact: 1: github.com/x/app/a (github.com/x/app/c).",
                      "out of date: 1: github.com/x/app/a (builtin/-w-app/note).", "Merges that lost old detail: 1 of 1: github.com/x/app/b.",
                      "Store size: github.com/x/app 3.",
@@ -239,6 +247,12 @@ class HarnessTest(unittest.TestCase):
             self.assertIn(part, text)
         harness.extraction_lines(since, check)
         self.assertEqual(len(asked), 2, "each written fact is asked once")
+        with open(os.path.join(harness.EVAL, "dedupe.jsonl")) as fh:
+            rows = [json.loads(line) for line in fh]
+        with open(os.path.join(harness.EVAL, "dedupe.jsonl"), "w") as fh:
+            fh.writelines(json.dumps({k: v for k, v in r.items() if k != "unranked"}) + "\n" for r in rows)
+        harness.extraction_lines(since, check)
+        self.assertEqual(len(asked), 4, "a row checked against the logged candidates alone is asked again")
 
         fact = os.path.join(repo, "state.md")
         for expires, kept in (("2026-01-10", False), ("2026-01-05", True)):
@@ -292,6 +306,11 @@ class HarnessTest(unittest.TestCase):
         self.assertTrue(harness.present("commits", "abc1234def", found))
         self.assertTrue(harness.present("paths", "src/export.py", found))
         self.assertFalse(harness.present("prs", "346", found))
+        tails = 'cat "$d"/.cache/a.jsonl ${d}/src/a.py $d/.cache/b.jsonl {root}/src/b.py src/app/[id]/team/route.ts ' \
+                '~/x/*/hooks/hooks.json https://example.com/owner/repo.git s3://my-bucket/dir/a.html origin/main:api-docs/a.mdx'
+        self.assertEqual(harness.PATH.findall(tails), [], "the tail of a longer token is not a path, as in src/turn.rs")
+        self.assertEqual(harness.PATH.findall('cat "/w/app/a.py" (\'src/b.py\') **src/c.py** x="src/d.py"'),
+                         ["/w/app/a.py", "src/b.py", "src/c.py", "src/d.py"])
         for url in ("git@github.com:someone/app.git", "https://github.com/someone/app", "ssh://git@github.com:22/someone/app/"):
             self.assertEqual(harness.normalize(url), "github.com/someone/app")
         pool = [("big", i) for i in range(8)] + [("small", i) for i in range(2)]

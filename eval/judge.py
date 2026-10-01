@@ -26,6 +26,8 @@ JUDGE = [os.environ.get("OPENRECALL_JUDGE", ""),
          os.path.expanduser("~/.claude/plugins/marketplaces/sensibility/skills/judge/scripts/judge.py"),
          os.path.expanduser("~/Code/sensibility/skills/judge/scripts/judge.py")]
 MEMORY_CHARS = 1500
+# What the index holds of a memory's body (src/index.rs BODY_BYTES): a dedupe candidate is read that far, in calls of 5.
+CANDIDATE_CHARS = 4096
 CONTEXT_CHARS = 400
 
 
@@ -80,24 +82,51 @@ def label_case(case, candidates, memories, earlier):
 
 
 def dedupe_check(fact, candidates, old=None):
-    """Ticket 26's questions for one written fact, one call: per candidate, does it already state the fact (repeat)
-    and does the fact make it out of date (supersede); for a replace, does the merged fact keep the old copy's detail."""
-    keys = ["c%d" % i for i in range(len(candidates))]
-    state = dict(fact=fact[:MEMORY_CHARS], candidates={k: t[:MEMORY_CHARS] for k, t in zip(keys, candidates)})
-    questions = {}
-    for k in keys:
-        questions["repeat_" + k] = dict(type="noul", instructions="Does `candidates.%s` already state what `fact` says, "
-                                        "so a reader of it would learn nothing new from `fact`?" % k)
-        questions["supersede_" + k] = dict(type="noul", instructions="Is `candidates.%s` about the same thing as `fact`, "
-                                           "and does `fact` make it wrong or out of date?" % k)
+    """Ticket 26's questions for one written fact: per candidate, does it already state the fact (repeat) and does the
+    fact make it out of date (supersede); for a replace, does the merged fact keep the old copy's detail."""
+    repeat, supersede = [], []
+    for at in range(0, len(candidates), 5):
+        texts = {"c%d" % i: t[:CANDIDATE_CHARS] for i, t in enumerate(candidates[at:at + 5])}
+        questions = {}
+        for k in texts:
+            questions["repeat_" + k] = dict(type="noul", instructions="Does `candidates.%s` already state what `fact` says, "
+                                            "so a reader of it would learn nothing new from `fact`?" % k)
+            questions["supersede_" + k] = dict(type="noul", instructions="Is `candidates.%s` about the same thing as `fact`, "
+                                               "and does `fact` make it wrong or out of date?" % k)
+        answers = ask(dict(fact=fact[:MEMORY_CHARS], candidates=texts), questions)
+        repeat += [answers.get("repeat_" + k, {}).get("noul", 0.0) for k in texts]
+        supersede += [answers.get("supersede_" + k, {}).get("noul", 0.0) for k in texts]
+    kept = None
     if old is not None:
-        state["old"] = old[:MEMORY_CHARS]
-        questions["kept"] = dict(type="noul", instructions="`fact` replaced `old`. Does `fact` keep every detail of `old` "
-                                                           "that is still true?")
-    answers = ask(state, questions) if questions else {}
-    p = lambda k: answers.get(k, {}).get("noul", 0.0)
-    return dict(repeat=[p("repeat_" + k) for k in keys], supersede=[p("supersede_" + k) for k in keys],
-                kept=p("kept") if old is not None else None)
+        kept = ask(dict(fact=fact[:MEMORY_CHARS], old=old[:MEMORY_CHARS]), dict(kept=dict(
+            type="noul", instructions="`fact` replaced `old`. Does `fact` keep every detail of `old` that is still true?"
+        ))).get("kept", {}).get("noul", 0.0)
+    return dict(repeat=repeat, supersede=supersede, kept=kept)
+
+
+GOAL = {
+    "task": "it states the feature, fix, question or ticket that most of `asks` and `next_prompts` work on",
+    "step": "it is one step, follow-up, answer, side question or status check inside or beside that work",
+    "other": "it is about different work than most of `asks` and `next_prompts`",
+}
+
+
+def goal_check(goals, asks, last_answer, next_prompts):
+    """Build step 7: what each candidate Goal of one handoff record is: the task, a step of it, or other work.
+    `asks` are the prompts the record's sessions got, oldest first; `next_prompts` open the session that took over.
+    Returns {key: (choice, probabilities)}."""
+    state = dict(goals={k: g[:CONTEXT_CHARS] for k, g in goals.items()}, asks=[a[:CONTEXT_CHARS] for a in asks],
+                 last_answer=last_answer[:MEMORY_CHARS], next_prompts=[p[:CONTEXT_CHARS] for p in next_prompts])
+    answers = ask(state, {k: dict(type="choice", criteria=GOAL,
+                                  instructions="`asks` are the prompts one task got, oldest first. `last_answer` is the last "
+                                               "reply on it. `next_prompts` are the first prompts of the next session on the "
+                                               "task. A new session reads `goals.%s` as the goal of the task. What is it?" % k)
+                          for k in goals})
+    out = {}
+    for k, a in answers.items():
+        probs = a.get("probabilities") or {}
+        out[k] = (a.get("choice") if a.get("choice") in GOAL else max(GOAL, key=lambda c: probs.get(c, 0)), probs)
+    return out
 
 
 def openviking_block(session, at):

@@ -182,6 +182,12 @@ fn a_new_session_gets_the_earlier_sessions_state() {
         "a session is never pushed its own record"
     );
 
+    let updated_at = |w: &World| {
+        let rec = w.record("feat--x").unwrap();
+        let line = rec.lines().find(|l| l.starts_with("updated_at: ")).unwrap();
+        line["updated_at: ".len()..].to_string()
+    };
+    let e_wrote = updated_at(&w);
     w.hook(&["handoff"], "S", json!({"source": "startup"}));
     assert!(
         w.pushed("S", "continue please").is_none(),
@@ -195,8 +201,12 @@ fn a_new_session_gets_the_earlier_sessions_state() {
         ],
         "",
     );
+    assert_ne!(updated_at(&w), e_wrote, "S's identifiers-only write still moves the retirement clock");
     let ctx = w.pushed("S", "what is left").expect("pushed once settled");
-    assert!(ctx.starts_with("Handoff record for branch feat/x, last written "));
+    assert!(
+        ctx.starts_with(&format!("Handoff record for branch feat/x, last written {e_wrote} by an earlier session")),
+        "the header shows E's last write, not S's own: {ctx}"
+    );
     assert!(ctx.contains("(github.com/someone/app/handoffs/feat--x)"));
     assert!(ctx.contains("## Goal\nBuild ABC-12 so exports stop failing on empty rows\n"));
     assert!(
@@ -782,4 +792,36 @@ fn extraction_writes_dedupes_and_moves_the_cursor() {
     fs::write(repo.join("pr-345-review.md"), past).unwrap();
     w.hook(&["recall"], "S2", json!({"prompt": "what is the state of the PR #345 review for ABC-12"}));
     assert!(fs::read_to_string(&log).unwrap().lines().last().unwrap().contains("\"expired\":1"), "an expired state fact is never injected");
+}
+
+#[test]
+fn dedupe_sees_a_built_in_memory_past_the_top_five_and_past_its_start() {
+    let w = World::new("dedupe-builtin");
+    w.branch("feat/x");
+    let home = w.home.join(".openrecall");
+    let repo = home.join("repos/github.com/someone/app");
+    for i in 0..6 {
+        let text = format!("The search tool score gate note {i}: k slots and weak matches.");
+        w.memory(&repo, &format!("search-note-{i}"), "gotcha", "source: E0 2026-01-01T00:00:00.000Z\n", &text, &text);
+    }
+    let stated = "The search tool applies no gate and k defaults to 5.";
+    let long = format!("{}{stated}", "The build notes list the deploy order, the release rota and the staging checks. ".repeat(18));
+    assert!(long.find(stated).unwrap() > 1200);
+    w.memory(&w.builtin_dir(), "tools-build", "project", "", "Build notes for the tools", &long);
+    let p = Provider::start(vec![
+        answer(json!({"facts": [{"type": "gotcha", "name": "search-tool-fills-k",
+            "description": "The search tool has no score gate and k defaults to 5, so weak matches fill the slots",
+            "body": "The search tool has no score gate and k defaults to 5, so weak matches fill the slots."}], "claude_md_rules": []})),
+        answer(json!({"decisions": [{"fact": 0, "action": "skip", "address": "", "description": "", "body": ""}]})),
+    ]);
+    fs::write(home.join("extract.toml"), format!("base_url = \"http://127.0.0.1:{}/v1\"\nmodel = \"test/model\"\n", p.port)).unwrap();
+    fs::write(home.join("api-key"), "sk-test-123\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(home.join("api-key"), fs::Permissions::from_mode(0o600)).unwrap();
+    w.turn("S1", &[user("Why does the search tool return weak matches for a short query?"), said("It has no gate.", None)], "");
+    w.hook(&["extract"], "S1", json!({"hook_event_name": "SessionEnd"}));
+    let log = wait_for(&home.join("log/openrecall.jsonl"), "\"event\":\"extract\",\"from\":0");
+    let dedupe = p.requests()[1].1["messages"][1]["content"].as_str().unwrap().to_string();
+    assert!(dedupe.contains("/tools-build [project] ") && dedupe.contains(stated), "{dedupe}");
+    assert!(log.contains("\"action\":\"skip\"") && log.contains("\"skipped\":1") && !repo.join("search-tool-fills-k.md").exists(), "{log}");
 }

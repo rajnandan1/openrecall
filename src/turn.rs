@@ -366,7 +366,8 @@ pub(crate) fn commits_in(text: &str) -> impl Iterator<Item = &str> {
     })
 }
 
-/// Path-like tokens: not after a word character, `/`, `:`, `@` or `$`, and not followed by a word character or `/`.
+/// Path-like tokens that are not the tail of a longer token (a URL, a glob, an expansion such as `"$d"/x.py`): not after
+/// a word character, one of `/:@$.-})]` or a closing quote, an absolute one not after `*`; not before a word character or `/`.
 pub(crate) fn paths_in(text: &str) -> Vec<&str> {
     let mut out = vec![];
     let mut at = 0;
@@ -377,10 +378,14 @@ pub(crate) fn paths_in(text: &str) -> Vec<&str> {
         if !free_after(s) && LINE_SUFFIX.is_match(s) {
             s = &s[..LINE_SUFFIX.find(s).unwrap().start()];
         }
-        let free_before = text[..m.start()]
-            .chars()
-            .next_back()
-            .is_none_or(|c| !is_word(c) && !"/:@$".contains(c));
+        let joins = |c: char| is_word(c) || "})".contains(c);
+        let mut before = text[..m.start()].chars().rev();
+        let free_before = match (before.next(), before.next()) {
+            (None, _) => true,
+            (Some('"' | '\''), Some(c)) => !joins(c),
+            (Some('*'), _) => !s.starts_with('/'),
+            (Some(c), _) => !joins(c) && !"/:@$.-]".contains(c),
+        };
         if free_before && free_after(s) {
             out.push(s);
             at = m.start() + s.len();
@@ -459,6 +464,32 @@ mod tests {
             ["a/b.c", "docs/x.md"]
         );
         assert_eq!(tickets("ABC-12 and abc-12 and ABCDEF-1"), ["ABC-12"]);
+    }
+
+    #[test]
+    fn the_tail_of_a_longer_token_is_not_a_path() {
+        for text in [
+            r#"cat "$d"/.cache/log/app.jsonl"#,
+            "cat ${d}/.cache/log/app.jsonl $(pwd)/src/a.py $d/.cache/log/app.jsonl",
+            "open(f'{root}/src/a.py')",
+            "ls src/app/[id]/team/route.ts src/app/(group)/team/page.tsx ~/x/*/hooks/hooks.json",
+            "curl https://example.com/owner/repo.git s3://my-bucket/dir/a.html",
+            "git show origin/main:.github/workflows/ci.yml origin/main:api-docs/search/a.mdx",
+        ] {
+            assert!(paths_in(text).is_empty(), "{text}: {:?}", paths_in(text));
+        }
+        assert_eq!(
+            paths_in(r#"cat "/w/app/a.py" 'src/b.py' ("src/c.py") **src/d.py** x="src/e.py" ./f/g.py"#),
+            ["/w/app/a.py", "src/b.py", "src/c.py", "src/d.py", "src/e.py", "./f/g.py"]
+        );
+        let bash = json!({"type": "tool_use", "id": "t1", "name": "Bash", "input":
+            {"command": r#"for d in /w/h*; do tail -1 "$d"/.cache/log/app.jsonl; done"#}});
+        let data = lines(&[
+            json!({"type": "user", "message": {"content": "check the logs"}}),
+            json!({"type": "assistant", "message": {"content": [bash]}}),
+        ]);
+        let found = last_turn(&data, "").unwrap().mine("/w/app", "/h");
+        assert!(found.paths.is_empty(), "{:?}", found.paths);
     }
 
     #[test]
