@@ -139,15 +139,35 @@ Claude sees them as `mcp__plugin_openrecall_openrecall__recall`, `__remember` an
 
 Without extraction, OpenRecall's own facts come only from `remember`. With it, a background worker reads each finished session and writes the decisions, preferences, pointers, state and gotchas a later session would still need. It never runs on the prompt path.
 
-Extraction sends your session text to an LLM provider you choose, and it costs money. So it is off until you give it a provider:
+Extraction sends your session text to an LLM provider you choose, and it costs money. So it is off until you write two files: `api-key` with your key, and `extract.toml` with where to send it.
+
+1. Create the folder, if the plugin has not already.
+2. Write your key to `~/.openrecall/api-key`, alone on one line. Replace `YOUR_API_KEY` with the real key.
+3. Make that file readable only by you. The worker refuses a key file that group or others can read.
+4. Write `~/.openrecall/extract.toml` with the endpoint and the model.
 
 ```sh
-mkdir -p ~/.openrecall && umask 077
-pbpaste > ~/.openrecall/api-key      # the key alone; the worker refuses the file if group or others can read it
-printf 'base_url = "https://openrouter.ai/api/v1"\nmodel = "anthropic/claude-sonnet-5.5"\n' > ~/.openrecall/extract.toml
+# 1. The folder OpenRecall keeps everything in.
+mkdir -p ~/.openrecall
+
+# 2. The key alone; the worker trims the trailing newline echo adds.
+echo 'YOUR_API_KEY' > ~/.openrecall/api-key
+
+# 3. Owner can read and write, nobody else can do anything.
+chmod 600 ~/.openrecall/api-key
+
+# 4. base_url: the provider's OpenAI-style API root. model: the model's full ID.
+cat > ~/.openrecall/extract.toml <<'EOF'
+base_url = "https://openrouter.ai/api/v1"
+model = "anthropic/claude-sonnet-5.5"
+EOF
 ```
 
+The `echo` line leaves the key in your shell history. Delete that entry afterwards, or open the file in an editor and paste the key there instead.
+
 Any endpoint that speaks OpenAI's `POST <base_url>/chat/completions` with a JSON schema works. Write the model as its full ID, never an alias. Do not export the key in a shell profile.
+
+To check it, start a new Claude session and end it. The worker logs each run, or the reason extraction is off, to `~/.openrecall/log/openrecall.jsonl`.
 
 The worker starts at every session start and end, takes each session that ended or has been quiet for 30 minutes, and reads only what it has not read before, with the earlier turns as context. One worker runs at a time.
 
