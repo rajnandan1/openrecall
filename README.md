@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo/openrecall-horizontal-on-dark.svg">
+    <img src="assets/logo/openrecall-horizontal.svg" alt="OpenRecall" width="360">
+  </picture>
+</p>
+
 # OpenRecall
 
 You stop a Claude Code session halfway through a task. The next session starts blank. It does not know the ticket, the PR, the commands that worked, or what you asked last, so you spend the first few prompts typing it all again.
