@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: macos-latest
@@ -61,9 +65,12 @@ jobs:
 
       - name: Publish
         if: steps.check.outputs.release == 'new'
-        run: >
-          gh release create "v$VERSION" --target "$GITHUB_SHA" --latest --title "v$VERSION" --notes ""
-          openrecall-aarch64-apple-darwin openrecall-aarch64-apple-darwin.sha256
+        run: |
+          latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>/dev/null) || latest=""
+          newest=$(printf '%s\n%s\n' "${latest#v}" "$VERSION" | sort -V | tail -n 1)
+          [ "$newest" = "$VERSION" ] && mark=true || mark=false
+          gh release create "v$VERSION" --target "$GITHUB_SHA" --latest="$mark" --title "v$VERSION" --notes "" \
+            openrecall-aarch64-apple-darwin openrecall-aarch64-apple-darwin.sha256
 
       - name: Install with the install command
         if: steps.check.outputs.release == 'new'

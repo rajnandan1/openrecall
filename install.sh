@@ -17,7 +17,7 @@ install_openrecall() {
         exit 1
     fi
     mkdir -p "$bin" || fail "cannot create $bin"
-    rm -rf "$bin"/.openrecall-install.*
+    find "$bin" -maxdepth 1 -name '.openrecall-install.*' -mmin +10 -exec rm -rf {} +
 
     to=$(/usr/bin/curl -q -sS --proto =https --max-time 10 -o /dev/null -w '%{redirect_url}' "$releases/latest") ||
         fail "cannot reach $releases/latest"
