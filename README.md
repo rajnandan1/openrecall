@@ -45,12 +45,11 @@ The first part is the handoff record for the branch. The last line is one recall
 
 ## Install
 
-You need macOS on Apple silicon, with Rust installed.
+You need macOS on Apple silicon.
 
 ```sh
-# Build the openrecall binary from this repo into ~/.local/bin.
-# --locked builds with the exact dependency versions in Cargo.lock.
-cargo install --locked --git https://github.com/rajnandan1/openrecall --root ~/.local
+# Download the latest release of the openrecall binary into ~/.local/bin.
+curl -fsSL https://raw.githubusercontent.com/rajnandan1/openrecall/main/install.sh | sh
 
 # Add this repo as a plugin marketplace, so Claude Code can find the plugin.
 claude plugin marketplace add rajnandan1/openrecall
@@ -58,6 +57,8 @@ claude plugin marketplace add rajnandan1/openrecall
 # Install the plugin: the hooks and the MCP server. They all run the binary.
 claude plugin install openrecall@openrecall
 ```
+
+The first command is the install command. It downloads the latest release, checks its SHA-256 hash, and puts the binary at `~/.local/bin/openrecall`. It needs no Rust.
 
 The plugin holds only configuration. Every hook and the MCP server run `openrecall`, so `~/.local/bin` must be on your `PATH`. If a session cannot find `openrecall`, the session tells you when it starts.
 
@@ -74,18 +75,35 @@ find ~/.openrecall/repos -path '*/handoffs/*.md'
 
 ### Update
 
-Update the binary and the plugin together. Then restart Claude Code.
+OpenRecall updates itself in the background, at most once in 24 hours. It replaces the binary first, then it updates the plugin. Sessions that were open before an update get the new MCP server and plugin after a restart of Claude Code.
 
-```sh
-# Rebuild the binary from the latest commit. --force replaces the binary you have.
-cargo install --locked --force --git https://github.com/rajnandan1/openrecall --root ~/.local
+To turn off the update check for every session, set `OPENRECALL_UPDATE` to `0` in the `env` key of `~/.claude/settings.json`:
 
-# Get the latest plugin list from GitHub. Then update the plugin.
-claude plugin marketplace update openrecall
-claude plugin update openrecall@openrecall
+```json
+{
+  "env": {
+    "OPENRECALL_UPDATE": "0"
+  }
+}
 ```
 
-If the version of the binary does not match the version of the plugin, the next session tells you when it starts. It also gives you the command to run.
+If you turned on Claude Code's own auto-update for the `openrecall` marketplace, turn it off there too. `OPENRECALL_UPDATE` does not reach it.
+
+A source build never updates itself.
+
+To update by hand, run the install command again. For the plugin, run `claude plugin update openrecall@openrecall`.
+
+When the plugin and the binary have different versions and you must act, the next session tells you when it starts. It also gives you the command to run.
+
+### Build from source
+
+To build the binary from source, you need Rust. This command builds it from this repo into `~/.local/bin`. `--locked` builds with the exact dependency versions in `Cargo.lock`.
+
+```sh
+cargo install --locked --git https://github.com/rajnandan1/openrecall --root ~/.local
+```
+
+A source build never updates itself. To move from a source build to a release binary, run the install command.
 
 ## How it works
 
@@ -301,7 +319,7 @@ To remove OpenRecall completely, run the three commands below. The last command 
 
 ```sh
 claude plugin uninstall openrecall@openrecall
-cargo uninstall --root ~/.local openrecall
+rm ~/.local/bin/openrecall
 rm -rf ~/.openrecall      # every fact, handoff record and setting OpenRecall wrote
 ```
 

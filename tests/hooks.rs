@@ -14,6 +14,7 @@ struct World {
     home: PathBuf,
     folder: PathBuf,
     entrypoint: &'static str,
+    plugin: Option<PathBuf>,
 }
 
 impl World {
@@ -32,6 +33,7 @@ impl World {
             root,
             folder,
             entrypoint: "cli",
+            plugin: None,
         }
     }
 
@@ -47,9 +49,8 @@ impl World {
     }
 
     fn spawn(&self, args: &[&str]) -> Child {
-        let guard = SPAWN.lock().unwrap();
-        let child = Command::new(env!("CARGO_BIN_EXE_openrecall"))
-            .args(args)
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_openrecall"));
+        cmd.args(args)
             .env_clear()
             .env("HOME", &self.home)
             .env("OPENRECALL_HOME", self.home.join(".openrecall"))
@@ -57,9 +58,12 @@ impl World {
             .env("CLAUDE_CODE_ENTRYPOINT", self.entrypoint)
             .env("CLAUDE_CODE_SESSION_ID", "M")
             .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
+            .stdout(Stdio::piped());
+        if let Some(plugin) = &self.plugin {
+            cmd.env("CLAUDE_PLUGIN_ROOT", plugin);
+        }
+        let guard = SPAWN.lock().unwrap();
+        let child = cmd.spawn().unwrap();
         drop(guard);
         child
     }
@@ -359,7 +363,7 @@ fn skipped_sessions_write_nothing_and_every_exit_is_zero() {
         (&["capture", "--x"][..], "{}"),
         (&[][..], ""),
     ] {
-        assert_eq!(w.run(args, input).1, 0);
+        assert_eq!(w.run(args, input), (String::new(), 0), "{args:?}");
     }
     let note = w.hook(
         &["recall"],
@@ -371,6 +375,74 @@ fn skipped_sessions_write_nothing_and_every_exit_is_zero() {
         fs::read_to_string(w.home.join(".openrecall/status/N")).unwrap(),
         "recall 0 · skipped\n"
     );
+}
+
+#[test]
+fn version_answers_in_a_skipped_session_and_marks_a_source_build() {
+    let mut w = World::new("version");
+    w.entrypoint = "sdk-cli";
+    let (out, code) = w.run(&["version"], "");
+    assert_eq!((out.as_str(), code), (format!("{} (source build)\n", env!("CARGO_PKG_VERSION")).as_str(), 0));
+    assert!(!w.home.exists());
+}
+
+#[test]
+fn session_start_shows_a_waiting_message_once_beside_the_version_warning() {
+    let mut w = World::new("message");
+    w.branch("feat/x");
+    let state = w.home.join(".openrecall/update/state.json");
+    fs::create_dir_all(state.parent().unwrap()).unwrap();
+    fs::write(&state, r#"{"attempted_at":1,"failures":4,"message":"OpenRecall could not update itself: x."}"#).unwrap();
+    fs::create_dir_all(w.root.join("plugin/.claude-plugin")).unwrap();
+    fs::write(w.root.join("plugin/.claude-plugin/plugin.json"), r#"{"version": "99.0.0"}"#).unwrap();
+    w.plugin = Some(w.root.join("plugin"));
+    let shown = |w: &World| {
+        let out = w.hook(&["handoff"], "S", json!({"source": "startup"}));
+        serde_json::from_str::<Value>(&out).ok().map(|v| v["systemMessage"].as_str().unwrap().to_string())
+    };
+    let warning = format!(
+        "OpenRecall binary {} is older than plugin 99.0.0. Update the binary: curl -fsSL https://raw.githubusercontent.com/rajnandan1/openrecall/main/install.sh | sh",
+        env!("CARGO_PKG_VERSION")
+    );
+    assert_eq!(shown(&w), Some(format!("OpenRecall could not update itself: x.\n{warning}")));
+    assert_eq!(shown(&w), Some(warning), "the message shows once, and a source build still warns");
+    assert_eq!(fs::read_to_string(&state).unwrap(), r#"{"attempted_at":1,"failures":4}"#);
+    w.plugin = None;
+    assert_eq!(shown(&w), None);
+}
+
+fn copy_dir(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap().map(Result::unwrap) {
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir(&entry.path(), &to.join(entry.file_name()));
+        } else {
+            fs::copy(entry.path(), to.join(entry.file_name())).unwrap();
+        }
+    }
+}
+
+/// Every later release must read a home in the formats of 0.2.0. A release that adds a field adds a file that holds
+/// it. The record's date lies in the future, so it never retires.
+#[test]
+fn a_home_from_0_2_0_still_reads() {
+    let w = World::new("compat");
+    w.branch("feat/x");
+    copy_dir(Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/home-0.2.0")), &w.home.join(".openrecall"));
+    let out = w.hook(&["handoff"], "NEW", json!({"source": "startup"}));
+    assert!(out.contains("OpenRecall updated from 0.1.0 to 0.2.0. Sessions that were open"), "the update state: {out}");
+    let ctx = w.pushed("NEW", "status of ABC-12?").expect("the handoff record");
+    assert!(ctx.contains("tickets: ABC-12\nprs: #345\n") && ctx.ends_with("## Last answer\nOpened PR #345. Next: ask for review.\n"), "{ctx}");
+    assert!(w.pushed("OLD", "status of ABC-12?").is_none(), "the session state's ledger");
+    let status = fs::read_to_string(w.home.join(".openrecall/status/OLD")).unwrap();
+    assert!(status.starts_with("recall 2 · "), "the session state's total: {status}");
+    let mut m = Mcp::start(&w);
+    let (text, _) = m.tool("recall", json!({"query": "export queue retries"}));
+    assert!(
+        text.starts_with("- decision 2026-10-03 github.com/someone/app/export-retry-limit: The export queue retries a failed row 3 times"),
+        "the memory file: {text}"
+    );
+    m.close();
 }
 
 #[test]

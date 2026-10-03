@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "command -v openrecall >/dev/null 2>&1 || { printf '%s\\n' '{\"systemMessage\": \"OpenRecall is off: no openrecall on PATH. Install: cargo install --locked --git https://github.com/rajnandan1/openrecall --root ~/.local\"}'; exit 0; }; exec openrecall handoff"
+            "command": "command -v openrecall >/dev/null 2>&1 || { printf '%s\\n' '{\"systemMessage\": \"OpenRecall is off: no openrecall on PATH. Install: curl -fsSL https://raw.githubusercontent.com/rajnandan1/openrecall/main/install.sh | sh\"}'; exit 0; }; exec openrecall handoff"
           }
         ]
       }

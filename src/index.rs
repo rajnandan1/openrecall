@@ -219,7 +219,7 @@ impl Index {
         let conn = Connection::open(home.join("index.db"))?;
         conn.busy_timeout(std::time::Duration::from_millis(200))?;
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version < SCHEMA {
+        if version != SCHEMA {
             conn.execute_batch("DROP TABLE IF EXISTS files; DROP TABLE IF EXISTS ft;")?;
         }
         conn.execute_batch(
@@ -700,6 +700,22 @@ mod tests {
         assert!(!rotted("run `curl` and `index.db` beside src/a.py", Some(&tmp), &tmp));
         assert!(!rotted("`ANTHROPIC_API_KEY` is never in src/b.toml", Some(&tmp), &tmp));
         assert!(!rotted("`run_import` is named, no file cited", Some(&tmp), &tmp));
+        fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn a_schema_number_from_any_other_version_rebuilds_the_index() {
+        let tmp = std::env::temp_dir().join(format!("openrecall-schema-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        for other in [SCHEMA - 1, SCHEMA + 1] {
+            let ix = Index::open(&tmp).unwrap();
+            ix.conn.execute("INSERT INTO files (path) VALUES ('x')", []).unwrap();
+            ix.conn.pragma_update(None, "user_version", other).unwrap();
+            drop(ix);
+            let ix = Index::open(&tmp).unwrap();
+            let rows: i64 = ix.conn.query_row("SELECT count(*) FROM files", [], |r| r.get(0)).unwrap();
+            assert_eq!(rows, 0, "schema {other}");
+        }
         fs::remove_dir_all(tmp).unwrap();
     }
 

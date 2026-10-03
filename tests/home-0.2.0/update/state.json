@@ -1,0 +1,1 @@
+{"attempted_at":1759449600,"failures":0,"plugin":"0.2.0","message":"OpenRecall updated from 0.1.0 to 0.2.0. Sessions that were open before the update get the new MCP server and plugin after a restart of Claude Code."}

@@ -261,3 +261,81 @@ _Avoid_: end state, last state
 **Carry-over**:
 The share of an earlier session's final-state identifiers that reach a new session on the same task by its third real prompt, without the user retyping them.
 _Avoid_: recall rate, hit rate, continuity score
+
+### Updating
+
+**Binary**:
+The one program that does all of OpenRecall's work. The hooks, the MCP server and the update check all run it.
+_Avoid_: CLI, executable, tool
+
+**Plugin**:
+The Claude Code configuration that points a session's hooks and its MCP server at the binary. It holds no logic.
+_Avoid_: extension, integration, hooks (those are one part of it)
+
+**Release**:
+One published version of OpenRecall: a binary and the plugin that belongs to it. The update check installs nothing else.
+_Avoid_: build, deploy, drop, tag
+
+**Version**:
+The one number that a release carries. The binary and the plugin of a release hold the same version, and each release has a higher version than every release before it.
+_Avoid_: build number, plugin version, binary version
+
+**Release binary**:
+A binary that the release workflow built and published. Only a release binary runs the update check.
+_Avoid_: official build, production build
+
+**Source build**:
+A binary that somebody built from source, outside the release workflow. It never runs the update check, so its owner updates it by hand.
+_Avoid_: dev build, local build, debug build
+
+**Install command**:
+The one line that a user runs to put the newest release binary on a Mac. It serves a first install, a repair by hand, and the move from a source build to a release binary.
+_Avoid_: installer, setup script, bootstrap, first install's command
+
+**Update check**:
+The background work that looks for a newer release and installs it. It has two steps: the binary step, then the plugin step. It never runs on the prompt path.
+_Avoid_: auto-updater, upgrade, sync
+
+**Binary step**:
+The first step of the update check: it finds a newer release, downloads its binary, checks it and swaps it in.
+_Avoid_: self-update, download step
+
+**Plugin step**:
+The second step of the update check: it asks Claude Code to update the plugin when the plugin is older than the binary.
+_Avoid_: plugin sync, marketplace update
+
+**Off switch**:
+The user's setting that stops the whole update check, the binary step and the plugin step. It does not reach Claude Code's own plugin auto-update.
+_Avoid_: opt-out, kill switch, disable flag
+
+**Attempt**:
+One run of the binary step, whatever its result. A failed attempt still counts, so a broken release cannot make a machine download on every session start.
+_Avoid_: try, check (the update check holds both steps), poll
+
+**Swap**:
+Putting a downloaded binary in the place of the installed one in one atomic move. Running sessions keep working, and their next hook runs the new binary.
+_Avoid_: overwrite, install, replace in place
+
+**Mixed session**:
+A session that was open during a swap. Its hooks run the new binary, and its MCP server and its plugin stay old until Claude Code restarts.
+_Avoid_: stale session, half-updated session
+
+**Add-only rule**:
+The rule that a release only adds to what old and new code share: commands, MCP tools, files in the home, and the parts of the update check. It never removes one, renames one or changes its meaning. With it, each release works with every earlier version.
+_Avoid_: backward compatibility, migration, breaking change policy
+
+**Version warning**:
+The line that a session shows at its start when its plugin and the binary have different versions and the user may need to act. It names the command to run.
+_Avoid_: mismatch error, version mismatch, update prompt
+
+**Smoke test**:
+The check that a downloaded binary starts and reports the version of its release, before the swap. A source build does not pass it. It guards against a binary that could never update again, which no later release could repair.
+_Avoid_: self-test, sanity check, dry run
+
+**Integrity check**:
+The check that a downloaded binary must pass before it replaces the installed one: its bytes match the hash that its release publishes. It catches a broken download. It does not catch a release published from a stolen account.
+_Avoid_: verification, signature check, checksum
+
+**Roll forward**:
+Repairing a bad release by publishing a higher version. A binary never installs a release that is not newer than itself, so there is no rollback.
+_Avoid_: rollback, downgrade, revert
