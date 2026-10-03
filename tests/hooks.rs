@@ -235,7 +235,7 @@ fn a_new_session_gets_the_earlier_sessions_state() {
         "never twice in one context window"
     );
     let status = fs::read_to_string(w.home.join(".openrecall/status/S")).unwrap();
-    assert!(status.starts_with("recall 0 · "), "{status}");
+    assert!(status.starts_with("recall 1 · "), "the total keeps the record pushed one prompt earlier: {status}");
 
     w.turn(
         "S",
@@ -369,7 +369,7 @@ fn skipped_sessions_write_nothing_and_every_exit_is_zero() {
     assert!(note.is_empty());
     assert_eq!(
         fs::read_to_string(w.home.join(".openrecall/status/N")).unwrap(),
-        "recall skipped\n"
+        "recall 0 · skipped\n"
     );
 }
 
@@ -539,6 +539,48 @@ fn the_gate_opens_at_ten_rows_from_every_scope() {
     config("app");
     let ctx = w.pushed("T", "ledger rounding ABC-77 cents").expect("the other repository's row makes 10");
     assert!(ctx.contains("github.com/someone/app/ledger-rounding"), "{ctx}");
+}
+
+#[test]
+fn the_status_line_totals_the_sessions_injections() {
+    let w = World::new("total");
+    w.branch("feat/x");
+    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    w.fillers(&repo);
+    let source = "source: E 2026-01-02T03:04:05Z\n";
+    w.memory(&repo, "kiwi-checksum", "gotcha", source, "The kiwi importer drops rows without a checksum",
+        "The kiwi importer drops every row that has no checksum.");
+    w.memory(&repo, "walrus-export-encoding", "gotcha", source, "The walrus export writes UTF-16",
+        "The walrus export writes UTF-16 files, so every reader decodes them first.");
+    w.memory(&repo, "walrus-export-header", "decision", source, "The walrus export puts the header row first",
+        "The walrus export puts the header row first, before any data row.");
+    let status = || fs::read_to_string(w.home.join(".openrecall/status/S")).unwrap();
+    let send = |prompt: &str| {
+        let injected = w.pushed("S", prompt).unwrap_or_default().lines().filter(|l| l.starts_with("- ")).count();
+        let line = status();
+        let total = line
+            .strip_suffix(" ms\n")
+            .and_then(|l| l.rsplit_once(" · "))
+            .filter(|(_, ms)| ms.parse::<u64>().is_ok())
+            .map(|(total, _)| total.to_string());
+        (injected, total.unwrap_or(line))
+    };
+    let kiwi = "kiwi importer drops rows";
+    let walrus = "walrus export header encoding";
+
+    w.hook(&["handoff"], "S", json!({"source": "startup"}));
+    assert_eq!(send(kiwi), (1, "recall 1".into()));
+    assert_eq!(send("please tidy the formatting everywhere"), (0, "recall 1".into()));
+    assert_eq!(send(walrus), (2, "recall 3".into()));
+    w.hook(&["recall"], "S", json!({"prompt": "<task-notification>done</task-notification>"}));
+    assert_eq!(status(), "recall 3 · skipped\n");
+    w.hook(&["recall"], "S", json!({"prompt": walrus, "agent_id": "a1"}));
+    assert_eq!(status(), "recall 3 · skipped\n", "a subagent prompt keeps the total");
+
+    w.hook(&["handoff"], "S", json!({"source": "compact"}));
+    assert_eq!(send(kiwi), (1, "recall 4".into()), "a compaction keeps the total");
+    w.hook(&["handoff"], "S", json!({"source": "startup"}));
+    assert_eq!(send(kiwi), (1, "recall 1".into()), "a new start counts from 0");
 }
 
 /// One JSON-RPC client over the server's pipes: each call reads lines until the reply with its id.
