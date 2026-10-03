@@ -98,9 +98,9 @@ Each prompt also searches three places:
 - the repo's Claude Code memory files, `~/.claude/projects/<slug>/memory/` (read-only, `MEMORY.md` left out)
 - global memories, under `~/.openrecall/global/`
 
-It injects at most 3 memories, about 400 tokens in all, and only memories that score 4.0 or more. If nothing scores that high, it injects nothing. Each memory arrives as one line: `- <type> <date> <address>: <text>`. The text is the whole memory when it fits in the room the other lines leave in those 400 tokens. Otherwise it is at most 200 characters.
+It injects at most 3 memories, about 400 tokens in all, and only memories that score 1.50 or more. If nothing scores that high, it injects nothing. It also injects nothing while the index holds fewer than 10 memories, counted over all repos together. The score does not grow when the index grows, so one cut-off holds at every index size. Each memory arrives as one line: `- <type> <date> <address>: <text>`. The text is the whole memory when it fits in the room the other lines leave in those 400 tokens. Otherwise it is at most 200 characters.
 
-These limits are not settings. They are constants in `src/index.rs`: `MAX_LINES` (3), `MAX_CHARS` (1040 characters, about 400 tokens) and `GATE` (4.0, the score cut-off the eval picked). To change one, edit it in a clone and reinstall from there:
+These limits are not settings. They are constants in `src/index.rs`: `MAX_LINES` (3), `MAX_CHARS` (1040 characters, about 400 tokens), `GATE` (1.50, the score cut-off the eval picked) and `MIN_ROWS` (10, the index size below which nothing is injected). To change one, edit it in a clone and reinstall from there:
 
 ```sh
 cargo install --locked --force --path . --root ~/.local

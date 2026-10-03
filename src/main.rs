@@ -279,11 +279,13 @@ fn level2(
         }
     }
     kept.truncate(5);
+    let (size, scores) = ix.scores(&terms, &kept)?;
     let mut lines = vec![];
     let mut chars = index::FRAME.chars().count();
-    for c in kept
+    for (c, _) in kept
         .iter()
-        .filter(|c| c.score >= index::GATE)
+        .zip(&scores)
+        .filter(|&(_, &score)| size >= index::MIN_ROWS && score >= index::GATE)
         .take(index::MAX_LINES)
     {
         let line = index::line(c, 0);
@@ -304,11 +306,13 @@ fn level2(
         .collect();
     let candidates: Vec<Value> = kept
         .iter()
-        .map(|c| json!({"address": c.address, "score": (c.score * 100.0).round() / 100.0, "text_hash": c.text_hash}))
+        .zip(&scores)
+        .map(|(c, score)| json!({"address": c.address, "score": (score * 1000.0).round() / 1000.0,
+                                 "bm25": (c.bm25 * 100.0).round() / 100.0, "text_hash": c.text_hash}))
         .collect();
     Ok((
         lines,
-        json!({"terms": terms.len(), "candidates": candidates, "dropped": dropped}),
+        json!({"terms": terms.len(), "index_size": size, "candidates": candidates, "dropped": dropped}),
     ))
 }
 

@@ -384,7 +384,7 @@ fn extract(sid: &str, e: &Entry, s: &Settings, scanner: &scan::Scanner) -> Resul
     let mut replaced: HashSet<&str> = HashSet::new();
     for (i, (f, cands)) in facts.iter().zip(&found).enumerate() {
         let mut line = json!({"event": "dedupe", "session": sid, "name": f.name,
-            "candidates": cands.iter().map(|c| json!({"address": c.address, "score": (c.score * 100.0).round() / 100.0})).collect::<Vec<_>>()});
+            "candidates": cands.iter().map(|c| json!({"address": c.address, "bm25": (c.bm25 * 100.0).round() / 100.0})).collect::<Vec<_>>()});
         let d = decided.iter().find(|d| d.fact == i);
         let action = match d {
             Some(d) if d.action == "skip" => {
