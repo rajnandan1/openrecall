@@ -273,7 +273,14 @@ Sometimes the model finds a standing rule: a rule for every session in the repo,
 
 ## Statusline
 
-On each prompt, OpenRecall writes one line, such as `recall 1 · 4 ms`, to `~/.openrecall/status/<session_id>`. The first number counts what OpenRecall injected on that prompt: the memories and the handoff record. The second number is the time that OpenRecall took, in milliseconds.
+On each prompt, OpenRecall writes one line, such as `recall 3 · 4 ms`, to `~/.openrecall/status/<session_id>`. The line has two numbers:
+
+- The first number is the total of memories and handoff records that OpenRecall injected in this session so far.
+- The second number is the time that OpenRecall took on the last prompt, in milliseconds.
+
+OpenRecall injects nothing for a task notification or for a prompt inside a subagent. For these prompts, the line shows `skipped` in place of the time, such as `recall 3 · skipped`. The total stays the same.
+
+The total starts at 0 in each new session. `/clear` starts a new session with a new session ID, so the total starts at 0 again. A compaction or a resume keeps the session ID, so the total continues. In a new session, the line is empty until the first prompt.
 
 To show the line, add these two lines to your own statusline script:
 

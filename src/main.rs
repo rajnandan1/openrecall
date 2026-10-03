@@ -171,14 +171,15 @@ fn recall(started: u128) -> Result<()> {
     } else {
         None
     };
+    let mut s = load_session(&sid);
+    let total = s["injections"].as_u64().unwrap_or(0);
     if let Some(reason) = skip {
         log(
             json!({"event": "skipped", "session": sid, "reason": reason, "prompt_hash": fnv(prompt)}),
         );
-        return status(&sid, "recall skipped");
+        return status(&sid, &format!("recall {total} · skipped"));
     }
     let repo = git::Repo::find(input["cwd"].as_str().unwrap_or(""));
-    let mut s = load_session(&sid);
     let mut context = vec![];
     let mut injected = vec![];
     if let Some(repo) = &repo
@@ -223,6 +224,8 @@ fn recall(started: u128) -> Result<()> {
             json!({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": context.join("\n\n")}})
         );
     }
+    let total = total + injected.len() as u64;
+    s["injections"] = json!(total);
     save_session(&sid, &s)?;
     let ended = now_ms();
     let mut line = json!({"event": "recall", "session": sid, "started_at": started, "ended_at": ended,
@@ -231,10 +234,7 @@ fn recall(started: u128) -> Result<()> {
         line.extend(searched.clone());
     }
     log(line);
-    status(
-        &sid,
-        &format!("recall {} · {} ms", injected.len(), ended - started),
-    )
+    status(&sid, &format!("recall {total} · {} ms", ended - started))
 }
 
 /// Ticket 15's last steps: search the scope, drop what must not be injected (the ledger, this session's own facts,
