@@ -100,7 +100,7 @@ Before OpenRecall writes a record, it replaces each secret with `[REDACTED:<rule
 OpenRecall injects a handoff record only when the new session shows which task it is on. To inject means to add text to Claude's context before Claude reads your prompt. The session shows its task in one of two ways:
 
 - A prompt names one of the tickets in the record. OpenRecall injects the record with that prompt.
-- The session finishes one turn on the branch of the record, with no branch change. OpenRecall injects the record with the next prompt.
+- The session finishes one turn on the branch of the record, without a switch to another branch. OpenRecall injects the record with the next prompt.
 
 The rest of the rules for handoff records:
 
@@ -108,6 +108,19 @@ The rest of the rules for handoff records:
 - Claude gets at most about 800 tokens of the record. If the record is longer, OpenRecall cuts it and ends it with `[...]`.
 - The record is plain Markdown. You can add your own section to it by hand. OpenRecall keeps your section when it updates the record.
 - If no session updates a record for 7 days, OpenRecall retires the record. It moves the record to `handoffs/retired/`.
+
+### Branches and worktrees
+
+OpenRecall follows the branch that a worktree is on. So you can use one worktree for many tasks, one after the other:
+
+- When you switch to a new branch, OpenRecall starts a new record for it at the end of the next turn. The record of the old branch does not change.
+- When you come back to an old branch, OpenRecall injects its record again. The two ways above apply: one finished turn on the branch, or a prompt that names one of its tickets.
+- A session does not get a record that only it wrote, because its context already holds that work. After `/clear` or a compaction, the session gets the record again.
+- If the record of a branch retired before you come back, OpenRecall starts a new record for the branch.
+- Facts and Claude Code's built-in memory belong to the repo, not to a branch. Every branch and every worktree of the repo can recall them.
+- A worktree is on one branch at a time. All sessions that are open in the worktree follow that branch. When one session switches the branch, the other sessions move to the new task too.
+
+A rename keeps the record. If the old branch does not exist when OpenRecall sees the switch, OpenRecall treats the switch as a rename, such as `git branch -m`. It then moves the old record to the new branch name. OpenRecall sees a switch at the end of the next turn. So delete an old branch only after one turn finishes on the new branch.
 
 ### Recalled memories
 
