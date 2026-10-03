@@ -8,7 +8,6 @@ mod turn;
 
 use record::Record;
 use serde_json::{Value, json};
-use std::cell::OnceCell;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
@@ -77,7 +76,7 @@ fn handoff() -> Result<()> {
     let branch = git::Repo::find(input["cwd"].as_str().unwrap_or(""))
         .and_then(|r| r.branch())
         .unwrap_or_default();
-    let mut s = load_session(&sid);
+    let (_lock, mut s) = load_session(&sid)?;
     match source {
         "compact" => s["ledger"] = json!([]),
         "resume" | "fork" => {}
@@ -171,7 +170,7 @@ fn recall(started: u128) -> Result<()> {
     } else {
         None
     };
-    let mut s = load_session(&sid);
+    let (_lock, mut s) = load_session(&sid)?;
     let total = s["injections"].as_u64().unwrap_or(0);
     if let Some(reason) = skip {
         log(
@@ -401,7 +400,8 @@ fn detach(args: &[&str], stdin: Stdio) -> Result<std::process::Child> {
         .spawn()?)
 }
 
-/// The detached writer: settle bookkeeping for the session, then the turn into its task's record.
+/// The detached writer: settle bookkeeping for the session, then the turn into its task's record. The secret scan
+/// compiles before the session lock, so a prompt that waits for the lock does not wait for the compile.
 fn capture_job() -> Result<()> {
     let job = read_input()?;
     let sid = session_id(&job)?;
@@ -421,7 +421,8 @@ fn capture_job() -> Result<()> {
         extract::enqueue(&sid, job["transcript_path"].as_str().unwrap_or(""), repo)?;
     }
     let branch = repo.as_ref().and_then(|r| r.branch()).unwrap_or_default();
-    let mut s = load_session(&sid);
+    let scanner = git::is_task(&branch).then(scan::Scanner::new);
+    let (_lock, mut s) = load_session(&sid)?;
     let last = s["branch"].as_str().map(str::to_string);
     if last.as_deref() != Some(branch.as_str()) {
         s["turns"] = json!(0);
@@ -441,8 +442,8 @@ fn capture_job() -> Result<()> {
             log(json!({"event": "settled", "session": sid, "branch": branch}));
         }
     }
-    if let Some(repo) = repo.filter(|_| git::is_task(&branch)) {
-        write_record(&repo, &branch, &sid, &turn, &mut s)?;
+    if let (Some(repo), Some(scanner)) = (&repo, &scanner) {
+        write_record(repo, &branch, &sid, &turn, scanner, &mut s)?;
     }
     save_session(&sid, &s)
 }
@@ -454,6 +455,7 @@ fn write_record(
     branch: &str,
     sid: &str,
     turn: &turn::Turn,
+    scanner: &scan::Scanner,
     s: &mut Value,
 ) -> Result<()> {
     let path = record::dir(&home(), &repo.identity).join(format!("{}.md", record::stem(branch)));
@@ -469,9 +471,8 @@ fn write_record(
             ..Default::default()
         },
     };
-    let scanner = OnceCell::new();
     let clean = |text: &str, section: &str| {
-        let (out, rules) = scanner.get_or_init(scan::Scanner::new).redact(text);
+        let (out, rules) = scanner.redact(text);
         for rule in rules {
             log(json!({"event": "redacted", "session": sid, "rule": rule, "section": section}));
         }
@@ -578,13 +579,19 @@ fn session_id(input: &Value) -> Result<String> {
     }
 }
 
-fn load_session(sid: &str) -> Value {
-    let text =
-        fs::read_to_string(home().join("sessions").join(format!("{sid}.json"))).unwrap_or_default();
-    serde_json::from_str::<Value>(&text)
+/// The session state, locked until the returned file drops: the hooks and the detached writer each read, change
+/// and save it whole, so each keeps the lock from this read to its save.
+fn load_session(sid: &str) -> Result<(fs::File, Value)> {
+    let dir = home().join("sessions");
+    fs::create_dir_all(&dir)?;
+    let lock = fs::File::create(dir.join(format!("{sid}.lock")))?;
+    lock.lock()?;
+    let text = fs::read_to_string(dir.join(format!("{sid}.json"))).unwrap_or_default();
+    let s = serde_json::from_str::<Value>(&text)
         .ok()
         .filter(Value::is_object)
-        .unwrap_or_else(|| json!({}))
+        .unwrap_or_else(|| json!({}));
+    Ok((lock, s))
 }
 
 fn save_session(sid: &str, s: &Value) -> Result<()> {

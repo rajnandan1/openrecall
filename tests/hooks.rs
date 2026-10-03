@@ -583,6 +583,50 @@ fn the_status_line_totals_the_sessions_injections() {
     assert_eq!(send(kiwi), (1, "recall 1".into()), "a new start counts from 0");
 }
 
+#[test]
+fn a_prompt_during_the_capture_writer_keeps_both_updates() {
+    let w = World::new("lock");
+    w.branch("feat/x");
+    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    w.fillers(&repo);
+    let source = "source: E 2026-01-02T03:04:05Z\n";
+    w.memory(&repo, "walrus-export-encoding", "gotcha", source, "The walrus export writes UTF-16",
+        "The walrus export writes UTF-16 files, so every reader decodes them first.");
+    w.memory(&repo, "walrus-export-header", "decision", source, "The walrus export puts the header row first",
+        "The walrus export puts the header row first, before any data row.");
+    w.hook(&["handoff"], "S", json!({"source": "startup"}));
+    let transcript = w.root.join("S.jsonl");
+    fs::write(&transcript, format!("{}\n{}\n", user("Build ABC-12 so exports stop failing on empty rows"), said("ok", None))).unwrap();
+    let start = |args: &[&str], input: Value| {
+        let mut child = w.spawn(args);
+        child.stdin.take().unwrap().write_all(input.to_string().as_bytes()).unwrap();
+        child
+    };
+    let cwd = w.folder.join("src");
+
+    let lock = fs::File::create(w.home.join(".openrecall/sessions/S.lock")).unwrap();
+    lock.lock().unwrap();
+    let writer = start(&["capture", "--job"], json!({"session_id": "S", "cwd": cwd, "transcript_path": transcript, "last_assistant_message": "ok"}));
+    let prompt = start(&["recall"], json!({"session_id": "S", "cwd": cwd, "prompt": "walrus export header encoding"}));
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(w.record("feat--x").is_none() && !w.home.join(".openrecall/status/S").exists(), "both wait for the lock");
+    drop(lock);
+    for child in [writer, prompt] {
+        assert!(child.wait_with_output().unwrap().status.success());
+    }
+
+    let s: Value = serde_json::from_str(&fs::read_to_string(w.home.join(".openrecall/sessions/S.json")).unwrap()).unwrap();
+    let mut ledger: Vec<&str> = s["ledger"].as_array().unwrap().iter().map(|a| a.as_str().unwrap()).collect();
+    ledger.sort();
+    assert_eq!(ledger, [
+        "github.com/someone/app/handoffs/feat--x",
+        "github.com/someone/app/walrus-export-encoding",
+        "github.com/someone/app/walrus-export-header",
+    ], "{s}");
+    assert_eq!((s["injections"].as_u64(), s["turns"].as_u64()), (Some(2), Some(1)), "{s}");
+    assert!(fs::read_to_string(w.home.join(".openrecall/status/S")).unwrap().starts_with("recall 2 · "));
+}
+
 /// One JSON-RPC client over the server's pipes: each call reads lines until the reply with its id.
 struct Mcp {
     child: Child,
