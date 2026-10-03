@@ -1,0 +1,72 @@
+# A push to main that raises the version in Cargo.toml publishes the release v<version>.
+name: release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Read the version and look for its release
+        id: check
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          # This address answers for a published release, a pre-release included, and never for a draft.
+          if error=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$version" --silent 2>&1); then
+            echo "release=exists" >> "$GITHUB_OUTPUT"
+          elif echo "$error" | grep -q "HTTP 404"; then
+            echo "release=new" >> "$GITHUB_OUTPUT"
+          else
+            echo "$error" >&2
+            exit 1
+          fi
+
+      - name: Fail when plugin/ changed without a new version
+        if: steps.check.outputs.release == 'exists'
+        run: git diff --exit-code "v$VERSION" HEAD -- plugin/
+
+      - name: Test
+        if: steps.check.outputs.release == 'new'
+        run: |
+          rustup update --no-self-update stable
+          cargo test --locked
+
+      - name: Build the release binary
+        if: steps.check.outputs.release == 'new'
+        env:
+          OPENRECALL_RELEASE: "1"
+        run: cargo build --release --locked
+
+      - name: Check that the binary prints the version
+        if: steps.check.outputs.release == 'new'
+        run: test "$(target/release/openrecall version)" = "$VERSION"
+
+      - name: Write the hash file
+        if: steps.check.outputs.release == 'new'
+        run: |
+          cp target/release/openrecall openrecall-aarch64-apple-darwin
+          shasum -a 256 openrecall-aarch64-apple-darwin > openrecall-aarch64-apple-darwin.sha256
+
+      - name: Publish
+        if: steps.check.outputs.release == 'new'
+        run: >
+          gh release create "v$VERSION" --target "$GITHUB_SHA" --latest --title "v$VERSION" --notes ""
+          openrecall-aarch64-apple-darwin openrecall-aarch64-apple-darwin.sha256
+
+      - name: Install with the install command
+        if: steps.check.outputs.release == 'new'
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/rajnandan1/openrecall/main/install.sh | sh || true
+          test "$("$HOME/.local/bin/openrecall" version)" = "$VERSION"

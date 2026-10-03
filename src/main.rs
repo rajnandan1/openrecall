@@ -5,6 +5,7 @@ mod mcp;
 mod record;
 mod scan;
 mod turn;
+mod update;
 
 use record::Record;
 use serde_json::{Value, json};
@@ -19,7 +20,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 const INSTALL: &str =
-    "cargo install --locked --git https://github.com/rajnandan1/openrecall --root ~/.local";
+    "curl -fsSL https://raw.githubusercontent.com/rajnandan1/openrecall/main/install.sh | sh";
 
 /// Every path exits 0: exit 2 on UserPromptSubmit would erase the user's prompt (ticket 18).
 fn main() {
@@ -31,6 +32,10 @@ fn main() {
 
 fn run(args: &[String], started: u128) {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    if args == ["version"] {
+        println!("{}", update::version());
+        return;
+    }
     if args == ["mcp"] {
         if let Err(e) = mcp::serve() {
             log(json!({"event": "error", "cmd": "mcp", "error": e.to_string()}));
@@ -47,6 +52,7 @@ fn run(args: &[String], started: u128) {
         ["capture", "--job"] => capture_job(),
         ["extract"] => extract_hook(),
         ["extract", "--job"] => extract::work(),
+        ["update", "--job"] => update::job(),
         _ => return,
     };
     if let Err(e) = result {
@@ -65,12 +71,16 @@ fn session_skipped() -> bool {
             .any(|p| project.starts_with(p))
 }
 
-/// SessionStart: record where the session starts, warn on a version mismatch, retire idle records.
+/// SessionStart: show what is due, record where the session starts, retire idle records, start the jobs.
 fn handoff() -> Result<()> {
     let input = read_input()?;
     let sid = session_id(&input)?;
-    if let Some(warning) = version_mismatch() {
-        println!("{}", json!({"systemMessage": warning}));
+    let due: Vec<String> = update::take_message()
+        .into_iter()
+        .chain(update::version_mismatch())
+        .collect();
+    if !due.is_empty() {
+        println!("{}", json!({"systemMessage": due.join("\n")}));
     }
     let source = input["source"].as_str().unwrap_or("startup");
     let branch = git::Repo::find(input["cwd"].as_str().unwrap_or(""))
@@ -89,22 +99,8 @@ fn handoff() -> Result<()> {
         extract::mark_ended(&sid, false)?;
     }
     detach(&["extract", "--job"], Stdio::null())?;
+    detach(&["update", "--job"], Stdio::null())?;
     Ok(())
-}
-
-fn version_mismatch() -> Option<String> {
-    let root = std::env::var_os("CLAUDE_PLUGIN_ROOT")?;
-    let manifest: Value = serde_json::from_str(
-        &fs::read_to_string(Path::new(&root).join(".claude-plugin/plugin.json")).ok()?,
-    )
-    .ok()?;
-    let plugin = manifest["version"].as_str()?;
-    let binary = env!("CARGO_PKG_VERSION");
-    (plugin != binary).then(|| {
-        format!(
-            "OpenRecall binary {binary} does not match plugin {plugin}. Update: {INSTALL} --force"
-        )
-    })
 }
 
 /// Ticket 08: a record idle for 7 days retires; session and status files that old are deleted.
