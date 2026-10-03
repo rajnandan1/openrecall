@@ -134,10 +134,10 @@ class HarnessTest(unittest.TestCase):
             fh.write("---\nname: m\ndescription: Exports fail on empty rows\nmetadata:\n  type: project\n---\n\n"
                      "See src/export.py and ABC-12 at abc1234def. %s\n" % ("x " * 120))
         cand = lambda a, s: dict(address=a, score=s, text_hash="h", rot=None)
-        results = [dict(case="C1", ms=1.0, terms=3, blind=False, skipped=None, errors=[], dropped={},
+        results = [dict(case="C1", ms=1.0, terms=3, index_size=12, blind=False, skipped=None, errors=[], dropped={},
                         candidates=[cand("builtin/-w-app/m", 6.0), cand("builtin/-w-app/n", 5.0), cand("builtin/-w-app/o", 1.0)],
                         injected=["builtin/-w-app/m", "builtin/-w-app/n"], memories={"builtin/-w-app/m": mem}),
-                   dict(case="C2", ms=2.0, terms=2, blind=False, skipped=None, errors=[], dropped={"rot": 1},
+                   dict(case="C2", ms=2.0, terms=2, index_size=9, blind=False, skipped=None, errors=[], dropped={"rot": 1},
                         candidates=[cand("builtin/-w-app/n", 5.5)], injected=["builtin/-w-app/n"], memories={})]
         labels = harness.label_candidates(cases, results, {}, lambda c, todo, memories, earlier: [
             dict(case=c["id"], address=x["address"], text_hash=x["text_hash"], judge="test", at="", note={},
@@ -150,23 +150,29 @@ class HarnessTest(unittest.TestCase):
         self.assertEqual(dict(m["kinds"]), {"builtin project": 1, "builtin ?": 2})
         m = harness.gate_metrics(cases, results, labels, gate=5.5)
         self.assertEqual((m["injections"], m["useful"], m["misses"], m["false"]), (2, 1, 0, 1))
-        rows, (pick, best), met = harness.sweep(cases, results, labels)
+        m = harness.gate_metrics(cases, results, labels, gate=5.5, min_rows=10)
+        self.assertEqual((m["injections"], m["useful"], m["misses"], m["false"]), (1, 1, 0, 0), "C2's 9 rows keep the gate closed")
+        rows, (pick, best), met = harness.sweep(cases, results, labels, 10)
         self.assertFalse(met)
         self.assertEqual(pick, 6.0)
         self.assertEqual((best["injections"], best["useful"]), (1, 1))
+        self.assertEqual(dict(rows)[0.0]["injections"], 3, "only C1's 3 candidates")
+        threshold, min_rows = harness.binary_gate()
+        self.assertTrue(threshold > 0 and min_rows > 0)
         self.assertEqual(harness.line_idents(mem), ["src/export.py", "ABC-12", "abc1234def"])
         self.assertEqual(harness.rot_of(mem, "/nonexistent"), "all")
         self.assertEqual(harness.slug("/Users/x/Code/app.v2"), "-Users-x-Code-app-v2")
         sessions, _ = harness.load()
         by_sid = {s["sid"]: s for s in sessions}
         self.assertTrue(harness.used_signal(cases[0], by_sid["new"], mem) is False)
-        lines, pick = harness.level2_lines(cases, results, labels, by_sid, 5.5)
+        lines, pick = harness.level2_lines(cases, results, labels, by_sid, (5.5, 10))
         text = "\n".join(lines)
         for row in ("Searched: 2.", "Candidates: 4 over 2 cases", "Labels: useful 1, partly 0, noise 3, unlabeled 0.",
-                    "At the binary's gate (5.5 and above), injections 3 on 2 cases: precision 33% (1/3, 6–79%), misses 0, "
-                    "false injections 33% (1/3, 6–79%)", "| builtin project | 1 | 1 | 100% (1/1, 21–100%) |",
-                    "| 6.0 (pick) | 1 | 1 | 100% (1/1, 21–100%) | 0 | 0 |", "dropped in this replay: 1",
-                    "p50 2.0 ms, p95 2.0 ms"):
+                    "At the binary's gate (5.50 and above, in an index of 10 rows or more), injections 3 on 2 cases: "
+                    "precision 33% (1/3, 6–79%), misses 0, false injections 33% (1/3, 6–79%)",
+                    "| builtin project | 1 | 1 | 100% (1/1, 21–100%) |", "injected in an index of 10 rows or more",
+                    "| 6.00 (pick) | 1 | 1 | 100% (1/1, 21–100%) | 0 | 0 |", "| 0.00 | 3 | 1 | 33% (1/3,",
+                    "dropped in this replay: 1", "p50 2.0 ms, p95 2.0 ms"):
             self.assertIn(row, text)
 
     def test_live_expansions(self):
@@ -290,6 +296,8 @@ class HarnessTest(unittest.TestCase):
         results = harness.replay_cases(harness.BINARY, [later, before, gone, short], harness.mains_of([later, before, gone, short]))
         self.assertEqual(results[0]["candidates"][0]["address"], "builtin/%s/export-empty-rows" % harness.slug(tmp))
         self.assertEqual(results[0]["injected"], ["builtin/%s/export-empty-rows" % harness.slug(tmp)])
+        self.assertGreaterEqual(results[0]["index_size"], 41, "the fact and its 40 fillers")
+        self.assertIn("bm25", results[0]["candidates"][0])
         self.assertEqual(results[0]["memories"]["builtin/%s/export-empty-rows" % harness.slug(tmp)],
                          os.path.join(mem, "export-empty-rows.md"))
         self.assertIsNone(results[0]["candidates"][0]["rot"])

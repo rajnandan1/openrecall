@@ -54,6 +54,10 @@ _Avoid_: data dir, store, cache
 The searchable cache built from the memory files. The Markdown is the source of truth; the index can be deleted and rebuilt at any time.
 _Avoid_: database, store
 
+**Index size**:
+The number of memories in the index, from every scope that the home holds.
+_Avoid_: corpus size, row count, N
+
 ### Levels
 
 **Level**:
@@ -96,6 +100,10 @@ _Avoid_: expired, archived, stale
 The set of memories a session may recall: those of its repo identity, when it has one, plus global ones.
 _Avoid_: namespace, project, folder
 
+**Scope size**:
+The number of memories that a session may recall.
+_Avoid_: index size (that counts every scope)
+
 **Repo identity**:
 The key that names a repository across all its worktrees. It comes from the repo's origin remote, or from its main checkout when there is no remote.
 _Avoid_: project slug, folder path, workspace
@@ -137,6 +145,14 @@ _Avoid_: batch session, non-interactive run, sdk session
 **Gate**:
 The rule that decides whether a recalled memory is confident enough to inject. Silence is the default.
 _Avoid_: threshold (that is the number inside the gate), filter
+
+**Score**:
+How well a candidate matches a prompt, as a number that does not grow with the index size.
+_Avoid_: bm25 (that only orders the candidates), relevance, confidence
+
+**Threshold**:
+The number inside the gate. A candidate with a score below it is never injected.
+_Avoid_: cutoff, gate (that is the rule)
 
 **Injection**:
 Handing recalled memories to Claude as extra context.
@@ -193,6 +209,10 @@ _Avoid_: test set, benchmark, fixtures
 **Case**:
 One real prompt in the eval set, with the repo, branch and session it came from.
 _Avoid_: test case, example, sample
+
+**Floor probe**:
+A made-up direct question about one stored fact, used only to check that the gate opens for it. It is not a case.
+_Avoid_: probe case, test question
 
 **Handoff pair**:
 An earlier and a later session of the same task. Carry-over is measured over handoff pairs.

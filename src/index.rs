@@ -7,8 +7,10 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::UNIX_EPOCH;
 
-/// Inject a memory only at this score or above: the eval's threshold sweep picks it (ticket 16).
-pub const GATE: f64 = 4.0;
+/// The threshold: inject a memory only at this score or above (the gate-threshold spec, rule R4).
+pub const GATE: f64 = 1.50;
+/// The gate stays closed in an index of fewer rows: no floor probe ran below 10 (the gate-threshold spec).
+pub const MIN_ROWS: i64 = 10;
 pub const MAX_LINES: usize = 3;
 /// 400 tokens at 2.6 characters a token, the ratio build step 2 measured.
 pub const MAX_CHARS: usize = 1040;
@@ -48,8 +50,9 @@ pub struct Scope {
 }
 
 pub struct Candidate {
+    pub id: i64,
     pub address: String,
-    pub score: f64,
+    pub bm25: f64,
     pub text_hash: String,
     pub kind: String,
     pub date: String,
@@ -286,9 +289,8 @@ impl Index {
         tx.commit()
     }
 
-    /// The best matches for the query terms inside the scopes, best first. The score is the weighted bm25 sum
-    /// (ticket 06) divided by the square root of the term count, so a long prompt cannot lift every memory over
-    /// the gate: the only recipe of the six the eval swept that met the precision goal (build step 3).
+    /// The best matches for the query terms inside the scopes, best first by `bm25`: the weighted bm25 sum (ticket 06)
+    /// divided by the square root of the term count (build step 3). It orders the candidates; the gate reads `scores`.
     pub fn search(
         &self,
         terms: &[String],
@@ -300,7 +302,7 @@ impl Index {
         }
         let query = terms
             .iter()
-            .map(|t| format!("\"{}\"", t.replace('"', "")))
+            .map(|t| phrase(t))
             .collect::<Vec<_>>()
             .join(" OR ");
         let dir = |i: usize| {
@@ -309,11 +311,11 @@ impl Index {
                 .map_or(String::new(), |s| s.dir.to_string_lossy().into_owned())
         };
         let sql = format!(
-            "SELECT f.address, m.score, f.hash, f.kind, f.date, f.source, f.updated, f.expires, m.description, m.body
-             FROM (SELECT rowid AS id, -bm25(ft, {WEIGHTS}) / ?6 AS score, description, body FROM ft WHERE ft MATCH ?1) m
+            "SELECT m.id, f.address, m.bm25, f.hash, f.kind, f.date, f.source, f.updated, f.expires, m.description, m.body
+             FROM (SELECT rowid AS id, -bm25(ft, {WEIGHTS}) / ?6 AS bm25, description, body FROM ft WHERE ft MATCH ?1) m
              JOIN files f ON f.id = m.id
              WHERE f.dir IN (?2, ?3, ?4)
-             ORDER BY m.score DESC, f.date DESC LIMIT ?5"
+             ORDER BY m.bm25 DESC, f.date DESC LIMIT ?5"
         );
         self.conn
             .prepare(&sql)?
@@ -321,21 +323,72 @@ impl Index {
                 params![query, dir(0), dir(1), dir(2), limit as i64, (terms.len() as f64).sqrt()],
                 |r| {
                     Ok(Candidate {
-                        address: r.get(0)?,
-                        score: r.get(1)?,
-                        text_hash: r.get(2)?,
-                        kind: r.get(3)?,
-                        date: r.get(4)?,
-                        source: r.get(5)?,
-                        updated: r.get(6)?,
-                        expires: r.get(7)?,
-                        description: r.get(8)?,
-                        body: r.get(9)?,
+                        id: r.get(0)?,
+                        address: r.get(1)?,
+                        bm25: r.get(2)?,
+                        text_hash: r.get(3)?,
+                        kind: r.get(4)?,
+                        date: r.get(5)?,
+                        source: r.get(6)?,
+                        updated: r.get(7)?,
+                        expires: r.get(8)?,
+                        description: r.get(9)?,
+                        body: r.get(10)?,
                     })
                 },
             )?
             .collect()
     }
+
+    /// The index size N, rows of every scope, and each candidate's score (rule R4): the bm25 sum with each term's idf
+    /// replaced by ln((N + 0.5) / n) / ln(N + 1), n the rows that hold the term, over the square root of the term count.
+    // ken: one query per term over every row that holds it; compute bm25 for candidates only if recall p95 moves.
+    pub fn scores(
+        &self,
+        terms: &[String],
+        candidates: &[Candidate],
+    ) -> rusqlite::Result<(i64, Vec<f64>)> {
+        let size: i64 = self
+            .conn
+            .query_row("SELECT count(*) FROM ft", [], |r| r.get(0))?;
+        let mut sums = vec![0.0; candidates.len()];
+        if candidates.is_empty() {
+            return Ok((size, sums));
+        }
+        let mut each = self.conn.prepare(&format!(
+            "SELECT rowid, -bm25(ft, {WEIGHTS}) FROM ft WHERE ft MATCH ?1"
+        ))?;
+        let rows = size as f64;
+        for t in terms {
+            let mut holding = 0.0;
+            let mut found = vec![];
+            let mut hits = each.query([phrase(t)])?;
+            while let Some(r) = hits.next()? {
+                holding += 1.0;
+                let id: i64 = r.get(0)?;
+                if let Some(k) = candidates.iter().position(|c| c.id == id) {
+                    found.push((k, r.get::<_, f64>(1)?));
+                }
+            }
+            if found.is_empty() {
+                continue;
+            }
+            // FTS5's own idf, which fts5_aux.c raises to 1e-6 when it is not positive; a one-term bm25 is this idf
+            // times the term's frequency part.
+            let idf = ((rows - holding + 0.5) / (holding + 0.5)).ln();
+            let idf = if idf <= 0.0 { 1e-6 } else { idf };
+            let weight = ((rows + 0.5) / holding).ln() / (rows + 1.0).ln();
+            for (k, bm25) in found {
+                sums[k] += weight * bm25 / idf;
+            }
+        }
+        let root = (terms.len() as f64).sqrt();
+        Ok((size, sums.into_iter().map(|s| s / root).collect()))
+    }
+}
+
+fn phrase(term: &str) -> String {
+    format!("\"{}\"", term.replace('"', ""))
 }
 
 /// The scope's memory files with their mtime in nanoseconds and size. `MEMORY.md` is already in the context
@@ -544,8 +597,9 @@ mod tests {
 
     fn candidate(description: &str, body: &str) -> Candidate {
         Candidate {
+            id: 0,
             address: "global/x".into(),
-            score: 1.0,
+            bm25: 1.0,
             text_hash: String::new(),
             kind: "gotcha".into(),
             date: "2026-01-02".into(),
@@ -666,6 +720,46 @@ mod tests {
         assert_eq!(top("https://tracker.example/issue/ABC-1234/slug").as_deref(), Some("global/b"));
         assert_eq!(top("queue-retry-limits").as_deref(), Some("global/a"));
         assert_eq!(top("limits-queue"), None);
+        fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn scores_count_the_rows_of_every_scope() {
+        let tmp = std::env::temp_dir().join(format!("openrecall-score-{}", std::process::id()));
+        let fact = |body: &str| {
+            format!("---\nname: n\ndescription: d\nmetadata:\n  type: decision\n---\n\n{body}\n")
+        };
+        fs::create_dir_all(tmp.join("global")).unwrap();
+        fs::create_dir_all(tmp.join("repos/other")).unwrap();
+        for i in 0..9 {
+            fs::write(
+                tmp.join(format!("global/f{i}.md")),
+                fact(if i == 0 { "zebra" } else { "plain" }),
+            )
+            .unwrap();
+        }
+        fs::write(tmp.join("repos/other/o.md"), fact("plain")).unwrap();
+        let global = scopes(&tmp, &tmp, None, None);
+        let mut ix = Index::open(&tmp).unwrap();
+        ix.sync(&global).unwrap();
+        ix.sync(&[Scope {
+            dir: tmp.join("repos/other"),
+            prefix: "other/".into(),
+            builtin: false,
+        }])
+        .unwrap();
+        let terms = vec!["zebra".to_string(), "plain".to_string()];
+        let found = ix.search(&terms, &global, 2).unwrap();
+        assert_eq!(found[0].address, "global/f0");
+        let (size, scores) = ix.scores(&terms, &found).unwrap();
+        assert_eq!(size, 10);
+        // Each row holds one token per column, so a term's frequency part is 1 (bm25 with k1 1.2, b 0.75, weight 1).
+        let expect = |n: f64| (10.5 / n).ln() / 11f64.ln() / 2f64.sqrt();
+        assert!((scores[0] - expect(1.0)).abs() < 1e-9, "{scores:?}");
+        assert!(
+            (scores[1] - expect(9.0)).abs() < 1e-9,
+            "a term in most rows, where FTS5's idf is 1e-6: {scores:?}"
+        );
         fs::remove_dir_all(tmp).unwrap();
     }
 }

@@ -503,6 +503,44 @@ fn a_memory_goes_in_whole_only_in_the_room_the_other_lines_leave() {
     assert_eq!(ctx.lines().skip(1).collect::<Vec<_>>(), [whole], "alone, it goes in whole: {ctx}");
 }
 
+#[test]
+fn the_gate_opens_at_ten_rows_from_every_scope() {
+    let w = World::new("small");
+    w.branch("feat/z");
+    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    let source = "source: E 2026-01-02T03:04:05Z\n";
+    w.memory(&repo, "ledger-rounding", "decision", source, "Ledger totals round half-even since ABC-77",
+        "Ledger totals round half-even since ABC-77; the cents column stays an integer.");
+    for i in 0..8 {
+        w.memory(&repo, &format!("note-{i}"), "project", source, "Unrelated", &format!("Note {i} about the deploy runner."));
+    }
+    assert_eq!(w.pushed("S", "ledger rounding ABC-77 cents"), None, "9 rows: the gate stays closed");
+    let log = fs::read_to_string(w.home.join(".openrecall/log/openrecall.jsonl")).unwrap();
+    let recall: Value = log
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .find(|e| e["event"] == "recall" && e["session"] == "S")
+        .unwrap();
+    let top = &recall["candidates"][0];
+    assert!(
+        recall["index_size"] == 9
+            && top["address"] == "github.com/someone/app/ledger-rounding"
+            && top["score"].as_f64().unwrap() >= 1.5
+            && top["bm25"].is_f64(),
+        "a score above the threshold, logged beside the order's bm25: {recall}"
+    );
+
+    let config = |name: &str| {
+        fs::write(w.folder.join(".git/config"), format!("[remote \"origin\"]\n\turl = git@github.com:someone/{name}.git\n")).unwrap()
+    };
+    config("other");
+    w.memory(&w.home.join(".openrecall/repos/github.com/someone/other"), "other-note", "project", source, "Other", "A note of another repository.");
+    w.hook(&["recall"], "O", json!({"prompt": "a prompt in the other repository"}));
+    config("app");
+    let ctx = w.pushed("T", "ledger rounding ABC-77 cents").expect("the other repository's row makes 10");
+    assert!(ctx.contains("github.com/someone/app/ledger-rounding"), "{ctx}");
+}
+
 /// One JSON-RPC client over the server's pipes: each call reads lines until the reply with its id.
 struct Mcp {
     child: Child,

@@ -714,7 +714,8 @@ def replay_cases(binary, cases, mains):
             fix = lambda a: a.replace(stand_in, real) if main else a
             rot = lambda a: rot_of(memories[a], main) if a in memories and main else None
             results.append(dict(
-                case=c["id"], ms=round(ms, 1), terms=recall.get("terms", 0), blind=bool(c["repo"]) and not main,
+                case=c["id"], ms=round(ms, 1), terms=recall.get("terms", 0), index_size=recall.get("index_size", 0),
+                blind=bool(c["repo"]) and not main,
                 skipped=next((e["reason"] for e in events if e.get("event") == "skipped" and e.get("session") == c["session"]), None),
                 candidates=[dict(x, address=fix(x["address"]), rot=rot(fix(x["address"]))) for x in recall.get("candidates", [])],
                 injected=[fix(a) for a in recall.get("injected", [])], dropped=recall.get("dropped", {}),
@@ -754,10 +755,10 @@ def kind_of(result, address):
     return "builtin " + kind if address.startswith("builtin/") else kind
 
 
-def gate_metrics(cases, results, labels, gate=None, rot=None):
+def gate_metrics(cases, results, labels, gate=None, rot=None, min_rows=0):
     """Precision, misses and false injections (ticket 16) at the binary's own gate (None), or with the top 3
-    candidates at `gate` or above injected, the 1,040-character cap left out. `rot` "any" or "all" also drops
-    the candidates that rule would drop (rot_of)."""
+    candidates at `gate` or above injected in an index of `min_rows` rows or more, the 1,040-character cap left out.
+    `rot` "any" or "all" also drops the candidates that rule would drop (rot_of)."""
     m = dict(injections=0, useful=0, unlabeled=0, misses=0, false=0, cases=0, kinds=Counter(), kinds_useful=Counter())
     for c, r in zip(cases, results):
         label = lambda x: labels.get((c["id"], x["address"], x["text_hash"]))
@@ -765,8 +766,10 @@ def gate_metrics(cases, results, labels, gate=None, rot=None):
         kept = [x for x in r["candidates"] if not (rot and x.get("rot") in {"any": ("any", "all"), "all": ("all",)}[rot])]
         if gate is None:
             inj = [x for x in kept if x["address"] in r["injected"]]
-        else:
+        elif r.get("index_size", 0) >= min_rows:
             inj = [x for x in kept if x["score"] >= gate][:3]
+        else:
+            inj = []
         m["cases"] += bool(inj)
         m["injections"] += len(inj)
         m["useful"] += sum(label(x) == "useful" for x in inj)
@@ -779,12 +782,12 @@ def gate_metrics(cases, results, labels, gate=None, rot=None):
     return m
 
 
-def sweep(cases, results, labels):
-    """The gate threshold, calibrated offline over the logged scores (ticket 16): the most useful injections at a
-    precision of 0.67 or more over at least 5 injections; fewer false injections, then the higher threshold, break
-    ties. Without such a threshold, the most precise one."""
-    grid = sorted({round(x["score"], 1) for r in results for x in r["candidates"]} | {0.0})
-    rows = [(t, gate_metrics(cases, results, labels, t)) for t in grid]
+def sweep(cases, results, labels, min_rows=0):
+    """The gate threshold, calibrated offline over the logged scores (ticket 16) with the gate closed below `min_rows`
+    rows: the most useful injections at a precision of 0.67 or more over at least 5 injections; fewer false
+    injections, then the higher threshold, break ties. Without such a threshold, the most precise one."""
+    grid = sorted({round(x["score"], 2) for r in results for x in r["candidates"]} | {0.0})
+    rows = [(t, gate_metrics(cases, results, labels, t, min_rows=min_rows)) for t in grid]
     enough = [(t, m) for t, m in rows if m["injections"] >= 5]
     ok = [(t, m) for t, m in enough if m["useful"] / m["injections"] >= GOAL]
     if ok:
@@ -860,11 +863,14 @@ def agreement(rows):
 
 
 def binary_gate():
-    """The gate the binary was built with, read from src/index.rs beside this file."""
+    """The gate the binary was built with, read from src/index.rs beside this file: (threshold, the index size below
+    which it stays closed)."""
     src = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src", "index.rs")
     try:
         with open(src) as fh:
-            return float(re.search(r"pub const GATE: f64 = ([\d.]+);", fh.read()).group(1))
+            text = fh.read()
+        return (float(re.search(r"pub const GATE: f64 = ([\d.]+);", text).group(1)),
+                int(re.search(r"pub const MIN_ROWS: i64 = (\d+);", text).group(1)))
     except (OSError, AttributeError):
         return None
 
@@ -879,7 +885,8 @@ def level2_lines(cases, results, labels, by_sid, gate):
     cands = [(c, x) for c, r in zip(cases, results) for x in r["candidates"]]
     got = Counter(labels.get((c["id"], x["address"], x["text_hash"])) for c, x in cands)
     at_gate = gate_metrics(cases, results, labels)
-    rows, (pick, best), met = sweep(cases, results, labels)
+    min_rows = gate[1] if gate else 0
+    rows, (pick, best), met = sweep(cases, results, labels, min_rows)
     calibration = os.path.join(EVAL, "calibration.jsonl")
     confirm, used = [], Counter()
     for c, r in zip(cases, results):
@@ -916,9 +923,9 @@ def level2_lines(cases, results, labels, by_sid, gate):
         "- Live, from the recall log: %d prompts got an injection, and in %d of them the model then called `recall` on "
         "an injected address (ticket 19: the frame's tool sentence goes if the first 100 show none)." % (live, expanded),
         "",
-        "At the binary's gate (%s and above), injections %d on %d cases: precision %s, misses %d, false injections %s, "
+        "At the binary's gate (%s), injections %d on %d cases: precision %s, misses %d, false injections %s, "
         "unlabeled %d. Goals: precision 0.67 or more, false injections 0."
-        % ("%.1f" % gate if gate is not None else "?", at_gate["injections"], at_gate["cases"],
+        % ("%.2f and above, in an index of %d rows or more" % gate if gate else "?", at_gate["injections"], at_gate["cases"],
            rate(at_gate["useful"], at_gate["injections"]), at_gate["misses"], rate(at_gate["false"], at_gate["injections"]),
            at_gate["unlabeled"]),
         "",
@@ -928,20 +935,21 @@ def level2_lines(cases, results, labels, by_sid, gate):
               for k, n in sorted(at_gate["kinds"].items())]
     lines += [
         "",
-        "Threshold sweep over the logged scores, the top 3 candidates at the threshold or above injected (the "
-        "1,040-character cap left out). Pick: %.1f, %s." % (pick, "precision %s with %d misses and %d false injections"
-                                                             % (rate(best["useful"], best["injections"]), best["misses"], best["false"])
-                                                             + ("" if met else "; no threshold reaches 0.67 over 5 or more injections")),
+        "Threshold sweep over the logged scores, the top 3 candidates at the threshold or above injected in an index of "
+        "%d rows or more (the 1,040-character cap left out). Pick: %.2f, %s." % (
+            min_rows, pick, "precision %s with %d misses and %d false injections"
+            % (rate(best["useful"], best["injections"]), best["misses"], best["false"])
+            + ("" if met else "; no threshold reaches 0.67 over 5 or more injections")),
         "",
         "| Threshold | Injections | Cases | Precision | Misses | False injections |", "|---|---|---|---|---|---|",
     ]
-    lines += ["| %.1f%s | %d | %d | %s | %d | %d |" % (t, " (pick)" if t == pick else "", m["injections"], m["cases"],
+    lines += ["| %.2f%s | %d | %d | %s | %d | %d |" % (t, " (pick)" if t == pick else "", m["injections"], m["cases"],
                                                         rate(m["useful"], m["injections"]), m["misses"], m["false"])
               for t, m in rows if t in shown]
     variants = ["%s: injections %d, precision %s, misses %d, false injections %d" % (
         name, v["injections"], rate(v["useful"], v["injections"]), v["misses"], v["false"])
-        for name, v in (("any cited path missing", gate_metrics(cases, results, labels, pick, "any")),
-                        ("every cited path missing", gate_metrics(cases, results, labels, pick, "all")))]
+        for name, v in (("any cited path missing", gate_metrics(cases, results, labels, pick, "any", min_rows)),
+                        ("every cited path missing", gate_metrics(cases, results, labels, pick, "all", min_rows)))]
     lines += [
         "",
         "Rot (ticket 09): the binary drops a pointer fact whose path or symbol is gone; dropped in this replay: %d. Candidates "
@@ -1053,8 +1061,8 @@ def rate(k, n):
 
 def report(now=None, binary=BINARY, label_fn=None, gate=None, dedupe_fn=None):
     """`label_fn(case, candidates, memories, earlier_prompts)` returns label rows (judge.label_case); None labels
-    nothing new. `gate` is the score the binary injects at, printed beside its results. `dedupe_fn` checks written
-    facts (judge.dedupe_check); None checks nothing new."""
+    nothing new. `gate` is binary_gate()'s (threshold, minimum index size), printed beside the binary's results; the
+    sweep keeps its minimum. `dedupe_fn` checks written facts (judge.dedupe_check); None checks nothing new."""
     now = now or datetime.now(timezone.utc)
     earlier = sorted(d for d in glob.glob(os.path.join(EVAL, "runs", "*")) if os.path.isdir(d))
     since = datetime.strptime(os.path.basename(earlier[-1]), "%Y-%m-%dT%H%M%SZ").replace(tzinfo=timezone.utc) if earlier else None
