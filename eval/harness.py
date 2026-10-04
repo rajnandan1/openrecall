@@ -39,6 +39,8 @@ GH_PR = re.compile(r"\bgh pr \w+ (\d{2,6})\b")
 COMMIT = re.compile(r"(?<![\w-])(?=[0-9a-f]*[a-f])(?=[0-9a-f]*\d)[0-9a-f]{7,40}(?![\w-])")
 PATH = re.compile(r"(?<![\w/:@$.})\]-])(?<![\w})][\"'])(?!(?<=\*)/)(?:~/|/)?(?:[\w.@-]+/)+[\w.@-]*[A-Za-z][\w.@-]*\.[A-Za-z]\w{0,7}(?::\d+(?:-\d+)?)?(?![\w/])")
 FRAME = re.compile(r"^Handoff record for branch (.*), last written .* on this task \((.*)\)\. It reflects")
+EDITS = {"Edit", "Write", "NotebookEdit", "MultiEdit"}
+GIT_COMMIT = re.compile(r"\bgit(?:\s+-C\s+\S+)?\s+commit\b")
 IDENT = re.compile(r"\b[A-Z]{2,5}-\d{2,5}\b|#\d{2,6}\b|/pull/\d+|\b[\w.-]+/[\w./-]+|`[^`\s]{3,}`|\b[0-9a-f]{7,40}\b|https?://\S+")
 GOAL = 0.67
 # Spec Appendix A, rows 0 to 13, in the order of appendix-a.jsonl (A00 to A13).
@@ -330,6 +332,12 @@ def checkout(folder, branch):
             pass
 
 
+def moved(text, subs):
+    for real, stand_in in subs:
+        text = text.replace(real, stand_in)
+    return text
+
+
 def copy_turns(s, st, upto, subs):
     """Appends the transcript's lines up to line `upto` to the session's copy, with real paths moved into the world."""
     with open(s["path"], "rb") as src, open(st["copy"], "ab") as dst:
@@ -338,10 +346,7 @@ def copy_turns(s, st, upto, subs):
             line = src.readline()
             if not line:
                 break
-            text = line.decode("utf-8", "replace")
-            for real, stand_in in subs:
-                text = text.replace(real, stand_in)
-            dst.write(text.encode("utf-8"))
+            dst.write(moved(line.decode("utf-8", "replace"), subs).encode("utf-8"))
             st["done"] += 1
         st["pos"] = src.tell()
 
@@ -426,7 +431,7 @@ def replay(binary, sessions, snapshot=()):
                 st["prompts"] += t["real"]
                 if t["builtin"]:
                     continue
-                out, ms = call("recall", hook_event_name="UserPromptSubmit", prompt=t["ask"])
+                out, ms = call("recall", hook_event_name="UserPromptSubmit", prompt=moved(t["ask"], w["subs"]))
                 timings += [ms] if t["real"] else []
                 text = json.loads(out)["hookSpecificOutput"]["additionalContext"] if out.strip() else ""
                 text = text.split("\n\nRecalled memories from earlier sessions (OpenRecall).")[0]
@@ -434,7 +439,7 @@ def replay(binary, sessions, snapshot=()):
                 if m:
                     with open(os.path.join(env["OPENRECALL_HOME"], "repos", m.group(2) + ".md")) as fh:
                         front = dict(l.split(": ", 1) for l in fh.read().split("\n---\n")[0].splitlines() if ": " in l)
-                    pushes[sid].append(dict(prompt=st["prompts"], text=text, branch=m.group(1),
+                    pushes[sid].append(dict(prompt=st["prompts"], turn=i, text=text, branch=m.group(1),
                                             aliases=set(front.get("aliases", "").split(", ")) - {""}))
                 continue
             if not t["groups"]:
@@ -453,6 +458,13 @@ def replay(binary, sessions, snapshot=()):
             st["branch"] = t["branch_end"] or st["branch"]
         log = os.path.join(env["OPENRECALL_HOME"], "log", "openrecall.jsonl")
         events = read(log) if os.path.exists(log) else []
+        routes = defaultdict(list)
+        for e in events:
+            if e.get("event") == "pushed":
+                routes[e.get("session")].append(e.get("how"))
+        for sid, xs in pushes.items():
+            for x, how in zip(xs, routes[sid]):
+                x["how"] = how
     finally:
         # Each `handoff` starts a detached extraction worker, which finds no extract.toml here and exits.
         shutil.rmtree(tmp, ignore_errors=True)
@@ -969,6 +981,24 @@ def push_is_right(s, push):
     return bool(push["aliases"] & s["tickets"]) or sum(t["branch_end"] == push["branch"] for t in s["real"]) >= 2
 
 
+def verdict(s, push):
+    """Ticket 13's test can never pass a push to a session with one real prompt and no shared alias: it is unjudged."""
+    return "right" if push_is_right(s, push) else "unjudged" if len(s["real"]) < 2 else "wrong"
+
+
+def is_late(s, push):
+    """A turn before the push ended on its branch and edited a file or ran `git commit` in Bash."""
+    return any(t["branch_end"] == push["branch"] and (n in EDITS or n == "Bash" and GIT_COMMIT.search(inp.get("command", "")))
+               for t in s["turns"][:push["turn"]] for n, inp in t["tools"])
+
+
+def live_routes():
+    """The live recall log's `pushed` events by route, and the time of its first event."""
+    log = os.path.join(os.path.dirname(EVAL), "log", "openrecall.jsonl")
+    events = read(log) if os.path.exists(log) else []
+    return Counter(e.get("how") for e in events if e.get("event") == "pushed"), min((e["at"] for e in events if "at" in e), default=None)
+
+
 def found_in(text, roots, folders):
     """mine() over pushed text, with each repo-relative path also read from every worktree root it may belong to."""
     found = mine(text, *folders)
@@ -1108,6 +1138,11 @@ def report(now=None, binary=BINARY, label_fn=None, gate=None, dedupe_fn=None):
     level1 = [(by_sid[sid], x) for sid, xs in pushes.items() for x in xs]
     right = sum(push_is_right(s, x) for s, x in level1)
     how = Counter(e.get("how") for e in events if e.get("event") == "pushed")
+    verdicts = defaultdict(Counter)
+    for s, x in level1:
+        verdicts[x.get("how")][verdict(s, x)] += 1
+    late = sum(is_late(s, x) for s, x in level1)
+    live, since_ms = live_routes()
     errors = Counter(e.get("error", "")[:60] for e in events if e.get("event") == "error")
     drawn = [c for c in cases if c["id"].startswith("D")]
     named = sum(1 for c in drawn if any(mine(c["prompt"], c["folder"]).values()))
@@ -1171,7 +1206,13 @@ def report(now=None, binary=BINARY, label_fn=None, gate=None, dedupe_fn=None):
             "alias with the record, or does 2 or more real turns on its branch): %s. Prototype baseline: 106 of 111."
             % (len(level1), len(pushes), len(sessions), rate(right, len(level1))),
             "",
-            "- By rule: %s." % (", ".join("%s %d" % kv for kv in sorted(how.items())) or "none"),
+            "- By route: %s." % (", ".join("%s %d" % kv for kv in sorted(how.items())) or "none"),
+            "- Right by route: %s." % ("; ".join("%s %d right, %d wrong, %d unjudged" % (k, v["right"], v["wrong"], v["unjudged"])
+                                                 for k, v in sorted(verdicts.items())) or "none"),
+            "- Late pushes, after a turn on the push's branch edited a file or ran `git commit`: %s. Edits by a subagent "
+            "or by other Bash commands are not seen, so this is a lower bound." % rate(late, len(level1)),
+            "- Live pushes by route, in the recall log%s: %s." % (
+                " since " + when(since_ms) if since_ms else "", ", ".join("%s %d" % kv for kv in sorted(live.items())) or "none"),
             "- At real prompt 1: %d, 2: %d, 3: %d, later: %d." % tuple(
                 sum(1 for _, x in level1 if (x["prompt"] == k if k < 4 else x["prompt"] >= 4)) for k in (1, 2, 3, 4)),
             "- Binary errors in the replay: %s." % (", ".join("%d × %s" % (n, e) for e, n in errors.items()) or "none"),
