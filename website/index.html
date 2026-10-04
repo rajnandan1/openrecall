@@ -145,18 +145,27 @@ td:last-child{text-align:right;padding-left:10px;white-space:nowrap}
 .bar i{position:absolute;top:0;bottom:0;background:var(--accent-2)}
 .tip{position:absolute;right:22px;top:-18px;padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-left:3px solid var(--accent);box-shadow:var(--shadow);font-size:12px;color:var(--fg)}
 
-/* layer stack */
-.layers{display:grid;gap:10px;padding:28px}
-.layer{display:grid;grid-template-columns:auto 1fr auto;gap:18px;align-items:center;margin:0 auto;padding:14px 18px;background:color-mix(in srgb,var(--accent) var(--fill),var(--bg));color:var(--fg)}
-.layer:nth-child(1){--fill:5%;width:76%}
-.layer:nth-child(2){--fill:14%;width:84%}
-.layer:nth-child(3){--fill:30%;width:92%}
-.layer:nth-child(4){--fill:100%;width:100%;color:var(--accent-fg)}
-.layer small{font-size:12px;letter-spacing:.12em}
-.layer h3{font:500 15px/1.3 var(--sans)}
-.pills{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
-.pill{padding:1px 9px;border:1px solid currentColor;border-radius:var(--pill);font-size:12px}
-.layer p{font-size:12px;text-align:right;max-width:280px}
+/* step table */
+.pill{padding:1px 9px;border:1px solid currentColor;border-radius:var(--pill);font-size:12px;white-space:nowrap}
+.flow{overflow-x:auto;padding:6px 4px;background:var(--bg)}
+.flow table{min-width:860px;font-size:12.5px}
+.flow th{padding:10px 16px;text-align:left;font-weight:500;color:var(--fg-muted);border-bottom:1px solid var(--border)}
+.flow td{padding:14px 16px;text-align:left;vertical-align:top;white-space:normal}
+.flow td:first-child{white-space:nowrap;color:var(--fg)}
+.flow td:first-child b{display:inline-block;width:22px;color:var(--accent);font-weight:500}
+.flow td:nth-child(2){white-space:nowrap}
+.flow td:last-child{text-align:left;white-space:nowrap}
+.flow code{color:var(--accent)}
+.flow tr.hot td{background:color-mix(in srgb,var(--accent) 6%,var(--bg))}
+.flow .pill{color:var(--fg-muted)}
+.flow tr.hot .pill{color:var(--accent)}
+.store{display:grid;grid-template-columns:1.4fr 1fr;border-top:1px solid var(--border)}
+.store>div{display:grid;gap:4px;padding:18px 20px}
+.store small{font-size:12px;letter-spacing:.12em;text-transform:uppercase}
+.store b{font-size:18px;font-weight:500}
+.store span{font-size:12.5px}
+.disk{background:var(--accent);color:var(--accent-fg)}
+.cache{background:color-mix(in srgb,var(--accent) 12%,var(--bg));color:var(--fg)}
 
 /* run list */
 .runs{overflow-x:auto;padding:6px 4px;background:var(--bg)}
@@ -232,8 +241,13 @@ dialog form{position:absolute;top:10px;right:10px}
   .stats{grid-template-columns:1fr 1fr}
   .stat:nth-child(2){border-right:0}
   .stat:nth-child(-n+2){border-bottom:1px solid var(--border)}
-  .layer{grid-template-columns:1fr;width:100%!important}
-  .layer p{text-align:left}
+  .store{grid-template-columns:1fr}
+  .flow table{min-width:0}
+  .flow thead{display:none}
+  .flow tr,.flow td{display:block}
+  .flow tr{padding:14px 0;border-top:1px solid var(--line-soft)}
+  .flow tr:first-child{border-top:0}
+  .flow td,.flow tr td:first-child{padding:3px 16px;border:0;white-space:normal}
   .checks{grid-template-columns:1fr}
   footer .cols{grid-template-columns:1fr 1fr}
 }
@@ -499,15 +513,25 @@ OPENRECALL=0 claude</pre>
   <section class="sec" id="layers">
     <div class="wrap">
       <p class="eyebrow"># architecture</p>
-      <h2>Markdown is the source of truth.</h2>
-      <p class="lede">The plugin holds only configuration. Every hook and the MCP server run one Rust binary. The index is a cache of the files, so you can delete it at any time.</p>
-      <figure class="fig" aria-label="Figure 4: the four layers of OpenRecall">
-        <div class="fig-bar"><span class="ic">&gt;_</span><span class="rule"></span><span>[ fig. 4 · where it runs ]</span><span class="rule"></span><span class="ic">⌗</span></div>
-        <div class="layers">
-          <div class="layer"><small>LAYER 01</small><div><h3>Claude Code plugin</h3><div class="pills"><span class="pill">SessionStart</span><span class="pill">UserPromptSubmit</span><span class="pill">Stop</span><span class="pill">SessionEnd</span><span class="pill">mcp</span></div></div><p>hooks and the MCP server, configuration only</p></div>
-          <div class="layer"><small>LAYER 02</small><div><h3>openrecall binary</h3><div class="pills"><span class="pill">handoff</span><span class="pill">recall</span><span class="pill">capture</span><span class="pill">extract</span><span class="pill">mcp</span></div></div><p>one Rust binary in ~/.local/bin, updates itself at most once in 24 h</p></div>
-          <div class="layer"><small>LAYER 03</small><div><h3>index.db</h3><div class="pills"><span class="pill">cache</span><span class="pill">updated on every prompt</span></div></div><p>search index over every memory, safe to delete</p></div>
-          <div class="layer"><small>LAYER 04</small><div><h3>~/.openrecall</h3><div class="pills"><span class="pill">markdown</span><span class="pill">source of truth</span></div></div><p>memories, handoff records, log, status lines</p></div>
+      <h2>What runs, and when.</h2>
+      <p class="lede">The plugin holds no code. It tells Claude Code to run one binary, <code>openrecall</code>, at four moments of a session. Only the prompt step runs before Claude answers. The other steps run in the background.</p>
+      <figure class="fig" aria-label="Figure 4: what OpenRecall runs at each moment of a session">
+        <div class="fig-bar"><span class="ic">&gt;_</span><span class="rule"></span><span>[ fig. 4 · one session, step by step ]</span><span class="rule"></span><span class="ic">⌗</span></div>
+        <div class="flow">
+          <table>
+            <thead><tr><th>when, in claude code</th><th>openrecall runs</th><th>what it does</th><th>timing</th></tr></thead>
+            <tbody>
+              <tr><td><b>1</b>the session starts</td><td><code>openrecall handoff</code></td><td>Notes the branch. Retires records with no update for 7 days. Starts the update check and the extraction worker.</td><td><span class="pill">background</span></td></tr>
+              <tr class="hot"><td><b>2</b>you send a prompt</td><td><code>openrecall recall</code></td><td>Adds the handoff record of the branch and at most 3 matching memories to Claude's context. Writes the status line.</td><td><span class="pill">before Claude reads it · a few ms</span></td></tr>
+              <tr><td><b>3</b>Claude finishes a turn</td><td><code>openrecall capture</code></td><td>Updates the handoff record of the branch: goal, identifiers, last ask, last answer.</td><td><span class="pill">background</span></td></tr>
+              <tr><td><b>4</b>the session ends</td><td><code>openrecall extract</code></td><td>Optional. Sends the session to your model provider and writes new facts.</td><td><span class="pill">background</span></td></tr>
+              <tr><td><b>*</b>Claude calls a tool</td><td><code>openrecall mcp</code></td><td>Serves the recall, remember and forget tools.</td><td><span class="pill">only when Claude asks</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="store">
+          <div class="disk"><small>source of truth</small><b>~/.openrecall/</b><span>Memories, handoff records, the log and status lines, as files you can read and edit.</span></div>
+          <div class="cache"><small>cache</small><b>index.db</b><span>A search index that OpenRecall builds from those files. Delete it at any time.</span></div>
         </div>
       </figure>
     </div>
