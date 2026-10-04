@@ -123,7 +123,10 @@ class HarnessTest(unittest.TestCase):
                     "read when the new session started (the writer alone, before the push rule): 100% (4/4,",
                     "first push at prompt 1: 0, 2: 1, 3: 0.", "3 pushes in 3 sessions of 4", "Right, by ticket 13's test",
                     "the session shares an alias with the record, or does 2 or more real turns on its branch): 67% (2/3,",
-                    "By rule: settle 3.", "At real prompt 1: 0, 2: 3, 3: 0, later: 0.", "Binary errors in the replay: none."):
+                    "By route: settle 3.", "Right by route: settle 2 right, 1 wrong, 0 unjudged.",
+                    "Late pushes, after a turn on the push's branch edited a file or ran `git commit`: 0% (0/3,",
+                    "Live pushes by route, in the recall log: none.",
+                    "At real prompt 1: 0, 2: 3, 3: 0, later: 0.", "Binary errors in the replay: none."):
             self.assertIn(row, report)
 
     def test_level_two_metrics(self):
@@ -308,6 +311,14 @@ class HarnessTest(unittest.TestCase):
         self.assertFalse(any(r["errors"] for r in results))
 
     def test_rules(self):
+        edit, commit = ("Edit", {}), ("Bash", dict(command="git -C /w/app commit -m x"))
+        turns = [dict(branch_end="feat-b", tools=[edit]), dict(branch_end="feat-a", tools=[("Bash", {})]),
+                 dict(branch_end="feat-a", tools=[commit]), dict(branch_end="feat-a", tools=[])]
+        s, push = dict(turns=turns, real=turns[3:], tickets=set()), dict(branch="feat-a", aliases=set())
+        self.assertEqual([harness.is_late(s, dict(push, turn=i)) for i in (2, 3)], [False, True], "only feat-a's own commit counts")
+        self.assertEqual(harness.verdict(s, push), "unjudged")
+        self.assertEqual(harness.verdict(dict(s, real=turns[:2]), push), "wrong")
+        self.assertEqual(harness.verdict(dict(s, real=turns[1:]), push), "right")
         lo, hi = harness.wilson(67, 100)
         self.assertEqual((round(lo, 2), round(hi, 2)), (0.57, 0.75))
         found = harness.mine("PR #345 at abc1234 in /w/app/src/export.py, line 346", "/w/app")

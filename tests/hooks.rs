@@ -282,6 +282,57 @@ fn a_new_session_gets_the_earlier_sessions_state() {
 }
 
 #[test]
+fn a_prompt_that_names_the_branchs_record_gets_it_before_the_branch_settles() {
+    let w = World::new("identifier");
+    let edit = |p: &str| json!({"type": "tool_use", "id": "t1", "name": "Edit", "input": {"file_path": w.folder.join(p)}});
+    w.branch("feat/y");
+    w.hook(&["handoff"], "Y", json!({"source": "startup"}));
+    w.turn("Y", &[user("Write the other doc"), said("Editing.", Some(edit("docs/y.md")))], "");
+    w.branch("feat/x");
+    w.hook(&["handoff"], "E", json!({"source": "startup"}));
+    w.turn("E", &[user("Build ABC-12 in the docs"), said("Editing.", Some(edit("docs/x.md")))], "");
+    w.turn("E", &[user("open the PR"), said("Opened PR #345 at abc1234def.", None)], "");
+    let routes = |sid: &str| -> Vec<String> {
+        fs::read_to_string(w.home.join(".openrecall/log/openrecall.jsonl"))
+            .unwrap()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .filter(|e| e["event"] == "pushed" && e["session"] == sid)
+            .map(|e| e["how"].as_str().unwrap_or("").to_string())
+            .collect()
+    };
+    let first = |sid: &str, prompt: &str| {
+        w.hook(&["handoff"], sid, json!({"source": "startup"}));
+        w.pushed(sid, prompt)
+    };
+    for (sid, prompt) in [
+        ("A", "/implement docs/x.md"),
+        ("B", "@docs/x.md"),
+        ("C", "is #345 green?"),
+        ("D", "is abc1234 in?"),
+    ] {
+        let ctx = first(sid, prompt).unwrap_or_default();
+        assert!(ctx.starts_with("Handoff record for branch feat/x"), "{prompt}: {ctx}");
+        assert_eq!(routes(sid), ["identifier"], "{prompt}");
+    }
+    let pasted = format!("docs/x.md {}", "pasted ".repeat(300));
+    for (sid, prompt, why) in [
+        ("F", "check docs/y.md", "only another branch's record lists it"),
+        ("G", pasted.as_str(), "2,000 characters or more"),
+        ("H", "docs/x.md for XYZ-99", "a ticket the record does not list"),
+        ("I", "is abc123 in?", "a 6-character prefix"),
+    ] {
+        assert!(first(sid, prompt).is_none(), "{why}");
+    }
+
+    w.hook(&["handoff"], "S", json!({"source": "startup"}));
+    w.turn("S", &[user("continue please"), said("Reading.", None)], "");
+    assert!(w.pushed("S", "check docs/x.md").is_some());
+    assert!(w.pushed("S", "docs/x.md again").is_none(), "never twice in one context window");
+    assert_eq!(routes("S"), ["settle"]);
+}
+
+#[test]
 fn keys_are_redacted_and_renames_move_the_record() {
     let w = World::new("rename");
     w.branch("orca/tmp");

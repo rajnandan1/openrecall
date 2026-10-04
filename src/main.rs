@@ -21,6 +21,8 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 const INSTALL: &str =
     "curl -fsSL https://raw.githubusercontent.com/rajnandan1/openrecall/main/install.sh | sh";
+/// A prompt this long is pasted material: in the replay it named the branch's record in 1 right and 5 wrong pushes (issue 9).
+const PASTED_CHARS: usize = 2000;
 
 /// Every path exits 0: exit 2 on UserPromptSubmit would erase the user's prompt (ticket 18).
 fn main() {
@@ -312,7 +314,8 @@ fn level2(
 }
 
 /// The record to push, if any: an alias the prompt names first (several records may share a ticket: the newest
-/// wins, and the one written from this folder breaks a tie, ticket 12), then the settled branch's record.
+/// wins, and the one written from this folder breaks a tie, ticket 12), then the branch's record once the branch is
+/// settled, or before that when the prompt names one of its paths, PR numbers or commits (issue 9).
 fn pick(
     repo: &git::Repo,
     s: &Value,
@@ -351,16 +354,23 @@ fn pick(
         || (s["branch"] == branch.as_str() && s["turns"].as_u64().unwrap_or(0) >= 1);
     let path = dir.join(format!("{}.md", record::stem(&branch)));
     let rec = Record::parse(&fs::read_to_string(&path).ok()?);
+    let how = if source == "compact" {
+        "compact"
+    } else if settled {
+        "settle"
+    } else if prompt.chars().count() < PASTED_CHARS
+        && rec.named_in(
+            prompt,
+            &repo.folder.to_string_lossy(),
+            &user_home().to_string_lossy(),
+        )
+    {
+        "identifier"
+    } else {
+        return None;
+    };
     let foreign = named.iter().any(|t| !rec.aliases.contains(t));
-    (settled && !foreign && usable(&path, &rec)).then_some((
-        path,
-        rec,
-        if source == "compact" {
-            "compact"
-        } else {
-            "settle"
-        },
-    ))
+    (!foreign && usable(&path, &rec)).then_some((path, rec, how))
 }
 
 /// Stop: hand the turn to a detached writer and return at once (tickets 01 and 06).

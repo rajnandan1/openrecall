@@ -85,8 +85,12 @@ The worktree root, the directory that holds `.git`. Never the hook's working dir
 _Avoid_: cwd, directory, path
 
 **Settled**:
-The state of a session's branch after one completed turn on it, counted from the session's start or from its last branch change. Only a settled branch can match a handoff record by folder and branch.
+The state of a session's branch after one completed turn on it, counted from the session's start or from its last branch change. Before its branch is settled, a session gets the branch's handoff record only when the prompt names one of the record's aliases, paths, PR numbers or commits.
 _Avoid_: stable, confirmed
+
+**Route**:
+The way a handoff record reaches a session. Alias: the prompt names one of the aliases of a record of any branch. Identifier: before the branch is settled, the prompt names one of the paths, PR numbers or commits of the branch's record. Settle: the branch is settled, so its record comes with the next prompt. Compact: the context was just compacted.
+_Avoid_: trigger, source
 
 **Task hop**:
 A session that switches to a new task's branch after it starts, so the branch it started on belongs to the previous task. A rename keeps the task; a hop changes it.
@@ -261,6 +265,14 @@ _Avoid_: end state, last state
 **Carry-over**:
 The share of an earlier session's final-state identifiers that reach a new session on the same task by its third real prompt, without the user retyping them.
 _Avoid_: recall rate, hit rate, continuity score
+
+**Right push**:
+A handoff record push to a session that shares one of the record's aliases, or that does 2 or more real turns ending on the record's branch. A push to a session with one real prompt and no shared alias is unjudged: the test can never call it right.
+_Avoid_: correct push, hit, good push
+
+**Late push**:
+A handoff record push that arrives after a turn on its branch already edited a file or made a commit.
+_Avoid_: slow push, missed push
 
 ### Updating
 

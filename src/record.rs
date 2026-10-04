@@ -1,4 +1,4 @@
-use crate::turn::{Found, TICKET};
+use crate::turn::{Found, TICKET, commits_in, norm_path, paths_in, prs_in};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -281,6 +281,21 @@ impl Record {
 
     pub fn stale(&self, now: u64) -> bool {
         parse_iso(&self.updated_at).is_none_or(|t| now.saturating_sub(t) > RETIRE_SECS)
+    }
+
+    /// The text names one of the record's paths (an `@` mention too), PR numbers or commits; a commit matches by
+    /// prefix either way round, over 7 or more characters (issue 9).
+    pub fn named_in(&self, text: &str, folder: &str, home: &str) -> bool {
+        paths_in(text)
+            .into_iter()
+            .filter_map(|p| norm_path(p.strip_prefix('@').unwrap_or(p), folder, home))
+            .any(|p| self.paths.contains(&p))
+            || prs_in(text).iter().any(|(_, n)| self.prs.contains(n))
+            || commits_in(text).any(|c| {
+                self.commits
+                    .iter()
+                    .any(|k| k.len() >= 7 && (k.starts_with(c) || c.starts_with(k.as_str())))
+            })
     }
 }
 
