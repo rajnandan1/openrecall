@@ -81,6 +81,15 @@ pub fn is_task(branch: &str) -> bool {
     !branch.is_empty() && !TRUNK.contains(&branch)
 }
 
+/// The repo owner (issue 14): the repo identity without its last part, such as `github.com/acme`. A repo with no
+/// remote has none.
+pub fn owner(identity: &str) -> Option<&str> {
+    if identity.starts_with("local/") {
+        return None;
+    }
+    identity.rsplit_once('/').map(|(owner, _)| owner)
+}
+
 fn origin(common: &Path) -> Option<String> {
     let config = fs::read_to_string(common.join("config")).ok();
     let parsed = config.as_deref().and_then(|c| {
@@ -141,6 +150,14 @@ mod tests {
         ] {
             assert_eq!(normalize(url), "github.com/someone/app");
         }
+    }
+
+    #[test]
+    fn repo_owners() {
+        assert_eq!(owner("github.com/acme/web"), Some("github.com/acme"));
+        assert_eq!(owner("gitlab.com/acme/ui/web"), Some("gitlab.com/acme/ui"));
+        assert_eq!(owner("local/Users/me/loose/one"), None);
+        assert_eq!(owner("web"), None);
     }
 
     #[test]

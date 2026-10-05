@@ -77,7 +77,7 @@ What a handoff record belongs to: one branch of one repo identity, also known by
 _Avoid_: work item, job, worktree
 
 **Alias**:
-A ticket ID that names a task, learned from the user's prompts.
+A ticket ID that names a task, learned from the user's prompts. Always in upper case. A lower-case form in a prompt counts as the alias only when a handoff record that is not retired already has it.
 _Avoid_: tag, label, ticket key
 
 **Folder**:
@@ -89,7 +89,7 @@ The state of a session's branch after one completed turn on it, counted from the
 _Avoid_: stable, confirmed
 
 **Route**:
-The way a handoff record reaches a session. Alias: the prompt names one of the aliases of a record of any branch. Identifier: before the branch is settled, the prompt names one of the paths, PR numbers or commits of the branch's record. Settle: the branch is settled, so its record comes with the next prompt. Compact: the context was just compacted.
+The way a handoff record reaches a session. Alias: the prompt names one of the aliases of a record of any branch of the session's repo. Sibling: the prompt names an alias that no usable record of the session's repo has, and a record of a sibling repo has it. Identifier: before the branch is settled, the prompt names one of the paths, PR numbers or commits of the branch's record. Settle: the branch is settled, so its record comes with the next prompt. Compact: the context was just compacted.
 _Avoid_: trigger, source
 
 **Task hop**:
@@ -101,7 +101,7 @@ The state of a handoff record whose task went idle. A retired record is never in
 _Avoid_: expired, archived, stale
 
 **Scope**:
-The set of memories a session may recall: those of its repo identity, when it has one, plus global ones.
+The set of memories a session may recall: those of its repo identity, when it has one, plus global ones. A handoff record of a sibling repo is outside the scope and reaches a session only by the sibling route.
 _Avoid_: namespace, project, folder
 
 **Scope size**:
@@ -111,6 +111,14 @@ _Avoid_: index size (that counts every scope)
 **Repo identity**:
 The key that names a repository across all its worktrees. It comes from the repo's origin remote, or from its main checkout when there is no remote.
 _Avoid_: project slug, folder path, workspace
+
+**Repo owner**:
+The repo identity without its last part: the host and the account or group, such as `github.com/acme`. A repo with no remote has no repo owner.
+_Avoid_: org, namespace, account
+
+**Sibling repo**:
+Another repo with the same repo owner as the session's repo.
+_Avoid_: other repo, second repo, related repo
 
 ### Recall
 
@@ -267,7 +275,7 @@ The share of an earlier session's final-state identifiers that reach a new sessi
 _Avoid_: recall rate, hit rate, continuity score
 
 **Right push**:
-A handoff record push to a session that shares one of the record's aliases, or that does 2 or more real turns ending on the record's branch. A push to a session with one real prompt and no shared alias is unjudged: the test can never call it right.
+A handoff record push to a session that shares one of the record's aliases, or that does 2 or more real turns ending on the record's branch. A push to a session with one real prompt and no shared alias is unjudged: the test can never call it right. The test does not apply to a push by the sibling route. A person judges such a push.
 _Avoid_: correct push, hit, good push
 
 **Late push**:

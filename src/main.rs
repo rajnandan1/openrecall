@@ -9,7 +9,7 @@ mod update;
 
 use record::Record;
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
@@ -108,19 +108,12 @@ fn handoff() -> Result<()> {
 /// Ticket 08: a record idle for 7 days retires; session and status files that old are deleted.
 fn sweep() {
     let now = now_secs();
-    let repos = home().join("repos");
     let mut dirs = vec![];
-    handoff_dirs(&repos, &mut dirs);
+    handoff_dirs(&home().join("repos"), &mut dirs);
     for dir in dirs {
         for (path, rec) in record::live(&dir) {
             if rec.stale(now) && record::retire(&path, now).is_ok() {
-                let identity = dir
-                    .parent()
-                    .and_then(|p| p.strip_prefix(&repos).ok())
-                    .unwrap_or(Path::new(""));
-                log(
-                    json!({"event": "retired", "address": address_of(&identity.to_string_lossy(), &path)}),
-                );
+                log(json!({"event": "retired", "address": address_of(&identity_of(&dir), &path)}));
             }
         }
     }
@@ -155,6 +148,43 @@ fn handoff_dirs(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// A handoff folder's repo identity: its path between `repos/` and `/handoffs`.
+fn identity_of(dir: &Path) -> String {
+    dir.parent()
+        .and_then(|p| p.strip_prefix(home().join("repos")).ok())
+        .map_or_else(String::new, |p| p.to_string_lossy().into_owned())
+}
+
+/// The live records of the sibling repos (issue 14), the other repos with the same repo owner, each with its repo
+/// identity. A repo with no remote has no repo owner, so it has no sibling repo.
+fn siblings(identity: &str) -> Vec<(String, PathBuf, Record)> {
+    let Some(owner) = git::owner(identity) else {
+        return vec![];
+    };
+    let mut dirs = vec![];
+    handoff_dirs(&home().join("repos"), &mut dirs);
+    // ken: reads every sibling record at each call, about 0.02 ms a record; an index of aliases at about 250 live records (5 ms).
+    dirs.iter()
+        .map(|dir| (identity_of(dir), dir))
+        .filter(|(other, _)| other != identity && git::owner(other) == Some(owner))
+        .flat_map(|(other, dir)| {
+            record::live(dir)
+                .into_iter()
+                .map(move |(path, rec)| (other.clone(), path, rec))
+        })
+        .collect()
+}
+
+/// The guard of a lower-case ticket (issue 14): the aliases of the live records of a repo and of its sibling repos.
+fn known(identity: &str) -> HashSet<String> {
+    let own = record::live(&record::dir(&home(), identity));
+    own.into_iter()
+        .map(|(_, rec)| rec)
+        .chain(siblings(identity).into_iter().map(|(_, _, rec)| rec))
+        .flat_map(|rec| rec.aliases)
+        .collect()
+}
+
 /// UserPromptSubmit: push the task's handoff record once the prompt proves the task (ticket 12), then
 /// search the level-2 memories for the prompt (ticket 15's order).
 fn recall(started: u128) -> Result<()> {
@@ -180,15 +210,25 @@ fn recall(started: u128) -> Result<()> {
     let mut context = vec![];
     let mut injected = vec![];
     if let Some(repo) = &repo
-        && let Some((path, rec, how)) = pick(repo, &s, &sid, prompt)
+        && let Some((identity, path, rec, how)) = pick(repo, &s, &sid, prompt)
     {
-        let address = address_of(&repo.identity, &path);
+        let address = address_of(&identity, &path);
         let text = fs::read_to_string(&path)?;
         let body = text.split_once("\n---\n").map_or(text.as_str(), |(_, b)| b);
         let written = if rec.answered_at.is_empty() { &rec.updated_at } else { &rec.answered_at };
+        let reflects = if how == "sibling" {
+            format!(
+                "It reflects what was true then in another repo, {identity}, in the folder {}. Its paths are paths of \
+                 that repo, not of this one; check them in that folder before acting on it.",
+                rec.folder
+            )
+        } else {
+            "It reflects what was true then; check the working tree before acting on it."
+                .to_string()
+        };
         context.push(format!(
             "Handoff record for branch {}, last written {} by an earlier session on this task ({address}). \
-             It reflects what was true then; check the working tree before acting on it.\n\n{body}",
+             {reflects}\n\n{body}",
             rec.branch, written
         ));
         see(&mut s, &address);
@@ -313,32 +353,34 @@ fn level2(
     ))
 }
 
-/// The record to push, if any: an alias the prompt names first (several records may share a ticket: the newest
-/// wins, and the one written from this folder breaks a tie, ticket 12), then the branch's record once the branch is
-/// settled, or before that when the prompt names one of its paths, PR numbers or commits (issue 9).
+/// The record to push, if any, with its repo identity: an alias the prompt names first (several records may share a
+/// ticket: the newest wins, and the one written from this folder breaks a tie, ticket 12), then the newest record of
+/// a sibling repo with the alias (issue 14), then the branch's record once the branch is settled, or before that when
+/// the prompt names one of its paths, PR numbers or commits (issue 9).
 fn pick(
     repo: &git::Repo,
     s: &Value,
     sid: &str,
     prompt: &str,
-) -> Option<(PathBuf, Record, &'static str)> {
+) -> Option<(String, PathBuf, Record, &'static str)> {
     let source = s["source"].as_str().unwrap_or("startup");
     if matches!(source, "resume" | "fork") {
         return None;
     }
     let now = now_secs();
-    let usable = |path: &Path, r: &Record| {
+    let usable = |identity: &str, path: &Path, r: &Record| {
         let own = !r.writers.is_empty() && r.writers.iter().all(|w| w == sid);
         !r.stale(now)
             && (!own || matches!(source, "clear" | "compact"))
-            && !seen(s, &address_of(&repo.identity, path))
+            && !seen(s, &address_of(identity, path))
     };
     let dir = record::dir(&home(), &repo.identity);
-    let named = turn::tickets(prompt);
+    let named = turn::named_tickets(prompt, || known(&repo.identity));
+    let names = |r: &Record| r.aliases.iter().any(|a| named.contains(a));
     if !named.is_empty() {
         let hit = record::live(&dir)
             .into_iter()
-            .filter(|(p, r)| usable(p, r) && r.aliases.iter().any(|a| named.contains(a)))
+            .filter(|(p, r)| usable(&repo.identity, p, r) && names(r))
             .max_by_key(|(_, r)| {
                 (
                     r.updated_at.clone(),
@@ -346,7 +388,14 @@ fn pick(
                 )
             });
         if let Some((path, rec)) = hit {
-            return Some((path, rec, "alias"));
+            return Some((repo.identity.clone(), path, rec, "alias"));
+        }
+        let hit = siblings(&repo.identity)
+            .into_iter()
+            .filter(|(identity, p, r)| usable(identity, p, r) && names(r))
+            .max_by_key(|(_, _, r)| r.updated_at.clone());
+        if let Some((identity, path, rec)) = hit {
+            return Some((identity, path, rec, "sibling"));
         }
     }
     let branch = repo.branch().filter(|b| git::is_task(b))?;
@@ -370,7 +419,12 @@ fn pick(
         return None;
     };
     let foreign = named.iter().any(|t| !rec.aliases.contains(t));
-    (!foreign && usable(&path, &rec)).then_some((path, rec, how))
+    (!foreign && usable(&repo.identity, &path, &rec)).then_some((
+        repo.identity.clone(),
+        path,
+        rec,
+        how,
+    ))
 }
 
 /// Stop: hand the turn to a detached writer and return at once (tickets 01 and 06).
@@ -488,6 +542,13 @@ fn write_record(
         &repo.folder.to_string_lossy(),
         &user_home().to_string_lossy(),
     );
+    if turn.real {
+        for t in turn::named_tickets(&turn.ask, || known(&repo.identity)) {
+            if !found.aliases.contains(&t) {
+                found.aliases.push(t);
+            }
+        }
+    }
     found.commands = found.commands.iter().map(|c| clean(c, "command")).collect();
     let (ask, answer) = if full && turn.real {
         (

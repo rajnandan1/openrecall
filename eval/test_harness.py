@@ -124,6 +124,8 @@ class HarnessTest(unittest.TestCase):
                     "first push at prompt 1: 0, 2: 1, 3: 0.", "3 pushes in 3 sessions of 4", "Right, by ticket 13's test",
                     "the session shares an alias with the record, or does 2 or more real turns on its branch): 67% (2/3,",
                     "By route: settle 3.", "Right by route: settle 2 right, 1 wrong, 0 unjudged.",
+                    "Each of the 0 sibling pushes shares an alias with its record",
+                    "Handoff pairs whose two sessions have different repo identities: 0, 0 of them measured.",
                     "Late pushes, after a turn on the push's branch edited a file or ran `git commit`: 0% (0/3,",
                     "Live pushes by route, in the recall log: none.",
                     "At real prompt 1: 0, 2: 3, 3: 0, later: 0.", "Binary errors in the replay: none."):
@@ -363,6 +365,27 @@ class HarnessTest(unittest.TestCase):
                          "a gone folder still finds the repo's memory directory through another case")
         self.assertEqual(results[3]["skipped"], "empty-args")
         self.assertFalse(any(r["errors"] for r in results))
+
+    def test_a_task_that_moves_to_a_sibling_repo(self):
+        header = ("Handoff record for branch feat/x, last written 2026-01-05T10:01:00Z by an earlier session on this task "
+                  "(github.com/acme/api/handoffs/feat--x). It reflects what was true then in another repo, "
+                  "github.com/acme/api, in the folder /w/api. Its paths are paths of that repo, not of this one; check "
+                  "them in that folder before acting on it.\n\n## Goal\nPlan ABC-12\n")
+        self.assertEqual(harness.FRAME.match(header).groups(), ("feat/x", "github.com/acme/api/handoffs/feat--x"))
+        for sid, hour, cwd, ask, branch in (
+                ("api", 11, "/w/api", "Plan ABC-12 for the web repo", "feat/x"),
+                ("web", 12, "/w/web", "read ~/Code/api/docs/handoff-abc-12.md and go", "feat/y"),
+                ("shapes", 13, "/w/web", "see notes/standup-oct-05.md, utf-16 and sha-256", "feat/z")):
+            with open(os.path.join(harness.PROJECTS, "-w-app", sid + ".jsonl"), "w") as fh:
+                fh.writelines(json.dumps(o) + "\n" for o in (user("2026-01-08T%d:00:00Z" % hour, ask, branch, cwd),
+                                                            said("2026-01-08T%d:01:00Z" % hour, "Done.", branch, sid)))
+        sessions, _ = harness.load()
+        by_sid = {s["sid"]: s for s in sessions}
+        web, api = by_sid["web"], by_sid["api"]
+        self.assertEqual(harness.task_key(web, api), "alias", "the ticket only in lower case inside a file name")
+        self.assertTrue(harness.push_is_right(web, dict(aliases={"ABC-12"}, branch="feat/x")))
+        self.assertIsNone(harness.task_key(by_sid["shapes"], api), "a false shape pairs nothing")
+        self.assertEqual(harness.tickets_in("ABC-12 in docs/handoff-def-34.md, not Ghi-56"), {"ABC-12", "DEF-34"})
 
     def test_rules(self):
         edit, commit = ("Edit", {}), ("Bash", dict(command="git -C /w/app commit -m x"))

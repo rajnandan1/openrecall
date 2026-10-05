@@ -1,6 +1,6 @@
 use regex::Regex;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 /// One turn of a transcript: the prompt that opened it and what the assistant did after it.
@@ -44,6 +44,7 @@ const CMD_VERBS: [&str; 25] = [
 ];
 
 pub(crate) static TICKET: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b[A-Z]{2,5}-\d{2,5}\b").unwrap());
+static LOWER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b[a-z]{2,5}-\d{2,5}\b").unwrap());
 static PR: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(\bPR\s*#?|pull/|#)(\d{2,6})\b").unwrap());
 static GH_PR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bgh pr \w+ (\d{2,6})\b").unwrap());
@@ -66,6 +67,22 @@ pub fn tickets(text: &str) -> Vec<String> {
         .find_iter(text)
         .map(|m| m.as_str().to_string())
         .collect()
+}
+
+/// The tickets a prompt names (issue 14): its upper-case tickets, then each lower-case form, such as `abc-12` in
+/// `handoff-abc-12.md`, whose upper-case form is in `known`. `known` runs only when the prompt holds such a form.
+pub fn named_tickets(prompt: &str, known: impl FnOnce() -> HashSet<String>) -> Vec<String> {
+    let mut out = tickets(prompt);
+    if !LOWER.is_match(prompt) {
+        return out;
+    }
+    let known = known();
+    for t in LOWER.find_iter(prompt).map(|m| m.as_str().to_uppercase()) {
+        if known.contains(&t) && !out.contains(&t) {
+            out.push(t);
+        }
+    }
+    out
 }
 
 /// The prompt a transcript line carries, or None when it is not a prompt line.
@@ -464,6 +481,24 @@ mod tests {
             ["a/b.c", "docs/x.md"]
         );
         assert_eq!(tickets("ABC-12 and abc-12 and ABCDEF-1"), ["ABC-12"]);
+    }
+
+    #[test]
+    fn a_lower_case_ticket_counts_only_when_a_record_has_it() {
+        let known = || HashSet::from(["ABC-12".to_string(), "QRS-56".to_string()]);
+        assert_eq!(
+            named_tickets("read docs/handoff-abc-12.md for DEF-34, then qrs-56", known),
+            ["DEF-34", "ABC-12", "QRS-56"]
+        );
+        let none = named_tickets("see standup-oct-05.md, utf-16, sha-256, xyz-99, Abc-12", known);
+        assert!(
+            none.is_empty(),
+            "a false shape, an unknown form and a mixed-case form are no tickets"
+        );
+        assert_eq!(
+            named_tickets("ABC-12 only", || panic!("read without a lower-case form")),
+            ["ABC-12"]
+        );
     }
 
     #[test]
