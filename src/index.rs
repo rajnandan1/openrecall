@@ -467,7 +467,8 @@ pub fn query_of(prompt: &str) -> Result<&str, &'static str> {
     }
 }
 
-/// Search terms: identifiers first, then every other word, each once. Paths stay whole so they match as phrases.
+/// Search terms: identifiers first, then the PR number of a PR URL when it has 3 to 6 digits (issue 13), then every
+/// other word, each once. Paths stay whole so they match as phrases.
 // ken: the first 40 terms; weigh terms by rarity if long pasted prompts show up as false injections.
 pub fn terms(query: &str) -> Vec<String> {
     let mut out: Vec<String> = idents(query)
@@ -477,6 +478,11 @@ pub fn terms(query: &str) -> Vec<String> {
     for t in turn::tickets(query) {
         if !out.contains(&t) {
             out.push(t);
+        }
+    }
+    for (_, p) in turn::prs_in(query) {
+        if p.len() >= 3 && !out.contains(&p) {
+            out.push(p);
         }
     }
     for w in WORD.find_iter(&URL.replace_all(query, " ")) {
@@ -666,6 +672,28 @@ mod tests {
     }
 
     #[test]
+    fn pr_urls() {
+        let pr = "https://github.com/acme/web-app/pull/345";
+        assert_eq!(terms(pr), ["345"]);
+        let review = query_of("/review https://github.com/acme/web-app/pull/345");
+        assert_eq!(review, Ok(pr));
+        assert_eq!(terms(review.unwrap()), ["345"]);
+        for none in [
+            "https://github.com/acme/web-app/pull/7",
+            "https://github.com/acme/web-app/pull/12",
+            "https://github.com/acme/web-app/issues/345",
+        ] {
+            assert_eq!(terms(none), Vec::<String>::new(), "{none}");
+        }
+        assert_eq!(terms("PR #345 is https://github.com/acme/web-app/pull/345"), ["345", "pr", "is"]);
+        assert_eq!(terms("see https://github.com/acme/web-app/pull/345 now"), ["345", "see", "now"]);
+        assert_eq!(
+            terms("https://tracker.example/issue/ABC-123/export-drops-the-currency-column i think the fix is in the exporter"),
+            ["ABC-123", "think", "the", "fix", "is", "in", "exporter"]
+        );
+    }
+
+    #[test]
     fn lines() {
         let short = candidate("d", "PR #345 is merged.");
         assert_eq!(line(&short, 0), "- gotcha 2026-01-02 global/x: PR #345 is merged.");
@@ -736,6 +764,23 @@ mod tests {
         assert_eq!(top("https://tracker.example/issue/ABC-1234/slug").as_deref(), Some("global/b"));
         assert_eq!(top("queue-retry-limits").as_deref(), Some("global/a"));
         assert_eq!(top("limits-queue"), None);
+        fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn a_pr_url_finds_the_fact_that_names_its_pr() {
+        let tmp = std::env::temp_dir().join(format!("openrecall-pr-{}", std::process::id()));
+        fs::create_dir_all(tmp.join("global")).unwrap();
+        let fact = |name: &str, body: &str| {
+            format!("---\nname: {name}\ndescription: d\nmetadata:\n  type: state\nsource: S 2026-01-02\n---\n\n{body}\n")
+        };
+        fs::write(tmp.join("global/a.md"), fact("web-app-pull-requests", "The acme web app reviews each pull request.")).unwrap();
+        fs::write(tmp.join("global/b.md"), fact("export-null-rows", "PR #345 fixes the null rows.")).unwrap();
+        let scopes = scopes(&tmp, &tmp, None, None);
+        let mut ix = Index::open(&tmp).unwrap();
+        ix.sync(&scopes).unwrap();
+        let top = |q: &str| ix.search(&terms(q), &scopes, 5).unwrap().first().map(|c| c.address.clone());
+        assert_eq!(top("https://github.com/acme/web-app/pull/345").as_deref(), Some("global/b"));
         fs::remove_dir_all(tmp).unwrap();
     }
 

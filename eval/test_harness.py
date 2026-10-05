@@ -199,6 +199,60 @@ class HarnessTest(unittest.TestCase):
         sessions, _ = harness.load()
         self.assertEqual(harness.live_expansions({s["sid"]: s for s in sessions}), (2, 1))
 
+    def test_live_pr_urls(self):
+        start = int(datetime(2026, 1, 8, 8, tzinfo=timezone.utc).timestamp() * 1000)
+        urls = ["https://github.com/acme/web-app/pull/344", "https://github.com/acme/web-app/pull/345",
+                "https://github.com/acme/web-app/pull/12", "https://github.com/acme/web-app/issues/346",
+                "https://github.com/acme/web-app/pull/347"]
+        lines = []
+        for i, url in enumerate(urls):
+            lines += [user("2026-01-08T09:0%d:00Z" % i, "<command-name>/review</command-name>\n<command-args>%s</command-args>" % url,
+                           "feat-a"), said("2026-01-08T09:0%d:30Z" % i, "Reviewing.", "feat-a", "r%d" % i)]
+        with open(os.path.join(harness.PROJECTS, "-w-app", "review.jsonl"), "w") as fh:
+            fh.writelines(json.dumps(o) + "\n" for o in lines)
+        mem = os.path.join(harness.PROJECTS, "-w-app", "memory")
+        for name in ("a", "b"):
+            with open(os.path.join(mem, name + ".md"), "w") as fh:
+                fh.write("---\nname: %s\ndescription: PR #345 notes\n---\n\nPR #345 changes the export.\n" % name)
+        old = datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp()
+        os.utime(os.path.join(mem, "a.md"), (old, old))
+        cand = lambda name: dict(address="builtin/-w-app/" + name, score=2.0, text_hash="h" + name)
+        recall = lambda i, at, injected: dict(event="recall", session="review", at=at, prompt_hash=harness.fnv("/review " + urls[i]),
+                                              candidates=[cand("a"), cand("b"), cand("c")], injected=injected)
+        before = [dict(event="update", step="binary", result="current", **{"from": "0.3.0"}, to="", reason="", at=start - 3),
+                  recall(0, start - 2, ["builtin/-w-app/a"]),
+                  dict(event="update", step="plugin", result="updated", **{"from": "0.3.0"}, to="0.4.0", reason="", at=start - 1)]
+        after = [dict(event="update", step="binary", result="updated", **{"from": "0.3.0"}, to="0.4.0", reason="", at=start),
+                 recall(1, start + 1, ["github.com/acme/web-app/handoffs/feat-a", "builtin/-w-app/a", "builtin/-w-app/b"]),
+                 recall(2, start + 2, ["builtin/-w-app/a"]), recall(3, start + 3, ["builtin/-w-app/a"]), recall(4, start + 4, []),
+                 dict(recall(1, start + 5, ["builtin/-w-app/a"]), session="gone")]
+        log = os.path.join(os.path.dirname(harness.EVAL), "log")
+        os.makedirs(log)
+        sessions, _ = harness.load()
+        by_sid = {s["sid"]: s for s in sessions}
+        asked = []
+
+        def label(c, todo, memories, earlier):
+            asked.append([x["address"] for x in todo])
+            return [dict(case=c["id"], address=x["address"], text_hash=x["text_hash"], judge="test", at="", note={},
+                         label="useful" if x["address"].endswith("/a") else "noise") for x in todo if x["address"] in memories]
+
+        def write(events):
+            with open(os.path.join(log, "openrecall.jsonl"), "w") as fh:
+                fh.writelines(json.dumps(e) + "\n" for e in events)
+
+        write(before)
+        self.assertEqual(harness.live_pr_urls(by_sid, label), "- Live PR URL prompts (issue 13): binary 0.4.0 is not in "
+                         "the recall log yet, so nothing is counted.", "a plugin step to 0.4.0 is not the binary")
+        write(before + after)
+        line = harness.live_pr_urls(by_sid, label)
+        for part in ("since binary 0.4.0 at 2026-01-08 08:00 UTC: 2 prompts, 1 with an injection, 2 injections, precision 50% (1/2,",
+                     "Labels: useful 1, partly 0, noise 1, unlabeled 0. Injected memories whose file changed after the prompt: 1."):
+            self.assertIn(part, line)
+        self.assertEqual(asked, [["builtin/-w-app/a", "builtin/-w-app/b"]], "the handoff record and the candidate c are no injection")
+        self.assertEqual(harness.live_pr_urls(by_sid, label), line)
+        self.assertEqual(len(asked), 1, "each injection is labeled once")
+
     def test_extraction_lines(self):
         home = os.path.dirname(harness.EVAL)
         repo = os.path.join(home, "repos", "github.com", "x", "app")
