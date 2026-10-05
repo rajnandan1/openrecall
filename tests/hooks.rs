@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 // macOS sets close-on-exec on a new pipe in a second step, so a parallel test's spawn can inherit it.
 static SPAWN: Mutex<()> = Mutex::new(());
 
+#[derive(Clone)]
 struct World {
     root: PathBuf,
     home: PathBuf,
@@ -35,6 +36,15 @@ impl World {
             entrypoint: "cli",
             plugin: None,
         }
+    }
+
+    /// The same world seen from another folder: a repo with this origin, or with no remote.
+    fn repo(&self, name: &str, origin: Option<&str>) -> World {
+        let folder = self.root.join(name);
+        fs::create_dir_all(folder.join(".git/refs/heads")).unwrap();
+        let remote = origin.map_or(String::new(), |url| format!("[remote \"origin\"]\n\turl = {url}\n"));
+        fs::write(folder.join(".git/config"), remote).unwrap();
+        World { folder, ..self.clone() }
     }
 
     fn branch(&self, name: &str) {
@@ -111,12 +121,29 @@ impl World {
     }
 
     fn record(&self, stem: &str) -> Option<String> {
+        self.record_in("github.com/someone/app", stem)
+    }
+
+    fn record_in(&self, identity: &str, stem: &str) -> Option<String> {
         fs::read_to_string(
             self.home
-                .join(".openrecall/repos/github.com/someone/app/handoffs")
+                .join(".openrecall/repos")
+                .join(identity)
+                .join("handoffs")
                 .join(format!("{stem}.md")),
         )
         .ok()
+    }
+
+    /// The route of each push to the session, in order, from the log.
+    fn routes(&self, sid: &str) -> Vec<String> {
+        fs::read_to_string(self.home.join(".openrecall/log/openrecall.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .filter(|e| e["event"] == "pushed" && e["session"] == sid)
+            .map(|e| e["how"].as_str().unwrap_or("").to_string())
+            .collect()
     }
 
     fn memory(&self, dir: &Path, stem: &str, kind: &str, source: &str, description: &str, body: &str) {
@@ -292,15 +319,6 @@ fn a_prompt_that_names_the_branchs_record_gets_it_before_the_branch_settles() {
     w.hook(&["handoff"], "E", json!({"source": "startup"}));
     w.turn("E", &[user("Build ABC-12 in the docs"), said("Editing.", Some(edit("docs/x.md")))], "");
     w.turn("E", &[user("open the PR"), said("Opened PR #345 at abc1234def.", None)], "");
-    let routes = |sid: &str| -> Vec<String> {
-        fs::read_to_string(w.home.join(".openrecall/log/openrecall.jsonl"))
-            .unwrap()
-            .lines()
-            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-            .filter(|e| e["event"] == "pushed" && e["session"] == sid)
-            .map(|e| e["how"].as_str().unwrap_or("").to_string())
-            .collect()
-    };
     let first = |sid: &str, prompt: &str| {
         w.hook(&["handoff"], sid, json!({"source": "startup"}));
         w.pushed(sid, prompt)
@@ -313,7 +331,7 @@ fn a_prompt_that_names_the_branchs_record_gets_it_before_the_branch_settles() {
     ] {
         let ctx = first(sid, prompt).unwrap_or_default();
         assert!(ctx.starts_with("Handoff record for branch feat/x"), "{prompt}: {ctx}");
-        assert_eq!(routes(sid), ["identifier"], "{prompt}");
+        assert_eq!(w.routes(sid), ["identifier"], "{prompt}");
     }
     let pasted = format!("docs/x.md {}", "pasted ".repeat(300));
     for (sid, prompt, why) in [
@@ -329,7 +347,152 @@ fn a_prompt_that_names_the_branchs_record_gets_it_before_the_branch_settles() {
     w.turn("S", &[user("continue please"), said("Reading.", None)], "");
     assert!(w.pushed("S", "check docs/x.md").is_some());
     assert!(w.pushed("S", "docs/x.md again").is_none(), "never twice in one context window");
-    assert_eq!(routes("S"), ["settle"]);
+    assert_eq!(w.routes("S"), ["settle"]);
+}
+
+fn start(w: &World, sid: &str) {
+    w.hook(&["handoff"], sid, json!({"source": "startup"}));
+}
+
+fn turn(w: &World, sid: &str, prompt: &str, answer: &str) {
+    w.turn(sid, &[user(prompt), said(answer, None)], "");
+}
+
+#[test]
+fn a_session_gets_the_record_of_a_sibling_repo_that_names_the_alias() {
+    let w = World::new("sibling");
+    let api = w.repo("api", Some("git@github.com:acme/api.git"));
+    let web = w.repo("web", Some("https://github.com/acme/web"));
+    let other = w.repo("other", Some("git@github.com:other/web.git"));
+    let (one, two) = (w.repo("loose/one", None), w.repo("loose/two", None));
+    let nowhere = World { folder: w.root.join("no-repo"), ..w.clone() };
+    for r in [&api, &web, &other, &one, &two] {
+        r.branch("feat/x");
+    }
+    let has = |ctx: Option<String>, address: &str| ctx.is_some_and(|c| c.contains(&format!("({address})")));
+    let (api_record, web_record) = ("github.com/acme/api/handoffs/feat--x", "github.com/acme/web/handoffs/feat--x");
+
+    start(&api, "E");
+    turn(&api, "E", "Plan ABC-12 for the web repo: the export button calls the new endpoint", "Planned.");
+    turn(&api, "E", "write the handoff", "Wrote docs/handoff-abc-12.md. Next: build the button in acme/web.");
+    assert!(w.record_in("github.com/acme/api", "feat--x").unwrap().contains("\naliases: ABC-12\n"));
+
+    start(&web, "S");
+    let ctx = web.pushed("S", "start ABC-12").expect("1. the sibling repo's record");
+    let (head, body) = ctx.split_once("\n\n").unwrap();
+    assert!(
+        head.starts_with("Handoff record for branch feat/x, last written 20")
+            && head.ends_with(&format!(
+                "by an earlier session on this task ({api_record}). It reflects what was true then in another repo, \
+                 github.com/acme/api, in the folder {}. Its paths are paths of that repo, not of this one; check them \
+                 in that folder before acting on it.",
+                api.folder.display()
+            )),
+        "1. the header names the repo and its folder: {head}"
+    );
+    assert!(
+        body.starts_with("## Goal\nPlan ABC-12 for the web repo")
+            && body.ends_with("## Last answer\nWrote docs/handoff-abc-12.md. Next: build the button in acme/web.\n")
+            && !ctx.contains("---"),
+        "2. the record's body, no frontmatter: {ctx}"
+    );
+    assert_eq!(w.routes("S"), ["sibling"], "3. the log names the route");
+    assert!(web.pushed("S", "and ABC-12 again").is_none(), "4. once in a context window");
+    start(&web, "S2");
+    assert!(web.pushed("S2", "what is next?").is_none(), "5. a prompt without the alias");
+
+    turn(&web, "S", "start ABC-12", "Built the button. Next: wire it to the endpoint.");
+    let own = w.record_in("github.com/acme/web", "feat--x").unwrap();
+    assert!(own.contains("\naliases: ABC-12\nwriters: S\n"), "{own}");
+    assert!(
+        has(api.pushed("E", "is ABC-12 done on the web side?"), web_record),
+        "6. the way back: E's own record is not usable to it"
+    );
+    assert_eq!(w.routes("E"), ["sibling"], "6");
+    assert!(
+        api.pushed("E", "ABC-12 again").is_none() && web.pushed("S", "ABC-12 once more").is_none(),
+        "7. no loop"
+    );
+
+    start(&api, "E2");
+    assert!(has(api.pushed("E2", "is ABC-12 done?"), api_record), "8. the own repo first");
+    assert_eq!(w.routes("E2"), ["alias"], "8");
+    start(&api, "E3");
+    turn(&api, "E3", "unrelated work on the api", "Done.");
+    start(&web, "S4");
+    assert!(
+        has(web.pushed("S4", "ABC-12 next step"), web_record),
+        "9. the own repo's record wins over a newer record of a sibling repo"
+    );
+    assert_eq!(w.routes("S4"), ["alias"], "9");
+
+    start(&other, "O");
+    assert!(other.pushed("O", "start ABC-12").is_none(), "10. another repo owner");
+    start(&one, "L");
+    turn(&one, "L", "Plan XYZ-34 in the loose repo", "Planned.");
+    start(&two, "L2");
+    assert!(two.pushed("L2", "start XYZ-34").is_none(), "11. a repo with no remote has no repo owner");
+    start(&web, "S3");
+    assert!(web.pushed("S3", "start XYZ-34").is_none(), "12. a repo with no remote gives nothing");
+    start(&nowhere, "N");
+    assert!(nowhere.pushed("N", "start ABC-12").is_none(), "13. a session in no repo");
+
+    start(&api, "E5");
+    turn(&api, "E5", "Plan KLM-90 for the web repo", "Planned.");
+    web.branch("main");
+    start(&web, "T");
+    assert!(has(web.pushed("T", "status of KLM-90?"), api_record), "14. a session on a trunk branch");
+    assert_eq!(w.routes("T"), ["sibling"], "14");
+
+    let mut m = Mcp::start(&web);
+    let (text, err) = m.tool("recall", json!({"query": api_record}));
+    assert!(
+        !err && text.contains("\n\n---\nrepo: github.com/acme/api\n")
+            && text.ends_with("## Last answer\nWrote docs/handoff-abc-12.md. Next: build the button in acme/web.\n"),
+        "the MCP tool reads a sibling record by its address: {text}"
+    );
+    m.close();
+}
+
+#[test]
+fn a_lower_case_ticket_in_a_file_name_finds_and_learns_the_alias() {
+    let w = World::new("lower");
+    let api = w.repo("api", Some("git@github.com:acme/api.git"));
+    let web = w.repo("web", Some("https://github.com/acme/web"));
+    api.branch("feat/x");
+    web.branch("feat/z");
+    let from_api = |ctx: Option<String>| ctx.is_some_and(|c| c.contains("(github.com/acme/api/handoffs/feat--x)"));
+    let aliases = || {
+        let rec = w.record_in("github.com/acme/web", "feat--z").unwrap();
+        rec.lines().find(|l| l.starts_with("aliases: ")).unwrap().to_string()
+    };
+
+    start(&api, "E");
+    turn(&api, "E", "Plan QRS-56 for the web repo", "Wrote docs/handoff-qrs-56.md.");
+    start(&web, "F");
+    let file = "read ~/Code/api/docs/handoff-qrs-56.md and go";
+    assert!(from_api(web.pushed("F", file)), "16. a lower-case form in a file name finds the record");
+    assert_eq!(w.routes("F"), ["sibling"], "16");
+    turn(&web, "F", file, "Building it.");
+    assert_eq!(aliases(), "aliases: QRS-56", "17. capture learns the alias in upper case");
+
+    start(&web, "G");
+    let shapes = "see notes/standup-oct-05.md and utf-16 and sha-256";
+    assert!(web.pushed("G", shapes).is_none(), "18. false shapes find nothing");
+    turn(&web, "G", shapes, "Seen.");
+    assert_eq!(aliases(), "aliases: QRS-56", "19. a false shape adds no alias");
+
+    start(&api, "E2");
+    turn(&api, "E2", "Plan TUV-78 for the web repo", "Planned.");
+    start(&web, "H");
+    turn(&web, "H", "continue the button work", "Continued.");
+    assert!(from_api(web.pushed("H", "look at ~/Code/api/docs/handoff-tuv-78.md")));
+    assert!(web.pushed("H", "go on").is_some());
+    assert_eq!(
+        w.routes("H"),
+        ["sibling", "settle"],
+        "20. on a settled branch, the branch's own record comes one prompt after the sibling record"
+    );
 }
 
 #[test]

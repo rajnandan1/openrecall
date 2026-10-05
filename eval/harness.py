@@ -34,6 +34,7 @@ QUIET = timedelta(minutes=30)
 CLASSES = ("tickets", "prs", "commits", "paths")
 TRUNK = {"", "main", "master", "HEAD"}
 TICKET = re.compile(r"\b[A-Z]{2,5}-\d{2,5}\b")
+LOWER = re.compile(r"\b[a-z]{2,5}-\d{2,5}\b")
 PR = re.compile(r"(?:\bPR\s*#?|pull/|(?<![\w/])#)(\d{2,6})\b")
 GH_PR = re.compile(r"\bgh pr \w+ (\d{2,6})\b")
 PR_URL = re.compile(r"https?://\S*?pull/\d{3,6}\b")
@@ -156,6 +157,12 @@ def repo_of(folder):
     return os.path.basename(m.group(1)) if m else os.path.basename(folder)
 
 
+def tickets_in(ask):
+    """The tickets a prompt names, each lower-case form such as `abc-12` in `handoff-abc-12.md` in upper case (issue 14).
+    task_key() and push_is_right() meet them with an alias set, and that meeting is the guard."""
+    return set(TICKET.findall(ask)) | {t.upper() for t in LOWER.findall(ask)}
+
+
 def load(until=None):
     """Interactive, non-scratch sessions with a real prompt, oldest first, plus every session that has a
     relevant_memories attachment. `until` cuts each transcript at that time."""
@@ -168,8 +175,8 @@ def load(until=None):
         if not s["real"] or is_scratch(s["cwd"]) or s["entrypoint"] == "sdk-cli":
             continue
         s["repo"] = repo_of(s["cwd"])
-        s["tickets"] = {tk for t in s["real"] for tk in TICKET.findall(t["ask"])}
-        s["first3"] = {tk for t in s["real"][:3] for tk in TICKET.findall(t["ask"])}
+        s["tickets"] = {tk for t in s["real"] for tk in tickets_in(t["ask"])}
+        s["first3"] = {tk for t in s["real"][:3] for tk in tickets_in(t["ask"])}
         b = (s["real"][1]["branch_start"] if len(s["real"]) > 1 else s["real"][0]["branch_end"]) or ""
         s["settled"] = "" if b in TRUNK else b
         sessions.append(s)
@@ -306,8 +313,13 @@ def normalize(url):
 
 
 def identity(folder):
-    """Ticket 10: the folder holding .git, and the repo identity (None outside a repo)."""
+    """Ticket 10: the folder holding .git, and the repo identity (None outside a repo). A removed Orca worktree
+    `orca/workspaces/<repo>/<name>` takes the identity of `~/Code/<repo>` (issue 14), so the replay gives it no
+    made-up repo owner."""
     root, gd = git_dirs(folder)
+    gone = re.search(r"/orca/workspaces/([^/]+)/", folder + "/")
+    if not gd and gone and not os.path.exists(folder):
+        return root, identity(os.path.join(HOME, "Code", gone.group(1)))[1]
     if not gd:
         return root, None
     try:
@@ -1143,7 +1155,10 @@ def report(now=None, binary=BINARY, label_fn=None, gate=None, dedupe_fn=None):
     results = replay_cases(binary, cases, mains_of(cases)) if ran else []
     hits = defaultdict(lambda: [0] * 6)
     measured, skipped, pushed_at = Counter(), Counter(), Counter()
-    unknown = 0
+    unknown = crossed = 0
+    ident = {s["sid"]: identity(s["cwd"])[1] for s in sessions}
+    across = {p["id"] for p in rows if ident.get(p["new"]) and ident.get(p["earlier"])
+              and ident[p["new"]] != ident[p["earlier"]]}
     for p in rows:
         S, E = by_sid.get(p["new"]), by_sid.get(p["earlier"])
         n = sum(map(len, p["final_state"].values()))
@@ -1157,6 +1172,7 @@ def report(now=None, binary=BINARY, label_fn=None, gate=None, dedupe_fn=None):
             unknown += n
         else:
             measured[p["rule"]] += 1
+            crossed += p["id"] in across
             folders = [S["cwd"]] + ([E["cwd"]] if E else [])
             roots = {git_dirs(f)[0] or f for f in folders}
             loaded = mine(S["instructions"], *folders)
@@ -1168,13 +1184,12 @@ def report(now=None, binary=BINARY, label_fn=None, gate=None, dedupe_fn=None):
             for cls, ids in p["final_state"].items():
                 for i in ids:
                     c, b = present(cls, i, carried), present(cls, i, loaded)
-                    for key in (cls, "all", p["rule"]):
+                    for key in (cls, "all", p["rule"]) + (("across",) if p["id"] in across else ()):
                         for k, v in enumerate((b, present(cls, i, typed), 1, c, c or b, present(cls, i, left))):
                             hits[key][k] += v
-    across = sum(1 for p in rows if p["rule"] == "alias" and p["new"] in by_sid and p["earlier"] in by_sid
-                 and by_sid[p["new"]]["repo"] != by_sid[p["earlier"]]["repo"])
     level1 = [(by_sid[sid], x) for sid, xs in pushes.items() for x in xs]
-    right = sum(push_is_right(s, x) for s, x in level1)
+    judged = [(s, x) for s, x in level1 if x.get("how") != "sibling"]
+    right = sum(push_is_right(s, x) for s, x in judged)
     how = Counter(e.get("how") for e in events if e.get("event") == "pushed")
     verdicts = defaultdict(Counter)
     for s, x in level1:
@@ -1235,18 +1250,22 @@ def report(now=None, binary=BINARY, label_fn=None, gate=None, dedupe_fn=None):
             "push rule): %s." % col("all", 5),
             "- Pairs whose new session got a push by its third real prompt: %s; first push at prompt 1: %d, 2: %d, "
             "3: %d." % (rate(m - pushed_at["never"], m), pushed_at[1], pushed_at[2], pushed_at[3]),
-            "- Alias pairs whose two sessions are in different repos: %d. Records are scoped by repo (ticket 10), so "
-            "OpenRecall never pushes these." % across,
+            "- Handoff pairs whose two sessions have different repo identities: %d, %d of them measured. Carried by the "
+            "record: %s." % (len(across), crossed, col("across", 3)),
             "",
             "## Level 1: the handoff push",
             "",
             "Every session replayed: %d pushes in %d sessions of %d. Right, by ticket 13's test (the session shares an "
-            "alias with the record, or does 2 or more real turns on its branch): %s. Prototype baseline: 106 of 111."
-            % (len(level1), len(pushes), len(sessions), rate(right, len(level1))),
+            "alias with the record, or does 2 or more real turns on its branch): %s. Each of the %d sibling pushes "
+            "shares an alias with its record, so the test cannot judge them and leaves them out. Prototype baseline: "
+            "106 of 111."
+            % (len(level1), len(pushes), len(sessions), rate(right, len(judged)), len(level1) - len(judged)),
             "",
             "- By route: %s." % (", ".join("%s %d" % kv for kv in sorted(how.items())) or "none"),
-            "- Right by route: %s." % ("; ".join("%s %d right, %d wrong, %d unjudged" % (k, v["right"], v["wrong"], v["unjudged"])
-                                                 for k, v in sorted(verdicts.items())) or "none"),
+            "- Right by route: %s." % ("; ".join(
+                "sibling %d not judged" % sum(v.values()) if k == "sibling" else
+                "%s %d right, %d wrong, %d unjudged" % (k, v["right"], v["wrong"], v["unjudged"])
+                for k, v in sorted(verdicts.items())) or "none"),
             "- Late pushes, after a turn on the push's branch edited a file or ran `git commit`: %s. Edits by a subagent "
             "or by other Bash commands are not seen, so this is a lower bound." % rate(late, len(level1)),
             "- Live pushes by route, in the recall log%s: %s." % (
