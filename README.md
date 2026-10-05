@@ -348,7 +348,7 @@ cargo test                       # Runs the unit tests and the hook tests of the
 python3 eval/test_harness.py     # Runs the tests of the eval harness itself.
 ```
 
-`CONTEXT.md` defines the words that this README uses, such as handoff record, pointer, gate and extraction.
+`GLOSSARY.md` defines the words that this README uses, such as handoff record, pointer, gate and extraction.
 
 ## License
 
