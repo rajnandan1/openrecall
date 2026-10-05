@@ -159,6 +159,8 @@ A fact is a memory that OpenRecall writes itself. Each fact has one of five type
 
 Recall searches all three places through the index, `~/.openrecall/index.db`. The index is a cache of the Markdown files. OpenRecall updates the index from the files on every prompt. You can delete the index at any time.
 
+Recall reads a PR URL in the prompt as its PR number, such as 345 for `https://github.com/acme/web-app/pull/345`, when the number has 3 to 6 digits.
+
 Recall gives each memory it finds a score. The score tells how well the memory matches the prompt. Then a rule, the gate, decides which memories OpenRecall injects:
 
 - The gate allows at most 3 memories, about 400 tokens in all.

@@ -36,6 +36,7 @@ TRUNK = {"", "main", "master", "HEAD"}
 TICKET = re.compile(r"\b[A-Z]{2,5}-\d{2,5}\b")
 PR = re.compile(r"(?:\bPR\s*#?|pull/|(?<![\w/])#)(\d{2,6})\b")
 GH_PR = re.compile(r"\bgh pr \w+ (\d{2,6})\b")
+PR_URL = re.compile(r"https?://\S*?pull/\d{3,6}\b")
 COMMIT = re.compile(r"(?<![\w-])(?=[0-9a-f]*[a-f])(?=[0-9a-f]*\d)[0-9a-f]{7,40}(?![\w-])")
 PATH = re.compile(r"(?<![\w/:@$.})\]-])(?<![\w})][\"'])(?!(?<=\*)/)(?:~/|/)?(?:[\w.@-]+/)+[\w.@-]*[A-Za-z][\w.@-]*\.[A-Za-z]\w{0,7}(?::\d+(?:-\d+)?)?(?![\w/])")
 FRAME = re.compile(r"^Handoff record for branch (.*), last written .* on this task \((.*)\)\. It reflects")
@@ -863,6 +864,42 @@ def live_expansions(by_sid):
     return prompts, expanded
 
 
+def live_pr_urls(by_sid, label_fn=None, version="0.4.0"):
+    """Issue 13's live line: the real prompts with a PR URL in the recall log since the first `update` event of the
+    binary step from or to `version`. An injection is an injected address that is also a candidate, so a pushed
+    handoff record is not one. `label_fn` labels each injection once, in labels.jsonl."""
+    orhome = os.path.dirname(EVAL)
+    log = os.path.join(orhome, "log", "openrecall.jsonl")
+    events = read(log) if os.path.exists(log) else []
+    start = min((e["at"] for e in events if e.get("event") == "update" and e.get("step") == "binary"
+                 and version in (e.get("from"), e.get("to"))), default=None)
+    if start is None:
+        return "- Live PR URL prompts (issue 13): binary %s is not in the recall log yet, so nothing is counted." % version
+    cases, results = [], []
+    for e in events:
+        s = by_sid.get(e.get("session")) if e.get("event") == "recall" and e.get("at", 0) >= start else None
+        t = next((t for t in s["real"] if fnv(t["ask"]) == e.get("prompt_hash")), None) if s else None
+        if not t or not PR_URL.search(t["ask"]):
+            continue
+        injected = [x for x in e.get("candidates", []) if x["address"] in e.get("injected", [])]
+        paths = {x["address"]: address_path(x["address"], orhome) for x in injected}
+        cases.append(dict(id="live:%s:%s" % (e["session"], e["prompt_hash"]), session=e["session"], at=t["at"],
+                          prompt=t["ask"]))
+        results.append(dict(candidates=injected, memories={a: p for a, p in paths.items() if os.path.exists(p)}))
+    labels = label_candidates(cases, results, by_sid, label_fn)
+    injections = [(c, x) for c, r in zip(cases, results) for x in r["candidates"]]
+    got = Counter(labels.get((c["id"], x["address"], x["text_hash"])) for c, x in injections)
+    changed = 0
+    for c, x in injections:
+        path = address_path(x["address"], orhome)
+        changed += not os.path.exists(path) or os.path.getmtime(path) > ts_of(c["at"]).timestamp()
+    return ("- Live PR URL prompts (issue 13), in the recall log since binary %s at %s: %d prompts, %d with an injection, "
+            "%d injections, precision %s. Labels: useful %d, partly %d, noise %d, unlabeled %d. Injected memories whose "
+            "file changed after the prompt: %d." % (
+                version, when(start), len(cases), sum(bool(r["candidates"]) for r in results), len(injections),
+                rate(got["useful"], len(injections)), got["useful"], got["partly"], got["noise"], got[None], changed))
+
+
 def agreement(rows):
     """Jev against the hand labels of spec Appendix A (ticket 09): rows of {case, hand, jev}."""
     judged = [r for r in rows if r.get("jev")]
@@ -887,8 +924,8 @@ def binary_gate():
         return None
 
 
-def level2_lines(cases, results, labels, by_sid, gate):
-    """The report's level-2 section."""
+def level2_lines(cases, results, labels, by_sid, gate, label_fn=None):
+    """The report's level-2 section. `label_fn` labels the live injections on PR URL prompts (live_pr_urls)."""
     searched = [(c, r) for c, r in zip(cases, results) if not r["skipped"]]
     skips = Counter(r["skipped"] for r in results if r["skipped"])
     dropped = Counter()
@@ -934,6 +971,7 @@ def level2_lines(cases, results, labels, by_sid, gate):
                                                                        ": " + "; ".join(confirm[:15]) + (" …" if len(confirm) > 15 else "") if confirm else "."),
         "- Live, from the recall log: %d prompts got an injection, and in %d of them the model then called `recall` on "
         "an injected address (ticket 19: the frame's tool sentence goes if the first 100 show none)." % (live, expanded),
+        live_pr_urls(by_sid, label_fn),
         "",
         "At the binary's gate (%s), injections %d on %d cases: precision %s, misses %d, false injections %s, "
         "unlabeled %d. Goals: precision 0.67 or more, false injections 0."
@@ -1223,7 +1261,7 @@ def report(now=None, binary=BINARY, label_fn=None, gate=None, dedupe_fn=None):
             "only; live latency comes from the recall log." % (len(timings), pct(timings, 0.5), pct(timings, 0.95)),
         ]
         labels = label_candidates(cases, results, by_sid, label_fn)
-        lines += level2_lines(cases, results, labels, by_sid, gate)[0]
+        lines += level2_lines(cases, results, labels, by_sid, gate, label_fn)[0]
     lines += extraction_lines(since, dedupe_fn)
     lines += [
         "",
