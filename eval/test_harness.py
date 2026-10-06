@@ -201,6 +201,17 @@ class HarnessTest(unittest.TestCase):
         sessions, _ = harness.load()
         self.assertEqual(harness.live_expansions({s["sid"]: s for s in sessions}), (2, 1))
 
+    def test_turn_of(self):
+        ms = lambda ts: int(harness.ts_of(ts).timestamp() * 1000)
+        turn = lambda ts, ask: dict(start=harness.ts_of(ts), ask=ask)
+        turns = [turn("2026-01-08T09:00:01Z", "/mattpocock-skills:wayfinder plan it"), turn("2026-01-08T09:10:00Z", "yes"),
+                 turn("2026-01-08T09:40:00Z", "yes")]
+        event = lambda ask, ts: dict(prompt_hash=harness.fnv(ask), started_at=ms(ts))
+        self.assertIs(harness.turn_of(event("/wayfinder plan it", "2026-01-08T09:00:00Z"), turns), turns[0])
+        self.assertIsNone(harness.turn_of(event("/wayfinder plan it", "2026-01-08T08:00:00Z"), turns))
+        self.assertIs(harness.turn_of(event("yes", "2026-01-08T09:40:00Z"), turns), turns[2])
+        self.assertIs(harness.turn_of(dict(prompt_hash=harness.fnv("yes")), turns), turns[1])
+
     def test_live_pr_urls(self):
         start = int(datetime(2026, 1, 8, 8, tzinfo=timezone.utc).timestamp() * 1000)
         urls = ["https://github.com/acme/web-app/pull/344", "https://github.com/acme/web-app/pull/345",

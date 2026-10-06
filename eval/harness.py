@@ -859,6 +859,19 @@ def fnv(text):
     return "%016x" % h
 
 
+def turn_of(e, turns, near_ms=15000):
+    """The turn a logged prompt came from: the turn with its hash nearest in time, else the turn nearest in time
+    within `near_ms`. The transcript rewrites some prompts the hook saw: a skill typed by its short name gets its
+    plugin name, and spaces after a command are trimmed. Its line is written up to about 10 s after the hook runs."""
+    at = e.get("started_at", e.get("at"))
+    gap = lambda t: abs(t["start"].timestamp() * 1000 - at) if at is not None else 0
+    same = [t for t in turns if fnv(t["ask"]) == e.get("prompt_hash")]
+    if same or at is None:
+        return min(same, key=gap, default=None)
+    near = min(turns, key=gap, default=None)
+    return near if near and gap(near) <= near_ms else None
+
+
 def live_expansions(by_sid):
     """Ticket 19: over the live recall log, the prompts that got an injection, and how many of them saw the model
     call `recall` on an injected address in that turn. The frame's tool sentence goes if the first 100 show none."""
@@ -868,7 +881,7 @@ def live_expansions(by_sid):
         if e.get("event") != "recall" or not e.get("injected"):
             continue
         s = by_sid.get(e.get("session"))
-        t = next((t for t in s["turns"] if fnv(t["ask"]) == e.get("prompt_hash")), None) if s else None
+        t = turn_of(e, s["turns"]) if s else None
         if not t:
             continue
         prompts += 1
@@ -890,7 +903,7 @@ def live_pr_urls(by_sid, label_fn=None, version="0.4.0"):
     cases, results = [], []
     for e in events:
         s = by_sid.get(e.get("session")) if e.get("event") == "recall" and e.get("at", 0) >= start else None
-        t = next((t for t in s["real"] if fnv(t["ask"]) == e.get("prompt_hash")), None) if s else None
+        t = turn_of(e, s["real"]) if s else None
         if not t or not PR_URL.search(t["ask"]):
             continue
         injected = [x for x in e.get("candidates", []) if x["address"] in e.get("injected", [])]
