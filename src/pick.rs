@@ -3,7 +3,7 @@ use crate::{git, index, scan, turn};
 use serde_json::{Value, json};
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 /// 16,000 tokens at 2.0 characters a token, the system prompt included (spec 3.3).
@@ -40,7 +40,7 @@ pub fn job(started: u128) -> crate::Result<()> {
     let input = crate::read_input()?;
     let sid = crate::session_id(&input)?;
     let id = prompt_id(&input).ok_or("no usable prompt_id")?;
-    let dir = crate::home().join("picks").join(&sid);
+    let dir = dir(&sid);
     fs::create_dir_all(&dir)?;
     let running = dir.join(format!("{id}.running"));
     fs::write(&running, "")?;
@@ -177,6 +177,77 @@ fn message(memories: &[index::Candidate], input: &Value, prompt: &str) -> Option
     } else {
         kept.join("\n\n")
     }))
+}
+
+/// `openrecall deliver`, the tool hook: the rename to `.taken` lets one of parallel tool calls take the pick (spec 3.7).
+pub fn deliver(started: u128) -> crate::Result<()> {
+    let input = crate::read_input()?;
+    let Some(id) = prompt_id(&input) else {
+        return Ok(());
+    };
+    if !input["agent_id"].is_null() || !extract::picks_on(&crate::home()) {
+        return Ok(());
+    }
+    let sid = crate::session_id(&input)?;
+    let dir = dir(&sid);
+    let taken = dir.join(format!("{id}.taken"));
+    if fs::rename(dir.join(format!("{id}.json")), &taken).is_err() {
+        return Ok(());
+    }
+    let result: Value = serde_json::from_str(&fs::read_to_string(&taken)?)?;
+    let address = result["address"].as_str().ok_or("no address in the pick")?;
+    let (_lock, mut s) = crate::load_session(&sid)?;
+    if crate::seen(&s, address) {
+        let _ = fs::remove_file(&taken);
+        crate::log(json!({"event": "pick_drop", "session": sid, "prompt_id": id, "memory": address, "reason": "ledger"}));
+        return Ok(());
+    }
+    crate::see(&mut s, address);
+    crate::save_session(&sid, &s)?;
+    println!(
+        "{}",
+        json!({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": result["text"]}})
+    );
+    let _ = fs::remove_file(&taken);
+    crate::log(json!({"event": "deliver", "session": sid, "prompt_id": id, "ms": crate::now_ms() - started,
+                      "memory": address}));
+    Ok(())
+}
+
+/// The Stop hook drops what the turn left (spec 3.8). `.running` goes first: a job that publishes meanwhile leaves a
+/// `.json` for the second pass, and a job that publishes later finds no `.running`.
+pub fn end_turn(sid: &str) {
+    let dir = dir(sid);
+    let files = |ext: &str| -> Vec<(String, PathBuf)> {
+        fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == ext))
+            .map(|p| (p.file_stem().unwrap_or_default().to_string_lossy().into_owned(), p))
+            .collect()
+    };
+    for (id, path) in files("running") {
+        if fs::remove_file(&path).is_ok() {
+            crate::log(json!({"event": "pick_drop", "session": sid, "prompt_id": id, "memory": null, "reason": "late"}));
+        }
+    }
+    for (id, path) in files("json") {
+        let result: Value = fs::read_to_string(&path)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default();
+        if fs::remove_file(&path).is_ok() {
+            crate::log(json!({"event": "pick_drop", "session": sid, "prompt_id": id, "memory": result["address"],
+                              "reason": "no_tool_call"}));
+        }
+    }
+}
+
+/// A session's pick results: `<prompt_id>.running` while the job works, then `.json`, then `.taken` in the tool hook.
+pub fn dir(sid: &str) -> PathBuf {
+    crate::home().join("picks").join(sid)
 }
 
 fn prompt_id(input: &Value) -> Option<&str> {

@@ -1593,3 +1593,141 @@ fn nothing_starts_with_picks_off_or_without_a_plain_prompt_id() {
     assert_eq!(started, [json!("on")], "only the prompt with picks on and a plain prompt_id starts a job");
     assert_eq!(p.requests().len(), 1);
 }
+
+fn session_of(w: &World, sid: &str) -> Value {
+    serde_json::from_str(&fs::read_to_string(w.home.join(".openrecall/sessions").join(format!("{sid}.json"))).unwrap()).unwrap()
+}
+
+#[test]
+fn the_first_tool_call_after_a_pick_delivers_it() {
+    let w = World::new("deliver");
+    w.branch("feat/x");
+    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    let source = "source: E 2026-01-02T03:04:05Z\n";
+    w.memory(&repo, "kiwi-checksum", "gotcha", source, "The kiwi importer drops rows without a checksum", "The kiwi importer drops every row that has no checksum.");
+    w.memory(&repo, "walrus-header", "decision", source, "The walrus export puts the header row first", "The walrus export puts the header row first, before any data row.");
+    let p = Provider::start(vec![answer(json!({"ids": ["m2"]}))]);
+    picks_on(&w, &p);
+    transcript(&w, "S", &[]);
+    prompt(&w, "S", "p1", "why does the walrus export drop the header row today");
+    pick_line(&w, "p1");
+
+    let out = w.hook(&["deliver"], "S", json!({"prompt_id": "p1", "tool_name": "Bash"}));
+    let address = "github.com/someone/app/walrus-header";
+    assert_eq!(
+        serde_json::from_str::<Value>(out.trim()).unwrap(),
+        json!({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext":
+            "Recalled memories from earlier sessions (OpenRecall). They reflect what was true when written. Full text: \
+             mcp__plugin_openrecall_openrecall__recall with the address.\n- decision 2026-01-02 \
+             github.com/someone/app/walrus-header: The walrus export puts the header row first, before any data row."}})
+    );
+    assert_eq!(session_of(&w, "S")["ledger"], json!([address]));
+    let lines = log_of(&w, "deliver");
+    assert_eq!(lines.len(), 1);
+    assert_eq!((&lines[0]["session"], &lines[0]["prompt_id"], &lines[0]["memory"]), (&json!("S"), &json!("p1"), &json!(address)));
+    assert!(lines[0]["ms"].is_u64() && lines[0]["at"].is_u64(), "{}", lines[0]);
+    assert!(!pick_file(&w, "S", "p1.json").exists() && !pick_file(&w, "S", "p1.taken").exists());
+
+    assert_eq!(w.hook(&["deliver"], "S", json!({"prompt_id": "p1", "tool_name": "Read"})), "", "a later tool call finds nothing");
+    assert_eq!(log_of(&w, "deliver").len(), 1);
+}
+
+const WALRUS: &str = "github.com/someone/app/walrus-header";
+
+/// A pick's result file, written by hand in the job's format.
+fn ready(w: &World, sid: &str, id: &str) {
+    let path = pick_file(w, sid, &format!("{id}.json"));
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, json!({"address": WALRUS, "text": format!("Recalled.\n- decision 2026-01-02 {WALRUS}: Header first.")}).to_string()).unwrap();
+}
+
+#[test]
+fn the_session_ledger_drops_a_pick_that_recall_already_injected() {
+    let w = World::new("deliver-ledger");
+    picks_on(&w, &Provider::start(vec![]));
+    ready(&w, "S", "p1");
+    fs::create_dir_all(w.home.join(".openrecall/sessions")).unwrap();
+    fs::write(w.home.join(".openrecall/sessions/S.json"), json!({"ledger": [WALRUS]}).to_string()).unwrap();
+
+    assert_eq!(w.hook(&["deliver"], "S", json!({"prompt_id": "p1"})), "");
+    let drops = log_of(&w, "pick_drop");
+    assert_eq!(drops.len(), 1);
+    assert_eq!(
+        (&drops[0]["session"], &drops[0]["prompt_id"], &drops[0]["memory"], &drops[0]["reason"]),
+        (&json!("S"), &json!("p1"), &json!(WALRUS), &json!("ledger"))
+    );
+    assert!(log_of(&w, "deliver").is_empty());
+    assert_eq!(session_of(&w, "S")["ledger"], json!([WALRUS]));
+    assert!(!pick_file(&w, "S", "p1.json").exists() && !pick_file(&w, "S", "p1.taken").exists());
+}
+
+#[test]
+fn parallel_tool_hooks_of_one_turn_deliver_the_pick_once() {
+    let w = World::new("deliver-race");
+    picks_on(&w, &Provider::start(vec![]));
+    let input = json!({"session_id": "S", "cwd": w.folder, "prompt_id": "p1"}).to_string();
+    for round in 0..3 {
+        ready(&w, "S", "p1");
+        fs::remove_file(w.home.join(".openrecall/sessions/S.json")).ok();
+        let mut hooks: Vec<Child> = (0..8).map(|_| w.spawn(&["deliver"])).collect();
+        for h in &mut hooks {
+            h.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+        }
+        let outs: Vec<String> = hooks
+            .into_iter()
+            .map(|h| String::from_utf8(h.wait_with_output().unwrap().stdout).unwrap())
+            .collect();
+        assert_eq!(outs.iter().filter(|o| !o.is_empty()).count(), 1, "round {round}: {outs:?}");
+        assert_eq!(session_of(&w, "S")["ledger"], json!([WALRUS]));
+        assert_eq!(log_of(&w, "deliver").len(), round + 1);
+    }
+    assert!(log_of(&w, "pick_drop").is_empty());
+}
+
+#[test]
+fn nothing_is_delivered_in_a_subagent_for_another_prompt_or_with_picks_off() {
+    let w = World::new("deliver-none");
+    picks_on(&w, &Provider::start(vec![]));
+    ready(&w, "S", "p1");
+    for extra in [json!({"prompt_id": "p1", "agent_id": "a1"}), json!({"prompt_id": "p2"}), json!({})] {
+        assert_eq!(w.hook(&["deliver"], "S", extra.clone()), "", "{extra}");
+    }
+    let toml = w.home.join(".openrecall/extract.toml");
+    fs::write(&toml, fs::read_to_string(&toml).unwrap().replace("pick = true", "pick = false")).unwrap();
+    assert_eq!(w.hook(&["deliver"], "S", json!({"prompt_id": "p1"})), "", "picks off");
+    assert!(pick_file(&w, "S", "p1.json").exists());
+    assert!(!w.home.join(".openrecall/log/openrecall.jsonl").exists(), "nothing to do writes no log line");
+    assert!(!w.home.join(".openrecall/sessions/S.json").exists());
+}
+
+#[test]
+fn the_stop_hook_drops_what_the_turn_left_and_session_end_deletes_the_folder() {
+    let w = World::new("deliver-stop");
+    w.branch("feat/x");
+    ready(&w, "S", "p1");
+    fs::write(pick_file(&w, "S", "p2.running"), "").unwrap();
+    ready(&w, "T", "p1");
+    transcript(&w, "S", &[user("plan the walrus export"), said("ok", None)]);
+    w.hook(&["capture"], "S", json!({"transcript_path": w.root.join("S.jsonl"), "last_assistant_message": "ok"}));
+
+    let mut drops = log_of(&w, "pick_drop");
+    drops.sort_by_key(|l| l["prompt_id"].to_string());
+    for l in &mut drops {
+        assert!(l.as_object_mut().unwrap().remove("at").unwrap().is_u64());
+    }
+    assert_eq!(
+        drops,
+        [
+            json!({"event": "pick_drop", "session": "S", "prompt_id": "p1", "memory": WALRUS, "reason": "no_tool_call"}),
+            json!({"event": "pick_drop", "session": "S", "prompt_id": "p2", "memory": null, "reason": "late"}),
+        ]
+    );
+    assert!(!pick_file(&w, "S", "p1.json").exists() && !pick_file(&w, "S", "p2.running").exists());
+    assert!(pick_file(&w, "T", "p1.json").exists(), "another session's pick stays");
+
+    ready(&w, "S", "p3");
+    fs::write(pick_file(&w, "S", "p4.running"), "").unwrap();
+    w.hook(&["extract"], "S", json!({}));
+    assert!(!pick_file(&w, "S", "").exists(), "SessionEnd deletes the session's folder");
+    assert!(pick_file(&w, "T", "p1.json").exists());
+}
