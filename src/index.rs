@@ -34,6 +34,9 @@ const EXPIRES_SECS: u64 = 14 * 86400;
 static URL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"https?://\S+").unwrap());
 static BACKTICK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`([^`\s]{3,})`").unwrap());
 static WORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[\w-]+").unwrap());
+static IDENT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b[A-Z]{2,5}-\d{2,5}\b|#\d{2,6}\b|/pull/\d+|\b[\w.-]+/[\w./-]+|`[^`\s]{3,}`|\b[0-9a-f]{7,40}\b|https?://\S+").unwrap()
+});
 static SYMBOL: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[A-Za-z_]\w*(::[A-Za-z_]\w*)*$").unwrap());
 /// A pointer's symbol is looked up only in these; a config file rarely holds the names a fact mentions beside it.
@@ -598,7 +601,7 @@ fn symbol(token: &str) -> Option<&str> {
 /// fits in `room` characters, else the description plus the body's identifiers the description lacks, in
 /// parentheses, up to 200 characters.
 pub fn line(c: &Candidate, room: usize) -> String {
-    let prefix = format!("- {} {} {}: ", c.kind, c.date, c.address);
+    let prefix = prefix(c);
     let body = squash(&c.body);
     let text = if body.chars().count() <= LINE_TEXT.max(room.saturating_sub(prefix.chars().count())) {
         body
@@ -624,6 +627,24 @@ pub fn line(c: &Candidate, room: usize) -> String {
         }
     };
     prefix + &text
+}
+
+fn prefix(c: &Candidate) -> String {
+    format!("- {} {} {}: ", c.kind, c.date, c.address)
+}
+
+/// Spec 2.2: the line names a path that the query names, and at most 2 identifiers that it lacks. The identifiers are
+/// `IDENT` of `eval/harness.py` over the text after the prefix, since every address holds a `/`.
+pub fn echo(c: &Candidate, query: &str) -> bool {
+    let line = line(c, 0);
+    let mut ids: Vec<&str> = vec![];
+    for m in IDENT.find_iter(&line[prefix(c).len()..]) {
+        if !ids.contains(&m.as_str()) {
+            ids.push(m.as_str());
+        }
+    }
+    ids.iter().any(|i| i.contains('/') && !i.starts_with("http") && query.contains(i))
+        && ids.iter().filter(|i| !query.contains(**i)).count() <= 2
 }
 
 fn head(s: &str, bytes: usize) -> &str {
@@ -710,6 +731,16 @@ mod tests {
                 ("Totals round since ABC-77".into(), "identifier"),
             ]
         );
+    }
+
+    #[test]
+    fn an_echo_names_the_querys_path_and_adds_at_most_two_identifiers() {
+        let query = "open .scratch/x/map.md now";
+        let echo_of = |body: &str| echo(&candidate("d", body), query);
+        assert!(echo_of("The map is .scratch/x/map.md for ABC-12 and PR #345"));
+        assert!(!echo_of("The map is .scratch/x/map.md for ABC-12, PR #345 and abc1234def"), "3 the query lacks");
+        assert!(!echo_of("The map is .scratch/y/map.md"), "another path");
+        assert!(!echo(&candidate("d", "The map is https://example.com/x/map.md"), "see https://example.com/x/map.md"), "a URL");
     }
 
     #[test]
