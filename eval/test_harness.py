@@ -176,7 +176,7 @@ class HarnessTest(unittest.TestCase):
                     "At the binary's gate (5.50 and above, in an index of 10 rows or more), injections 3 on 2 cases: "
                     "precision 33% (1/3, 6–79%), misses 0, false injections 33% (1/3, 6–79%)",
                     "| builtin project | 1 | 1 | 100% (1/1, 21–100%) |", "injected in an index of 10 rows or more",
-                    "| 6.00 (pick) | 1 | 1 | 100% (1/1, 21–100%) | 0 | 0 |", "| 0.00 | 3 | 1 | 33% (1/3,",
+                    "| 6.00 (best threshold) | 1 | 1 | 100% (1/1, 21–100%) | 0 | 0 |", "| 0.00 | 3 | 1 | 33% (1/3,",
                     "dropped in this replay: 1", "p50 2.0 ms, p95 2.0 ms"):
             self.assertIn(row, text)
 

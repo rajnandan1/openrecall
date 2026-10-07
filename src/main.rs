@@ -210,7 +210,7 @@ fn recall(started: u128) -> Result<()> {
     let mut context = vec![];
     let mut injected = vec![];
     if let Some(repo) = &repo
-        && let Some((identity, path, rec, how)) = pick(repo, &s, &sid, prompt)
+        && let Some((identity, path, rec, how)) = route(repo, &s, &sid, prompt)
     {
         let address = address_of(&identity, &path);
         let text = fs::read_to_string(&path)?;
@@ -353,11 +353,11 @@ fn level2(
     ))
 }
 
-/// The record to push, if any, with its repo identity: an alias the prompt names first (several records may share a
-/// ticket: the newest wins, and the one written from this folder breaks a tie, ticket 12), then the newest record of
-/// a sibling repo with the alias (issue 14), then the branch's record once the branch is settled, or before that when
-/// the prompt names one of its paths, PR numbers or commits (issue 9).
-fn pick(
+/// The record to push, if any, with its repo identity and route: an alias the prompt names first (several records may
+/// share a ticket: the newest wins, and the one written from this folder breaks a tie, ticket 12), then the newest
+/// record of a sibling repo with the alias (issue 14), then the branch's record once the branch is settled, or before
+/// that when the prompt names one of its paths, PR numbers or commits (issue 9).
+fn route(
     repo: &git::Repo,
     s: &Value,
     sid: &str,
