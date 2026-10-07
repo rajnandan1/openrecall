@@ -210,7 +210,7 @@ fn recall(started: u128) -> Result<()> {
     let mut context = vec![];
     let mut injected = vec![];
     if let Some(repo) = &repo
-        && let Some((identity, path, rec, how)) = pick(repo, &s, &sid, prompt)
+        && let Some((identity, path, rec, how)) = route(repo, &s, &sid, prompt)
     {
         let address = address_of(&identity, &path);
         let text = fs::read_to_string(&path)?;
@@ -274,9 +274,8 @@ fn recall(started: u128) -> Result<()> {
     status(&sid, &format!("recall {total} · {} ms", ended - started))
 }
 
-/// Ticket 15's last steps: search the scope, drop what must not be injected (the ledger, this session's own facts,
-/// a state fact past its `expires`, a pointer whose path is gone: ticket 09), keep at most 3 lines above the gate within the 400-token budget. Returns the lines with their addresses, and the log detail.
-/// The lines are picked first; then each, best first, takes its whole memory if that fits in the room they leave.
+/// Ticket 15's last steps: drop what must not be injected (ticket 09), keep at most 3 lines that pass the gate and are not echoes (issue 19).
+/// The lines are chosen first; then each, best first, takes its whole memory if that fits in the room they leave in the 400-token budget.
 fn level2(
     query: &str,
     repo: Option<&git::Repo>,
@@ -318,18 +317,21 @@ fn level2(
     kept.truncate(5);
     let (size, scores) = ix.scores(&terms, &kept)?;
     let mut lines = vec![];
+    let mut vias = serde_json::Map::new();
     let mut chars = index::FRAME.chars().count();
-    for (c, _) in kept
-        .iter()
-        .zip(&scores)
-        .filter(|&(_, &score)| size >= index::MIN_ROWS && score >= index::GATE)
-        .take(index::MAX_LINES)
-    {
+    let (echoes, passing): (Vec<_>, Vec<_>) = index::gate(&kept, &scores, size, query)
+        .into_iter()
+        .partition(|(c, _)| index::echo(c, query));
+    if !echoes.is_empty() {
+        dropped.insert("echo", echoes.len());
+    }
+    for (c, via) in passing.into_iter().take(index::MAX_LINES) {
         let line = index::line(c, 0);
         if chars + line.chars().count() + 1 > index::MAX_CHARS {
             break;
         }
         chars += line.chars().count() + 1;
+        vias.insert(c.address.clone(), json!(via));
         lines.push((c, line));
     }
     for (c, line) in &mut lines {
@@ -349,15 +351,16 @@ fn level2(
         .collect();
     Ok((
         lines,
-        json!({"terms": terms.len(), "index_size": size, "candidates": candidates, "dropped": dropped}),
+        json!({"terms": terms.len(), "index_size": size, "candidates": candidates, "dropped": dropped, "via": vias,
+               "echoes": echoes.iter().map(|(c, _)| &c.address).collect::<Vec<_>>()}),
     ))
 }
 
-/// The record to push, if any, with its repo identity: an alias the prompt names first (several records may share a
-/// ticket: the newest wins, and the one written from this folder breaks a tie, ticket 12), then the newest record of
-/// a sibling repo with the alias (issue 14), then the branch's record once the branch is settled, or before that when
-/// the prompt names one of its paths, PR numbers or commits (issue 9).
-fn pick(
+/// The record to push, if any, with its repo identity and route: an alias the prompt names first (several records may
+/// share a ticket: the newest wins, and the one written from this folder breaks a tie, ticket 12), then the newest
+/// record of a sibling repo with the alias (issue 14), then the branch's record once the branch is settled, or before
+/// that when the prompt names one of its paths, PR numbers or commits (issue 9).
+fn route(
     repo: &git::Repo,
     s: &Value,
     sid: &str,

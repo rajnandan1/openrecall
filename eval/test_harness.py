@@ -157,9 +157,9 @@ class HarnessTest(unittest.TestCase):
         self.assertEqual((m["injections"], m["useful"], m["misses"], m["false"]), (2, 1, 0, 1))
         m = harness.gate_metrics(cases, results, labels, gate=5.5, min_rows=10)
         self.assertEqual((m["injections"], m["useful"], m["misses"], m["false"]), (1, 1, 0, 0), "C2's 9 rows keep the gate closed")
-        rows, (pick, best), met = harness.sweep(cases, results, labels, 10)
+        rows, (best_threshold, best), met = harness.sweep(cases, results, labels, 10)
         self.assertFalse(met)
-        self.assertEqual(pick, 6.0)
+        self.assertEqual(best_threshold, 6.0)
         self.assertEqual((best["injections"], best["useful"]), (1, 1))
         self.assertEqual(dict(rows)[0.0]["injections"], 3, "only C1's 3 candidates")
         threshold, min_rows = harness.binary_gate()
@@ -170,13 +170,13 @@ class HarnessTest(unittest.TestCase):
         sessions, _ = harness.load()
         by_sid = {s["sid"]: s for s in sessions}
         self.assertTrue(harness.used_signal(cases[0], by_sid["new"], mem) is False)
-        lines, pick = harness.level2_lines(cases, results, labels, by_sid, (5.5, 10))
+        lines, best_threshold = harness.level2_lines(cases, results, labels, by_sid, (5.5, 10))
         text = "\n".join(lines)
         for row in ("Searched: 2.", "Candidates: 4 over 2 cases", "Labels: useful 1, partly 0, noise 3, unlabeled 0.",
                     "At the binary's gate (5.50 and above, in an index of 10 rows or more), injections 3 on 2 cases: "
                     "precision 33% (1/3, 6–79%), misses 0, false injections 33% (1/3, 6–79%)",
                     "| builtin project | 1 | 1 | 100% (1/1, 21–100%) |", "injected in an index of 10 rows or more",
-                    "| 6.00 (pick) | 1 | 1 | 100% (1/1, 21–100%) | 0 | 0 |", "| 0.00 | 3 | 1 | 33% (1/3,",
+                    "| 6.00 (best threshold) | 1 | 1 | 100% (1/1, 21–100%) | 0 | 0 |", "| 0.00 | 3 | 1 | 33% (1/3,",
                     "dropped in this replay: 1", "p50 2.0 ms, p95 2.0 ms"):
             self.assertIn(row, text)
 

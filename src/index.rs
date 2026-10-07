@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::UNIX_EPOCH;
 
-/// The threshold: inject a memory only at this score or above (the gate-threshold spec, rule R4).
+/// The threshold: a score at or above it passes the gate; the identifier rule can pass a lower one (gate-threshold spec, rule R4).
 pub const GATE: f64 = 1.50;
 /// The gate stays closed in an index of fewer rows: no floor probe ran below 10 (the gate-threshold spec).
 pub const MIN_ROWS: i64 = 10;
@@ -34,6 +34,9 @@ const EXPIRES_SECS: u64 = 14 * 86400;
 static URL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"https?://\S+").unwrap());
 static BACKTICK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`([^`\s]{3,})`").unwrap());
 static WORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[\w-]+").unwrap());
+static IDENT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b[A-Z]{2,5}-\d{2,5}\b|#\d{2,6}\b|/pull/\d+|\b[\w.-]+/[\w./-]+|`[^`\s]{3,}`|\b[0-9a-f]{7,40}\b|https?://\S+").unwrap()
+});
 static SYMBOL: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[A-Za-z_]\w*(::[A-Za-z_]\w*)*$").unwrap());
 /// A pointer's symbol is looked up only in these; a config file rarely holds the names a fact mentions beside it.
@@ -59,6 +62,7 @@ pub struct Candidate {
     pub source: String,
     pub updated: String,
     pub expires: String,
+    pub name: String,
     pub description: String,
     pub body: String,
 }
@@ -311,8 +315,8 @@ impl Index {
                 .map_or(String::new(), |s| s.dir.to_string_lossy().into_owned())
         };
         let sql = format!(
-            "SELECT m.id, f.address, m.bm25, f.hash, f.kind, f.date, f.source, f.updated, f.expires, m.description, m.body
-             FROM (SELECT rowid AS id, -bm25(ft, {WEIGHTS}) / ?6 AS bm25, description, body FROM ft WHERE ft MATCH ?1) m
+            "SELECT m.id, f.address, m.bm25, f.hash, f.kind, f.date, f.source, f.updated, f.expires, m.name, m.description, m.body
+             FROM (SELECT rowid AS id, -bm25(ft, {WEIGHTS}) / ?6 AS bm25, name, description, body FROM ft WHERE ft MATCH ?1) m
              JOIN files f ON f.id = m.id
              WHERE f.dir IN (?2, ?3, ?4)
              ORDER BY m.bm25 DESC, f.date DESC LIMIT ?5"
@@ -332,8 +336,9 @@ impl Index {
                         source: r.get(6)?,
                         updated: r.get(7)?,
                         expires: r.get(8)?,
-                        description: r.get(9)?,
-                        body: r.get(10)?,
+                        name: r.get(9)?,
+                        description: r.get(10)?,
+                        body: r.get(11)?,
                     })
                 },
             )?
@@ -385,6 +390,53 @@ impl Index {
         let root = (terms.len() as f64).sqrt();
         Ok((size, sums.into_iter().map(|s| s / root).collect()))
     }
+}
+
+/// The candidates that pass, best score first, each with how: from `MIN_ROWS` rows, at the threshold (`"score"`), or
+/// when its file name, name or description shares an identifier with the query (`"identifier"`).
+pub fn gate<'a>(kept: &'a [Candidate], scores: &[f64], size: i64, query: &str) -> Vec<(&'a Candidate, &'static str)> {
+    if size < MIN_ROWS {
+        return vec![];
+    }
+    let mut out: Vec<(&Candidate, f64, &str)> = kept
+        .iter()
+        .zip(scores)
+        .filter_map(|(c, &score)| {
+            let stem = c.address.rsplit('/').next().unwrap_or("");
+            let via = if score >= GATE {
+                "score"
+            } else if shares_identifier(query, &format!("{stem} {} {}", c.name, c.description)) {
+                "identifier"
+            } else {
+                return None;
+            };
+            Some((c, score, via))
+        })
+        .collect();
+    out.sort_by(|a, b| b.1.total_cmp(&a.1));
+    out.into_iter().map(|(c, _, via)| (c, via)).collect()
+}
+
+/// A shared ticket ID, PR number of 3 to 6 digits, or path; a path drops its line suffix and a leading `./`, and
+/// matches a path equal to it or ending in `/` plus it.
+fn shares_identifier(a: &str, b: &str) -> bool {
+    let prs = |t: &str| -> Vec<String> {
+        turn::prs_in(t).into_iter().map(|(_, p)| p).filter(|p| (3..=6).contains(&p.len())).collect()
+    };
+    let paths = |t: &str| -> Vec<String> {
+        turn::paths_in(t)
+            .into_iter()
+            .map(|p| {
+                let p = turn::LINE_SUFFIX.replace(p, "");
+                p.strip_prefix("./").unwrap_or(&p).to_string()
+            })
+            .collect()
+    };
+    let same = |x: &String, y: &String| x == y || x.ends_with(&format!("/{y}")) || y.ends_with(&format!("/{x}"));
+    let (tb, pb, xb) = (turn::tickets(b), prs(b), paths(b));
+    turn::tickets(a).iter().any(|t| tb.contains(t))
+        || prs(a).iter().any(|p| pb.contains(p))
+        || paths(a).iter().any(|x| xb.iter().any(|y| same(x, y)))
 }
 
 fn phrase(term: &str) -> String {
@@ -549,7 +601,7 @@ fn symbol(token: &str) -> Option<&str> {
 /// fits in `room` characters, else the description plus the body's identifiers the description lacks, in
 /// parentheses, up to 200 characters.
 pub fn line(c: &Candidate, room: usize) -> String {
-    let prefix = format!("- {} {} {}: ", c.kind, c.date, c.address);
+    let prefix = prefix(c);
     let body = squash(&c.body);
     let text = if body.chars().count() <= LINE_TEXT.max(room.saturating_sub(prefix.chars().count())) {
         body
@@ -575,6 +627,24 @@ pub fn line(c: &Candidate, room: usize) -> String {
         }
     };
     prefix + &text
+}
+
+fn prefix(c: &Candidate) -> String {
+    format!("- {} {} {}: ", c.kind, c.date, c.address)
+}
+
+/// Issue 19: the line names a path that the query names, and at most 2 identifiers that it lacks. The identifiers are
+/// `IDENT` of `eval/harness.py` over the text after the prefix, since every address holds a `/`.
+pub fn echo(c: &Candidate, query: &str) -> bool {
+    let line = line(c, 0);
+    let mut ids: Vec<&str> = vec![];
+    for m in IDENT.find_iter(&line[prefix(c).len()..]) {
+        if !ids.contains(&m.as_str()) {
+            ids.push(m.as_str());
+        }
+    }
+    ids.iter().any(|i| i.contains('/') && !i.starts_with("http") && query.contains(i))
+        && ids.iter().filter(|i| !query.contains(**i)).count() <= 2
 }
 
 fn head(s: &str, bytes: usize) -> &str {
@@ -612,9 +682,73 @@ mod tests {
             source: String::new(),
             updated: String::new(),
             expires: String::new(),
+            name: String::new(),
             description: description.into(),
             body: body.into(),
         }
+    }
+
+    fn passing(kept: &[Candidate], scores: &[f64], size: i64, query: &str) -> Vec<(String, &'static str)> {
+        gate(kept, scores, size, query)
+            .into_iter()
+            .map(|(c, via)| (c.description.clone(), via))
+            .collect()
+    }
+
+    #[test]
+    fn the_identifier_rule_passes_a_shared_ticket_pr_or_path_from_ten_rows() {
+        let named = |d: &str| candidate(d, "Unrelated body.");
+        let pass = |d: &str, q: &str| passing(&[named(d)], &[0.4], 10, q);
+        assert_eq!(pass("Totals round since ABC-77", "ABC-77 keeps failing"), [("Totals round since ABC-77".into(), "identifier")]);
+        assert_eq!(passing(&[candidate("Totals round", "Since ABC-77.")], &[0.4], 10, "ABC-77 keeps failing"), []);
+        assert_eq!(passing(&[named("Totals round since ABC-77")], &[0.4], 9, "ABC-77 keeps failing"), [], "9 rows");
+        assert_eq!(passing(&[named("Totals round")], &[2.0], 9, "totals round"), [], "9 rows, even by score");
+        assert_eq!(pass("The check is in src/a/b.rs", "fix b/x/src/a/b.rs:12 now").len(), 1);
+        assert_eq!(pass("The check is in ./b/x/src/a/b.rs:12-30", "fix src/a/b.rs now").len(), 1);
+        assert_eq!(pass("The check is in src/a/b.rs", "fix src/c/b.rs now"), []);
+        assert_eq!(pass("PR #345 moved the check", "review #345 today").len(), 1);
+        assert_eq!(pass("PR #34 moved the check", "review PR #34 today"), [], "2 digits");
+        let mut by_name = named("Totals round");
+        by_name.name = "ABC-77 rounding".into();
+        let mut by_file = named("Totals round");
+        by_file.address = "global/ABC-77-rounding".into();
+        assert_eq!(passing(&[by_name, by_file], &[0.4, 0.3], 10, "ABC-77 keeps failing").len(), 2);
+    }
+
+    #[test]
+    fn passing_candidates_go_best_score_first_and_score_wins() {
+        let kept = [
+            candidate("Totals round since ABC-77", "b"),
+            candidate("Half-up drifted before ABC-77", "b"),
+            candidate("Ledger cents", "b"),
+            candidate("Ledger rows", "b"),
+        ];
+        assert_eq!(
+            passing(&kept, &[0.4, 2.0, 1.6, 1.2], 10, "ABC-77 ledger cents"),
+            [
+                ("Half-up drifted before ABC-77".into(), "score"),
+                ("Ledger cents".into(), "score"),
+                ("Totals round since ABC-77".into(), "identifier"),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_echo_names_the_querys_path_and_adds_at_most_two_identifiers() {
+        let query = "open .scratch/x/map.md now";
+        let echo_of = |body: &str| echo(&candidate("d", body), query);
+        assert!(echo_of("The map is .scratch/x/map.md for ABC-12 and PR #345"));
+        assert!(!echo_of("The map is .scratch/x/map.md for ABC-12, PR #345 and abc1234def"), "3 the query lacks");
+        assert!(!echo_of("The map is .scratch/y/map.md"), "another path");
+        assert!(!echo(&candidate("d", "The map is https://example.com/x/map.md"), "see https://example.com/x/map.md"), "a URL");
+    }
+
+    #[test]
+    fn a_map_pointer_is_an_echo_only_when_the_query_names_its_path() {
+        let mut pointer = candidate("The walrus migration map", "The walrus migration map lives in .scratch/x/map.md");
+        pointer.kind = "pointer".into();
+        assert!(echo(&pointer, "read .scratch/x/map.md and plan the walrus migration"));
+        assert!(!echo(&pointer, "where does the walrus migration map live"));
     }
 
     #[test]

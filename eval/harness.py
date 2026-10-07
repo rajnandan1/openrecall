@@ -816,10 +816,10 @@ def sweep(cases, results, labels, min_rows=0):
     enough = [(t, m) for t, m in rows if m["injections"] >= 5]
     ok = [(t, m) for t, m in enough if m["useful"] / m["injections"] >= GOAL]
     if ok:
-        pick = max(ok, key=lambda tm: (tm[1]["useful"], -tm[1]["false"], tm[0]))
+        best_threshold = max(ok, key=lambda tm: (tm[1]["useful"], -tm[1]["false"], tm[0]))
     else:
-        pick = max(enough or rows, key=lambda tm: (tm[1]["useful"] / max(tm[1]["injections"], 1), tm[0]))
-    return rows, pick, bool(ok)
+        best_threshold = max(enough or rows, key=lambda tm: (tm[1]["useful"] / max(tm[1]["injections"], 1), tm[0]))
+    return rows, best_threshold, bool(ok)
 
 
 def line_idents(path):
@@ -960,7 +960,7 @@ def level2_lines(cases, results, labels, by_sid, gate, label_fn=None):
     got = Counter(labels.get((c["id"], x["address"], x["text_hash"])) for c, x in cands)
     at_gate = gate_metrics(cases, results, labels)
     min_rows = gate[1] if gate else 0
-    rows, (pick, best), met = sweep(cases, results, labels, min_rows)
+    rows, (best_threshold, best), met = sweep(cases, results, labels, min_rows)
     calibration = os.path.join(EVAL, "calibration.jsonl")
     confirm, used = [], Counter()
     for c, r in zip(cases, results):
@@ -975,7 +975,7 @@ def level2_lines(cases, results, labels, by_sid, gate, label_fn=None):
     live, expanded = live_expansions(by_sid)
     timings = sorted(r["ms"] for _, r in searched)
     step = max(1, len(rows) // 12)
-    shown = sorted({rows[i][0] for i in range(0, len(rows), step)} | {pick, rows[-1][0]})
+    shown = sorted({rows[i][0] for i in range(0, len(rows), step)} | {best_threshold, rows[-1][0]})
     lines = [
         "", "## Level 2: recalled memories", "",
         "Each of the %d frozen cases replayed through `openrecall recall` in its own stand-in world (ticket 16): a "
@@ -1011,32 +1011,32 @@ def level2_lines(cases, results, labels, by_sid, gate, label_fn=None):
     lines += [
         "",
         "Threshold sweep over the logged scores, the top 3 candidates at the threshold or above injected in an index of "
-        "%d rows or more (the 1,040-character cap left out). Pick: %.2f, %s." % (
-            min_rows, pick, "precision %s with %d misses and %d false injections"
+        "%d rows or more (the 1,040-character cap left out). Best threshold: %.2f, %s." % (
+            min_rows, best_threshold, "precision %s with %d misses and %d false injections"
             % (rate(best["useful"], best["injections"]), best["misses"], best["false"])
             + ("" if met else "; no threshold reaches 0.67 over 5 or more injections")),
         "",
         "| Threshold | Injections | Cases | Precision | Misses | False injections |", "|---|---|---|---|---|---|",
     ]
-    lines += ["| %.2f%s | %d | %d | %s | %d | %d |" % (t, " (pick)" if t == pick else "", m["injections"], m["cases"],
+    lines += ["| %.2f%s | %d | %d | %s | %d | %d |" % (t, " (best threshold)" if t == best_threshold else "", m["injections"], m["cases"],
                                                         rate(m["useful"], m["injections"]), m["misses"], m["false"])
               for t, m in rows if t in shown]
     variants = ["%s: injections %d, precision %s, misses %d, false injections %d" % (
         name, v["injections"], rate(v["useful"], v["injections"]), v["misses"], v["false"])
-        for name, v in (("any cited path missing", gate_metrics(cases, results, labels, pick, "any", min_rows)),
-                        ("every cited path missing", gate_metrics(cases, results, labels, pick, "all", min_rows)))]
+        for name, v in (("any cited path missing", gate_metrics(cases, results, labels, best_threshold, "any", min_rows)),
+                        ("every cited path missing", gate_metrics(cases, results, labels, best_threshold, "all", min_rows)))]
     lines += [
         "",
         "Rot (ticket 09): the binary drops a pointer fact whose path or symbol is gone; dropped in this replay: %d. Candidates "
         "citing a path the main checkout lacks: %d of %d (every cited path missing: %d). Dropping them too, at the "
-        "pick: %s." % (dropped["rot"], sum(1 for _, x in cands if x.get("rot")), len(cands),
+        "best threshold: %s." % (dropped["rot"], sum(1 for _, x in cands if x.get("rot")), len(cands),
                        sum(1 for _, x in cands if x.get("rot") == "all"), "; ".join(variants)),
         "",
         "Replay latency of `openrecall recall` over the %d searched cases, process start included: p50 %.1f ms, "
         "p95 %.1f ms. Binary errors: %s." % (len(timings), pct(timings, 0.5), pct(timings, 0.95),
                                              ", ".join("%d × %s" % kv for kv in Counter(e for r in results for e in r["errors"]).items()) or "none"),
     ]
-    return lines, pick
+    return lines, best_threshold
 
 
 def push_is_right(s, push):
