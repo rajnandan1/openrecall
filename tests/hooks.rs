@@ -1412,6 +1412,7 @@ fn a_pick_that_passes_writes_its_result_for_the_tool_hook() {
         (&json!("S"), &json!(address), &Value::Null, &json!(1000), &json!(200), &json!(0.01)),
         "only the first id counts: {line}"
     );
+    assert_eq!((&line["memories"], &line["listed"]), (&json!(3), &json!(3)), "{line}");
     assert!(line["ms"].is_u64() && line["at"].is_u64(), "{line}");
     let result: Value = serde_json::from_str(&fs::read_to_string(pick_file(&w, "S", "p1.json")).unwrap()).unwrap();
     assert_eq!(result["address"], address);
@@ -1483,8 +1484,8 @@ fn the_pick_input_fits_32000_characters_and_cuts_the_oldest_turns_first() {
     let w = World::new("pick-big");
     w.branch("feat/x");
     let repo = w.home.join(".openrecall/repos/github.com/someone/app");
-    for i in 0..250 {
-        w.memory(&repo, &format!("note-{i:03}"), "decision", "", &format!("Note {i:03}: {}", "the walrus export keeps one rule here. ".repeat(3)), "Body.");
+    for i in 0..40 {
+        w.memory(&repo, &format!("note-{i:03}"), "decision", "", &format!("Note {i:03}: {}", "the walrus export keeps one rule here. ".repeat(21)), "Body.");
     }
     let p = Provider::start(vec![answer(json!({"ids": ["m1"]}))]);
     picks_on(&w, &p);
@@ -1494,6 +1495,58 @@ fn the_pick_input_fits_32000_characters_and_cuts_the_oldest_turns_first() {
     assert!(p.requests().is_empty(), "no call");
     assert!(!pick_file(&w, "S", "p2.running").exists() && !pick_file(&w, "S", "p2.json").exists());
     assert_eq!(session_of(&w, "S")["picks"], Value::Null, "a too_big input does not count");
+}
+
+#[test]
+fn past_50_memories_a_pick_lists_the_50_that_best_match_the_prompt_and_the_newest_turn() {
+    let w = World::new("pick-short");
+    w.branch("feat/x");
+    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    w.memory(&repo, "kiwi-checksum", "gotcha", "", "Kiwi importer skips records without a checksum", "Kiwi importer skips each record that has no checksum.");
+    w.memory(&repo, "walrus-header", "decision", "", "Walrus export puts header row first", "Header row comes first.");
+    w.memory(&repo, "zebra-lamp", "project", "", "Zebra lamps glow green", "Zebra lamps glow green.");
+    let fillers = |n: std::ops::Range<usize>| {
+        for i in n {
+            let text = format!("Export job {i} writes rows nightly.");
+            w.memory(&repo, &format!("note-{i:02}"), "project", "", &text, &text);
+        }
+    };
+    fillers(0..47);
+    let p = Provider::start(vec![answer(json!({"ids": []})), answer(json!({"ids": ["m1"]}))]);
+    picks_on(&w, &p);
+    let ask = "why does the walrus export drop the header row today";
+    transcript(&w, "S", &[
+        user("light the zebra lamps"),
+        said("Lit.", None),
+        user("set up the kiwi importer"),
+        said("Set it up.", None),
+        user(ask),
+    ]);
+    let listed = |n: usize| -> Vec<String> {
+        let sent = p.requests()[n].1["messages"][1]["content"].as_str().unwrap().to_string();
+        sent.lines().filter(|l| l.starts_with("- m")).map(String::from).collect()
+    };
+
+    prompt(&w, "S", "p1", ask);
+    let line = pick_line(&w, "p1");
+    assert_eq!((&line["memories"], &line["listed"]), (&json!(50), &json!(50)), "{line}");
+    let lines = listed(0);
+    assert_eq!(lines.len(), 50);
+    assert_eq!(lines[49], "- m50: zebra-lamp: Zebra lamps glow green", "50 memories all go in");
+
+    fillers(47..57);
+    prompt(&w, "S", "p2", ask);
+    let line = pick_line(&w, "p2");
+    let lines = listed(1);
+    assert_eq!((&line["memories"], &line["listed"]), (&json!(60), &json!(lines.len())), "{line}");
+    assert_eq!(lines.len(), 50);
+    assert_eq!(lines[0], "- m1: kiwi-checksum: Kiwi importer skips records without a checksum", "the newest turn's words count");
+    assert_eq!(lines[49], "- m50: walrus-header: Walrus export puts header row first", "the prompt's words count");
+    assert!(lines.iter().all(|l| !l.contains("zebra")), "a memory that shares no word with the prompt or the newest turn is left out");
+    let names: Vec<&str> = lines.iter().map(|l| l.split(": ").nth(1).unwrap()).collect();
+    assert!(names.windows(2).all(|n| n[0] < n[1]), "by address: {names:?}");
+    assert!(lines.iter().enumerate().all(|(k, l)| l.starts_with(&format!("- m{}: ", k + 1))), "numbered in that order");
+    assert_eq!(line["memory"], "github.com/someone/app/kiwi-checksum", "the ids number the short list");
 }
 
 #[test]
