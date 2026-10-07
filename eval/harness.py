@@ -2,14 +2,15 @@
 """OpenRecall eval harness: the eval set, the baseline (built-in memory alone), and OpenRecall replayed beside it.
 
     python3 eval/harness.py freeze                   # draw cases.jsonl once, append new handoff pairs to pairs.jsonl
-    python3 eval/harness.py report [--binary PATH]   # write runs/<UTC time>/report.md
+    python3 eval/harness.py report [--binary PATH] [--picks]   # write runs/<UTC time>/report.md
 
 Reads Claude Code transcripts under ~/.claude/projects and writes only under ~/.openrecall/eval/
 (OPENRECALL_HOME replaces ~/.openrecall). The first freeze needs appendix-a.jsonl there: one
 {"id", "session", "at"} line per spec Appendix A prompt, `at` being the prompt line's timestamp.
 The report replays every session through the openrecall binary (default: target/release/openrecall) in a
 scratch world, then every frozen case for level 2, labeled by Jev through judge.py; without a binary it prints the
-baseline alone.
+baseline alone. `--picks` also runs the binary's pick job on every frozen case with the provider of extract.toml and
+api-key, which costs money (about $1.60 a run), and in the replay with a made-up provider that cannot answer.
 """
 import glob
 import json
@@ -45,6 +46,7 @@ EDITS = {"Edit", "Write", "NotebookEdit", "MultiEdit"}
 GIT_COMMIT = re.compile(r"\bgit(?:\s+-C\s+\S+)?\s+commit\b")
 IDENT = re.compile(r"\b[A-Z]{2,5}-\d{2,5}\b|#\d{2,6}\b|/pull/\d+|\b[\w.-]+/[\w./-]+|`[^`\s]{3,}`|\b[0-9a-f]{7,40}\b|https?://\S+")
 GOAL = 0.67
+PICK_WAIT = 120
 # Spec Appendix A, rows 0 to 13, in the order of appendix-a.jsonl (A00 to A13).
 HAND = ["useful", "useful", "useful", "partly", "partly", "useful", "noise", "noise", "useful", "partly", "noise",
         "noise", "noise", "noise"]
@@ -373,16 +375,19 @@ def scratch():
     return tmp
 
 
-def replay(binary, sessions, snapshot=()):
+def replay(binary, sessions, snapshot=(), picks=False):
     """Every session's hooks through the binary in time order, in a stand-in world (ticket 16): a scratch home, one
     stand-in folder per worktree whose `.git` holds the origin URL, HEAD and refs, and each transcript copied turn by
     turn with its folder and home moved into the world. Returns what each session was pushed (real prompt number, text,
     the record's branch and aliases), recall timings in ms, the binary's log events, and for each (earlier, new) pair
-    in `snapshot` the earlier session's record as it stood when the new session started."""
+    in `snapshot` the earlier session's record as it stood when the new session started. `picks` turns picks on with
+    a made-up provider that cannot answer, so each prompt with a `prompt_id` starts the pick job at no cost (spec 5.4)."""
     tmp = scratch()
     home = os.path.join(tmp, "home")
     env = dict(HOME=home, OPENRECALL_HOME=os.path.join(home, ".openrecall"), CLAUDE_CODE_ENTRYPOINT="cli",
                PATH="/usr/bin:/bin")
+    if picks:
+        pick_home(env["OPENRECALL_HOME"], 'base_url = "http://127.0.0.1:9"\nmodel = "made-up"\n', "made-up-key")
     known, worlds, state = {}, {}, {}
     for s in sessions:
         known[s["repo"]] = known.get(s["repo"]) or identity(s["cwd"])[1]
@@ -444,7 +449,8 @@ def replay(binary, sessions, snapshot=()):
                 st["prompts"] += t["real"]
                 if t["builtin"]:
                     continue
-                out, ms = call("recall", hook_event_name="UserPromptSubmit", prompt=moved(t["ask"], w["subs"]))
+                out, ms = call("recall", hook_event_name="UserPromptSubmit", prompt=moved(t["ask"], w["subs"]),
+                               **(dict(prompt_id="t%d" % i, transcript_path=st["copy"]) if picks else {}))
                 timings += [ms] if t["real"] else []
                 text = json.loads(out)["hookSpecificOutput"]["additionalContext"] if out.strip() else ""
                 text = text.split("\n\nRecalled memories from earlier sessions (OpenRecall).")[0]
@@ -479,7 +485,8 @@ def replay(binary, sessions, snapshot=()):
             for x, how in zip(xs, routes[sid]):
                 x["how"] = how
     finally:
-        # Each `handoff` starts a detached extraction worker, which finds no extract.toml here and exits.
+        # Each `handoff` starts a detached extraction worker, which finds no extract.toml here, or with picks no
+        # session that ended or went quiet, and exits.
         shutil.rmtree(tmp, ignore_errors=True)
     return pushes, timings, events, snaps
 
@@ -686,11 +693,56 @@ def mains_of(cases):
     return out
 
 
-def replay_cases(binary, cases, mains):
+def pick_home(orhome, toml, key):
+    """Picks on in a scratch home: `toml` as extract.toml with its `pick` line set to true, `key` as a mode 600 api-key."""
+    os.makedirs(orhome, exist_ok=True)
+    lines = [l for l in toml.splitlines() if l.partition("=")[0].strip() != "pick"]
+    with open(os.path.join(orhome, "extract.toml"), "w") as fh:
+        fh.write("\n".join(lines + ["pick = true"]) + "\n")
+    with os.fdopen(os.open(os.path.join(orhome, "api-key"), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as fh:
+        fh.write(key)
+
+
+def real_provider():
+    """The user's extract.toml text and api-key, for the case homes of a `--picks` run (spec 5.2)."""
+    orhome = os.path.dirname(EVAL)
+    try:
+        with open(os.path.join(orhome, "extract.toml")) as toml, open(os.path.join(orhome, "api-key")) as key:
+            return toml.read(), key.read()
+    except OSError:
+        sys.exit("--picks needs extract.toml and api-key in %s" % orhome)
+
+
+def transcript_before(c, dst):
+    """Copies the case session's transcript up to, not including, the case's prompt to `dst` (spec 5.2). Nothing is
+    copied when the transcript or the prompt is gone."""
+    paths = glob.glob(os.path.join(PROJECTS, "*", c["session"] + ".jsonl"))
+    turn = next((t for t in scan(paths[0])["turns"] if t["at"] == c["at"]), None) if paths else None
+    if turn:
+        copy_turns(dict(path=paths[0]), dict(copy=dst, pos=0, done=0), turn["line"], [])
+
+
+def wait_pick(log, sid):
+    """The `pick` line of session `sid`'s job, or an error line after PICK_WAIT seconds (spec 5.2)."""
+    end = time.monotonic() + PICK_WAIT
+    while time.monotonic() < end:
+        try:
+            line = next((e for e in read(log) if e.get("event") == "pick" and e.get("session") == sid), None)
+        except (OSError, ValueError):
+            line = None
+        if line:
+            return line
+        time.sleep(0.1)
+    return dict(event="pick", session=sid, memory=None, skip="error", error="no pick line in %d s" % PICK_WAIT, cost=0)
+
+
+def replay_cases(binary, cases, mains, provider=None):
     """Ticket 16: each case through `openrecall recall` in its own stand-in world: a folder whose `.git` holds the
     case's origin and branch, the repo's main checkout linked in so the path check sees today's tree, a scratch home
     with the built-in memory files born before the prompt at the slug the binary computes, and OpenRecall's own
-    facts with a `source` date before it. Returns one result per case: candidates, injections, drops, timing."""
+    facts with a `source` date before it. Returns one result per case: candidates, injections, drops, timing.
+    `provider`, the extract.toml text and api-key of a `--picks` run, turns picks on (spec 5.2): `recall` also gets a
+    `prompt_id` and the transcript before the prompt, and a case that no skip rule stopped waits for its pick job."""
     tmp = scratch()
     orhome = os.environ.get("OPENRECALL_HOME") or os.path.expanduser("~/.openrecall")
     results = []
@@ -725,12 +777,16 @@ def replay_cases(binary, cases, mains):
                         memories[prefix + os.path.basename(f)[:-3]] = f
             env = dict(HOME=home, OPENRECALL_HOME=os.path.join(home, ".openrecall"), CLAUDE_CODE_ENTRYPOINT="cli",
                        CLAUDE_PROJECT_DIR=folder, PATH="/usr/bin:/bin")
+            ask = dict(session_id=c["session"], cwd=folder, prompt=c["prompt"], hook_event_name="UserPromptSubmit")
+            if provider:
+                pick_home(env["OPENRECALL_HOME"], *provider)
+                ask.update(prompt_id=c["id"], transcript_path=os.path.join(tmp, "t%d.jsonl" % i))
+                transcript_before(c, ask["transcript_path"])
             # The first call builds the index; the case's own call is timed the way a live prompt runs, warm.
             subprocess.run([binary, "recall"], env=env, capture_output=True, input=json.dumps(dict(
                 session_id="warm", cwd=folder, prompt="warm the index with a prompt that recalls nothing")).encode())
             began = time.perf_counter()
-            subprocess.run([binary, "recall"], env=env, capture_output=True, input=json.dumps(dict(
-                session_id=c["session"], cwd=folder, prompt=c["prompt"], hook_event_name="UserPromptSubmit")).encode())
+            subprocess.run([binary, "recall"], env=env, capture_output=True, input=json.dumps(ask).encode())
             ms = (time.perf_counter() - began) * 1000
             log = os.path.join(env["OPENRECALL_HOME"], "log", "openrecall.jsonl")
             events = read(log) if os.path.exists(log) else []
@@ -745,9 +801,34 @@ def replay_cases(binary, cases, mains):
                 candidates=[dict(x, address=fix(x["address"]), rot=rot(fix(x["address"]))) for x in recall.get("candidates", [])],
                 injected=[fix(a) for a in recall.get("injected", [])], dropped=recall.get("dropped", {}),
                 errors=[e.get("error", "")[:60] for e in events if e.get("event") == "error"], memories=memories))
+            if provider and not results[-1]["skipped"]:
+                line = wait_pick(log, c["session"])
+                try:
+                    with open(os.path.join(env["OPENRECALL_HOME"], "picks", c["session"], c["id"] + ".json")) as fh:
+                        address = fix(json.load(fh)["address"])
+                except (OSError, ValueError, KeyError):
+                    address = None
+                take_pick(results[-1], dict(line, memory=line.get("memory") and fix(line["memory"])), address)
     finally:
         shutil.rmtree(tmp)
     return results
+
+
+def take_pick(r, line, address):
+    """Spec 5.2: the pick job's log `line` and the address of its result file (None without one) on a case's result.
+    A pick of an address `recall` injected is the tool hook's ledger drop. Any other pick is one more injection, in
+    `picked`, with the logged candidate's text hash, else its file's (07-proto.py hash_of())."""
+    r["pick"], r["picked"] = dict(line), []
+    if address is None:
+        return
+    if address in r["injected"]:
+        r["pick"]["skip"] = "ledger"
+        return
+    hashes = {x["address"]: x["text_hash"] for x in r["candidates"]}
+    if address not in hashes and address in r["memories"]:
+        with open(r["memories"][address], encoding="utf-8", errors="replace") as fh:
+            hashes[address] = fnv(fh.read())
+    r["picked"].append(dict(address=address, text_hash=hashes.get(address, "")))
 
 
 def load_labels():
@@ -756,14 +837,15 @@ def load_labels():
 
 
 def label_candidates(cases, results, by_sid, label_fn):
-    """Ticket 16: every logged candidate gets a label, reused until the memory's text changes. The judge is called
-    only for candidates with no label yet, one call per case."""
+    """Ticket 16: every logged candidate and pick gets a label, reused until the memory's text changes. The judge is
+    called only for memories with no label yet, one call per case."""
     labels = load_labels()
     if not label_fn:
         return labels
     with open(os.path.join(EVAL, "labels.jsonl"), "a") as fh:
         for c, r in zip(cases, results):
-            todo = [x for x in r["candidates"] if (c["id"], x["address"], x["text_hash"]) not in labels]
+            todo = list({x["address"]: x for x in r["candidates"] + r.get("picked", [])
+                         if (c["id"], x["address"], x["text_hash"]) not in labels}.values())
             if not todo:
                 continue
             s = by_sid.get(c["session"])
@@ -780,17 +862,19 @@ def kind_of(result, address):
     return "builtin " + kind if address.startswith("builtin/") else kind
 
 
-def gate_metrics(cases, results, labels, gate=None, rot=None, min_rows=0):
+def gate_metrics(cases, results, labels, gate=None, rot=None, min_rows=0, picks=False):
     """Precision, misses and false injections (ticket 16) at the binary's own gate (None), or with the top 3
     candidates at `gate` or above injected in an index of `min_rows` rows or more, the 1,040-character cap left out.
-    `rot` "any" or "all" also drops the candidates that rule would drop (rot_of)."""
+    `rot` "any" or "all" also drops the candidates that rule would drop (rot_of). `picks` adds the picks of a
+    `--picks` run to the binary's own gate."""
     m = dict(injections=0, useful=0, unlabeled=0, misses=0, false=0, cases=0, kinds=Counter(), kinds_useful=Counter())
     for c, r in zip(cases, results):
         label = lambda x: labels.get((c["id"], x["address"], x["text_hash"]))
-        useful = {x["address"] for x in r["candidates"] if label(x) == "useful"}
+        picked = r.get("picked", []) if picks and gate is None else []
+        useful = {x["address"] for x in r["candidates"] + picked if label(x) == "useful"}
         kept = [x for x in r["candidates"] if not (rot and x.get("rot") in {"any": ("any", "all"), "all": ("all",)}[rot])]
         if gate is None:
-            inj = [x for x in kept if x["address"] in r["injected"]]
+            inj = [x for x in kept if x["address"] in r["injected"]] + picked
         elif r.get("index_size", 0) >= min_rows:
             inj = [x for x in kept if x["score"] >= gate][:3]
         else:
@@ -949,8 +1033,37 @@ def binary_gate():
         return None
 
 
-def level2_lines(cases, results, labels, by_sid, gate, label_fn=None):
-    """The report's level-2 section. `label_fn` labels the live injections on PR URL prompts (live_pr_urls)."""
+def pick_lines(cases, results, labels):
+    """Spec 5.2's lines for a `--picks` run: the binary's gate with and without the picks, and the pick jobs."""
+    on, off = gate_metrics(cases, results, labels, picks=True), gate_metrics(cases, results, labels)
+    picked = [(c, x) for c, r in zip(cases, results) for x in r.get("picked", [])]
+    jobs = [r["pick"] for r in results if r.get("pick")]
+    errors = [j for j in jobs if j.get("skip") == "error"]
+    chosen = [j for j in jobs if j.get("memory") and j.get("skip") != "error"]
+    dropped = Counter(j["skip"] for j in chosen if j.get("skip"))
+    skips = Counter(j["skip"] for j in jobs if not j.get("memory") and j.get("skip") not in (None, "error"))
+    listed = lambda counts: ", ".join("%s %d" % kv for kv in sorted(counts.items())) or "none"
+    return [
+        "At the binary's gate with the picks (spec 5.2): injections %d on %d cases (picks %d), useful %d (picks %d), "
+        "precision %s, unlabeled %d. Goals: precision 0.67 or more, useful 13 or more. Without the picks: injections %d, "
+        "useful %d, precision %s." % (
+            on["injections"], on["cases"], len(picked), on["useful"],
+            sum(labels.get((c["id"], x["address"], x["text_hash"])) == "useful" for c, x in picked),
+            rate(on["useful"], on["injections"]), on["unlabeled"], off["injections"], off["useful"],
+            rate(off["useful"], off["injections"])),
+        "",
+        "- Pick jobs started: %d. Picks with a memory: %d; dropped: %s; injected: %d. No memory picked: %d. Skips: %s. "
+        "Errors: %d%s. Cost of the pick lines: $%.2f." % (
+            len(jobs), len(chosen), listed(dropped), len(picked),
+            sum(1 for j in jobs if not j.get("memory") and not j.get("skip")), listed(skips), len(errors),
+            " (%s)" % ", ".join("%d × %s" % (n, e) for e, n in Counter(j.get("error", "")[:60] for j in errors).items())
+            if errors else "", sum(j.get("cost") or 0 for j in jobs)),
+    ]
+
+
+def level2_lines(cases, results, labels, by_sid, gate, label_fn=None, picks=False):
+    """The report's level-2 section. `label_fn` labels the live injections on PR URL prompts (live_pr_urls). `picks`
+    adds the lines of a `--picks` run (pick_lines)."""
     searched = [(c, r) for c, r in zip(cases, results) if not r["skipped"]]
     skips = Counter(r["skipped"] for r in results if r["skipped"])
     dropped = Counter()
@@ -1004,6 +1117,7 @@ def level2_lines(cases, results, labels, by_sid, gate, label_fn=None):
            rate(at_gate["useful"], at_gate["injections"]), at_gate["misses"], rate(at_gate["false"], at_gate["injections"]),
            at_gate["unlabeled"]),
         "",
+    ] + (pick_lines(cases, results, labels) + [""] if picks else []) + [
         "| Memory type | Injections | Useful | Precision |", "|---|---|---|---|",
     ]
     lines += ["| %s | %d | %d | %s |" % (k, n, at_gate["kinds_useful"][k], rate(at_gate["kinds_useful"][k], n))
@@ -1032,8 +1146,8 @@ def level2_lines(cases, results, labels, by_sid, gate, label_fn=None):
         "best threshold: %s." % (dropped["rot"], sum(1 for _, x in cands if x.get("rot")), len(cands),
                        sum(1 for _, x in cands if x.get("rot") == "all"), "; ".join(variants)),
         "",
-        "Replay latency of `openrecall recall` over the %d searched cases, process start included: p50 %.1f ms, "
-        "p95 %.1f ms. Binary errors: %s." % (len(timings), pct(timings, 0.5), pct(timings, 0.95),
+        "Replay latency of `openrecall recall` over the %d searched cases, process start included%s: p50 %.1f ms, "
+        "p95 %.1f ms. Binary errors: %s." % (len(timings), ", with picks on" if picks else "", pct(timings, 0.5), pct(timings, 0.95),
                                              ", ".join("%d × %s" % kv for kv in Counter(e for r in results for e in r["errors"]).items()) or "none"),
     ]
     return lines, best_threshold
@@ -1152,10 +1266,11 @@ def rate(k, n):
     return "%.0f%% (%d/%d, %.0f–%.0f%%)" % (100.0 * k / n, k, n, max(0.0, 100 * lo), 100 * hi) if n else "n/a"
 
 
-def report(now=None, binary=BINARY, label_fn=None, gate=None, dedupe_fn=None):
+def report(now=None, binary=BINARY, label_fn=None, gate=None, dedupe_fn=None, picks=False):
     """`label_fn(case, candidates, memories, earlier_prompts)` returns label rows (judge.label_case); None labels
     nothing new. `gate` is binary_gate()'s (threshold, minimum index size), printed beside the binary's results; the
-    sweep keeps its minimum. `dedupe_fn` checks written facts (judge.dedupe_check); None checks nothing new."""
+    sweep keeps its minimum. `dedupe_fn` checks written facts (judge.dedupe_check); None checks nothing new. `picks`
+    runs the pick job on the frozen cases with the user's provider, and in the replay with one that cannot answer."""
     now = now or datetime.now(timezone.utc)
     earlier = sorted(d for d in glob.glob(os.path.join(EVAL, "runs", "*")) if os.path.isdir(d))
     since = datetime.strptime(os.path.basename(earlier[-1]), "%Y-%m-%dT%H%M%SZ").replace(tzinfo=timezone.utc) if earlier else None
@@ -1164,8 +1279,9 @@ def report(now=None, binary=BINARY, label_fn=None, gate=None, dedupe_fn=None):
     sessions, recalled = load()
     by_sid = {s["sid"]: s for s in sessions}
     ran = os.path.exists(binary)
-    pushes, timings, events, snaps = replay(binary, sessions, [(p["earlier"], p["new"]) for p in rows]) if ran else ({}, [], [], {})
-    results = replay_cases(binary, cases, mains_of(cases)) if ran else []
+    provider = real_provider() if picks and ran else None
+    pushes, timings, events, snaps = replay(binary, sessions, [(p["earlier"], p["new"]) for p in rows], picks) if ran else ({}, [], [], {})
+    results = replay_cases(binary, cases, mains_of(cases), provider) if ran else []
     hits = defaultdict(lambda: [0] * 6)
     measured, skipped, pushed_at = Counter(), Counter(), Counter()
     unknown = crossed = 0
@@ -1289,11 +1405,13 @@ def report(now=None, binary=BINARY, label_fn=None, gate=None, dedupe_fn=None):
             "",
             "## Replay latency",
             "",
-            "`openrecall recall` over %d real prompts, process start included: p50 %.1f ms, p95 %.1f ms. Replay timings "
-            "only; live latency comes from the recall log." % (len(timings), pct(timings, 0.5), pct(timings, 0.95)),
+            "`openrecall recall` over %d real prompts, process start included%s: p50 %.1f ms, p95 %.1f ms. Replay timings "
+            "only; live latency comes from the recall log." % (
+                len(timings), ", with picks on: each prompt starts the pick job, against a made-up provider that cannot "
+                "answer" if picks else "", pct(timings, 0.5), pct(timings, 0.95)),
         ]
         labels = label_candidates(cases, results, by_sid, label_fn)
-        lines += level2_lines(cases, results, labels, by_sid, gate, label_fn)[0]
+        lines += level2_lines(cases, results, labels, by_sid, gate, label_fn, picks)[0]
     lines += extraction_lines(since, dedupe_fn)
     lines += [
         "",
@@ -1318,13 +1436,22 @@ def report(now=None, binary=BINARY, label_fn=None, gate=None, dedupe_fn=None):
     print("\n".join(lines) + "\n\nwritten to %s/report.md" % out)
 
 
+def report_args(args):
+    """`report [--binary PATH] [--picks]`: (binary, picks), or None for any other arguments."""
+    picks = args[-1:] == ["--picks"]
+    rest = args[:-1] if picks else args
+    if rest[:1] not in ([], ["--binary"]) or len(rest) not in (0, 2):
+        return None
+    return (os.path.abspath(rest[1]) if rest else BINARY), picks
+
+
 if __name__ == "__main__":
     cmd, rest = (sys.argv[1] if len(sys.argv) > 1 else ""), sys.argv[2:]
     if cmd == "freeze" and not rest:
         freeze()
-    elif cmd == "report" and rest[:1] in ([], ["--binary"]) and len(rest) in (0, 2):
+    elif cmd == "report" and report_args(rest):
         import judge
-        report(binary=os.path.abspath(rest[1]) if rest else BINARY, label_fn=judge.label_case, gate=binary_gate(),
-               dedupe_fn=judge.dedupe_check)
+        binary, picks = report_args(rest)
+        report(binary=binary, label_fn=judge.label_case, gate=binary_gate(), dedupe_fn=judge.dedupe_check, picks=picks)
     else:
         sys.exit(__doc__)
