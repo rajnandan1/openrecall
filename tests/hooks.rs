@@ -855,6 +855,44 @@ fn a_memory_whose_description_names_the_prompts_ticket_passes_under_the_threshol
 }
 
 #[test]
+fn an_echo_frees_its_line_and_stays_out_of_the_ledger() {
+    let w = World::new("echo");
+    w.branch("feat/x");
+    fs::create_dir_all(w.folder.join(".scratch/x")).unwrap();
+    fs::write(w.folder.join(".scratch/x/map.md"), "").unwrap();
+    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    w.fillers(&repo);
+    let source = "source: E 2026-01-02T03:04:05Z\n";
+    let address = "github.com/someone/app/walrus-migration-map";
+    w.memory(&repo, "walrus-migration-map", "pointer", source, "The walrus migration map",
+        "The walrus migration map lives in .scratch/x/map.md for the whole team");
+    for i in 0..3 {
+        w.memory(&repo, &format!("walrus-step-{i}"), "decision", source, &format!("Step {i} of WAL-12"),
+            &format!("Step {i} of the walrus migration runs after the map is read."));
+    }
+    let recall = |sid: &str| -> Value {
+        fs::read_to_string(w.home.join(".openrecall/log/openrecall.jsonl"))
+            .unwrap()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .filter(|e| e["event"] == "recall" && e["session"] == sid)
+            .last()
+            .unwrap()
+    };
+
+    let ctx = w.pushed("S", "read .scratch/x/map.md and plan the walrus migration map for WAL-12").expect("the steps pass");
+    let lines: Vec<&str> = ctx.lines().skip(1).collect();
+    assert!(!ctx.contains(address), "the prompt names the pointer's path: {ctx}");
+    assert_eq!(lines.len(), 3, "the echo frees its line for the next candidate: {ctx}");
+    let log = recall("S");
+    assert_eq!((&log["dropped"]["echo"], &log["echoes"]), (&json!(1), &json!([address])), "{log}");
+
+    let ctx = w.pushed("S", "walrus migration map lives where").expect("the pointer passes");
+    assert!(ctx.contains(address), "an echo never enters the session ledger: {ctx}");
+    assert_eq!(recall("S")["dropped"].get("echo"), None);
+}
+
+#[test]
 fn the_status_line_totals_the_sessions_injections() {
     let w = World::new("total");
     w.branch("feat/x");

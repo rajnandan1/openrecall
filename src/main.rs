@@ -275,7 +275,7 @@ fn recall(started: u128) -> Result<()> {
 }
 
 /// Ticket 15's last steps: search the scope, drop what must not be injected (the ledger, this session's own facts,
-/// a state fact past its `expires`, a pointer whose path is gone: ticket 09), keep at most 3 lines above the gate within the 400-token budget. Returns the lines with their addresses, and the log detail.
+/// a state fact past its `expires`, a pointer whose path is gone: ticket 09), keep at most 3 lines above the gate that are not echoes (spec 2.2) within the 400-token budget. Returns the lines with their addresses, and the log detail.
 /// The lines are picked first; then each, best first, takes its whole memory if that fits in the room they leave.
 fn level2(
     query: &str,
@@ -320,10 +320,13 @@ fn level2(
     let mut lines = vec![];
     let mut via = serde_json::Map::new();
     let mut chars = index::FRAME.chars().count();
-    for (c, how) in index::gate(&kept, &scores, size, query)
+    let (echoes, passing): (Vec<_>, Vec<_>) = index::gate(&kept, &scores, size, query)
         .into_iter()
-        .take(index::MAX_LINES)
-    {
+        .partition(|(c, _)| index::echo(c, query));
+    if !echoes.is_empty() {
+        dropped.insert("echo", echoes.len());
+    }
+    for (c, how) in passing.into_iter().take(index::MAX_LINES) {
         let line = index::line(c, 0);
         if chars + line.chars().count() + 1 > index::MAX_CHARS {
             break;
@@ -349,7 +352,8 @@ fn level2(
         .collect();
     Ok((
         lines,
-        json!({"terms": terms.len(), "index_size": size, "candidates": candidates, "dropped": dropped, "via": via}),
+        json!({"terms": terms.len(), "index_size": size, "candidates": candidates, "dropped": dropped, "via": via,
+               "echoes": echoes.iter().map(|(c, _)| &c.address).collect::<Vec<_>>()}),
     ))
 }
 
