@@ -163,7 +163,7 @@ The part of the gate that lets a candidate through, whatever its score, when its
 _Avoid_: identifier route (that pushes a handoff record), identifier boost
 
 **Echo**:
-A candidate whose injected line names a path that the prompt also names, and adds at most 2 identifiers that the prompt lacks. An echo is never injected, and a pick can be one too.
+A candidate whose injected line names a path that the prompt also names, and adds at most 2 identifiers that the prompt lacks. An echo is never injected.
 _Avoid_: repeat (that is a fact dedupe skips), skip rule (that stops a session or a prompt), duplicate
 
 **Score**:
