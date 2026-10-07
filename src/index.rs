@@ -325,23 +325,22 @@ impl Index {
             .prepare(&sql)?
             .query_map(
                 params![query, dir(0), dir(1), dir(2), limit as i64, (terms.len() as f64).sqrt()],
-                |r| {
-                    Ok(Candidate {
-                        id: r.get(0)?,
-                        address: r.get(1)?,
-                        bm25: r.get(2)?,
-                        text_hash: r.get(3)?,
-                        kind: r.get(4)?,
-                        date: r.get(5)?,
-                        source: r.get(6)?,
-                        updated: r.get(7)?,
-                        expires: r.get(8)?,
-                        name: r.get(9)?,
-                        description: r.get(10)?,
-                        body: r.get(11)?,
-                    })
-                },
+                candidate,
             )?
+            .collect()
+    }
+
+    /// Every memory of the scopes, by address: the pick's list (notes call 5).
+    pub fn all(&self, scopes: &[Scope]) -> rusqlite::Result<Vec<Candidate>> {
+        let dir = |i: usize| scopes.get(i).map_or(String::new(), |s| s.dir.to_string_lossy().into_owned());
+        self.conn
+            .prepare(
+                "SELECT f.id, f.address, 0.0, f.hash, f.kind, f.date, f.source, f.updated, f.expires, m.name, m.description, m.body
+                 FROM files f JOIN ft m ON m.rowid = f.id
+                 WHERE f.dir IN (?1, ?2, ?3)
+                 ORDER BY f.address",
+            )?
+            .query_map(params![dir(0), dir(1), dir(2)], candidate)?
             .collect()
     }
 
@@ -390,6 +389,23 @@ impl Index {
         let root = (terms.len() as f64).sqrt();
         Ok((size, sums.into_iter().map(|s| s / root).collect()))
     }
+}
+
+fn candidate(r: &rusqlite::Row) -> rusqlite::Result<Candidate> {
+    Ok(Candidate {
+        id: r.get(0)?,
+        address: r.get(1)?,
+        bm25: r.get(2)?,
+        text_hash: r.get(3)?,
+        kind: r.get(4)?,
+        date: r.get(5)?,
+        source: r.get(6)?,
+        updated: r.get(7)?,
+        expires: r.get(8)?,
+        name: r.get(9)?,
+        description: r.get(10)?,
+        body: r.get(11)?,
+    })
 }
 
 /// The candidates that pass, best score first, each with how: from `MIN_ROWS` rows, at the threshold (`"score"`), or

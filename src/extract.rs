@@ -230,7 +230,7 @@ fn next_due(dir: &Path, tried: &HashSet<String>) -> Option<(PathBuf, String, Ent
 /// Ticket 24's two failure classes: a strike is the session's fault; a stop is not (auth, network, money, a retired
 /// model), so the run ends with every cursor where it was.
 #[derive(Debug, PartialEq)]
-enum Fail {
+pub enum Fail {
     Strike(String),
     Stop(String),
 }
@@ -469,16 +469,22 @@ fn condense(turns: &[(Turn, usize)], split: usize) -> (String, bool) {
                 marked = true;
             }
         }
-        out.push(format!("[user] {}", t.ask));
-        for event in &t.events {
-            match event {
-                Event::Text(text) => out.push(format!("[assistant] {text}")),
-                Event::Tool(name, input) => out.push(format!("[tool] {}", tool_line(name, input))),
-                Event::Output(..) => {}
-            }
-        }
+        out.push(short_form(t));
     }
     (out.join("\n"), marked)
+}
+
+/// One turn's lines of the short form: its prompt, the assistant's text and one line per tool call.
+pub fn short_form(t: &Turn) -> String {
+    let mut out = vec![format!("[user] {}", t.ask)];
+    for event in &t.events {
+        match event {
+            Event::Text(text) => out.push(format!("[assistant] {text}")),
+            Event::Tool(name, input) => out.push(format!("[tool] {}", tool_line(name, input))),
+            Event::Output(..) => {}
+        }
+    }
+    out.join("\n")
 }
 
 fn tool_line(name: &str, input: &Value) -> String {
@@ -730,15 +736,21 @@ fn decisions(content: &str) -> Option<Vec<Decision>> {
     )
 }
 
-struct Settings {
+/// Picks are on only when extraction has a provider and `extract.toml` holds `pick = true` (spec 3.1).
+pub fn picks_on(home: &Path) -> bool {
+    Settings::load(home).is_ok_and(|s| s.pick)
+}
+
+pub struct Settings {
     base_url: String,
-    model: String,
+    pub model: String,
     key: String,
+    pick: bool,
 }
 
 impl Settings {
     /// Ticket 24: `extract.toml` holds `base_url` and `model`, `api-key` the key alone. `Err` says why extraction is off.
-    fn load(home: &Path) -> Result<Settings, String> {
+    pub fn load(home: &Path) -> Result<Settings, String> {
         let toml = fs::read_to_string(home.join("extract.toml"))
             .map_err(|_| "no extract.toml".to_string())?;
         let value = |key: &str| {
@@ -750,6 +762,7 @@ impl Settings {
         };
         let base_url = value("base_url").ok_or("no base_url in extract.toml")?;
         let model = value("model").ok_or("no model in extract.toml")?;
+        let pick = value("pick").as_deref() == Some("true");
         let path = home.join("api-key");
         let mode = fs::metadata(&path)
             .map_err(|_| "no api-key")?
@@ -767,6 +780,7 @@ impl Settings {
             base_url: base_url.trim_end_matches('/').into(),
             model,
             key: key.into(),
+            pick,
         })
     }
 }
@@ -817,10 +831,10 @@ fn ask<T>(
 
 /// One `POST <base_url>/chat/completions` through macOS curl. The key goes in curl's config on stdin, never in `ps`;
 /// the body goes in a 0600 file, because stdin cannot carry both (ticket 24).
-fn post(s: &Settings, body: &Value) -> Result<(String, Value), Fail> {
-    let tmp = crate::home()
-        .join("extract")
-        .join(format!("request.{}", std::process::id()));
+pub fn post(s: &Settings, body: &Value) -> Result<(String, Value), Fail> {
+    let dir = crate::home().join("extract");
+    fs::create_dir_all(&dir)?;
+    let tmp = dir.join(format!("request.{}", std::process::id()));
     fs::OpenOptions::new()
         .write(true)
         .create(true)
