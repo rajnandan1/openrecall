@@ -194,21 +194,26 @@ pub fn deliver(started: u128) -> crate::Result<()> {
     if fs::rename(dir.join(format!("{id}.json")), &taken).is_err() {
         return Ok(());
     }
-    let result: Value = serde_json::from_str(&fs::read_to_string(&taken)?)?;
+    let delivered = take(&taken, &sid, id, started);
+    let _ = fs::remove_file(&taken);
+    delivered
+}
+
+/// The taken pick goes to the session, unless the session ledger already holds its memory.
+fn take(taken: &Path, sid: &str, id: &str, started: u128) -> crate::Result<()> {
+    let result: Value = serde_json::from_str(&fs::read_to_string(taken)?)?;
     let address = result["address"].as_str().ok_or("no address in the pick")?;
-    let (_lock, mut s) = crate::load_session(&sid)?;
+    let (_lock, mut s) = crate::load_session(sid)?;
     if crate::seen(&s, address) {
-        let _ = fs::remove_file(&taken);
         crate::log(json!({"event": "pick_drop", "session": sid, "prompt_id": id, "memory": address, "reason": "ledger"}));
         return Ok(());
     }
     crate::see(&mut s, address);
-    crate::save_session(&sid, &s)?;
+    crate::save_session(sid, &s)?;
     println!(
         "{}",
         json!({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": result["text"]}})
     );
-    let _ = fs::remove_file(&taken);
     crate::log(json!({"event": "deliver", "session": sid, "prompt_id": id, "ms": crate::now_ms() - started,
                       "memory": address}));
     Ok(())

@@ -1665,6 +1665,18 @@ fn the_session_ledger_drops_a_pick_that_recall_already_injected() {
 }
 
 #[test]
+fn a_pick_the_tool_hook_cannot_deliver_leaves_no_taken_file() {
+    let w = World::new("deliver-broken");
+    picks_on(&w, &Provider::start(vec![]));
+    fs::create_dir_all(pick_file(&w, "S", "")).unwrap();
+    fs::write(pick_file(&w, "S", "p1.json"), "{}").unwrap();
+
+    assert_eq!(w.hook(&["deliver"], "S", json!({"prompt_id": "p1"})), "");
+    assert_eq!(log_of(&w, "error")[0]["error"], "no address in the pick");
+    assert!(!pick_file(&w, "S", "p1.json").exists() && !pick_file(&w, "S", "p1.taken").exists());
+}
+
+#[test]
 fn parallel_tool_hooks_of_one_turn_deliver_the_pick_once() {
     let w = World::new("deliver-race");
     picks_on(&w, &Provider::start(vec![]));
