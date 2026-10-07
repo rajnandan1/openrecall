@@ -828,6 +828,33 @@ fn the_gate_opens_at_ten_rows_from_every_scope() {
 }
 
 #[test]
+fn a_memory_whose_description_names_the_prompts_ticket_passes_under_the_threshold() {
+    let w = World::new("ident");
+    w.branch("feat/x");
+    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    w.fillers(&repo);
+    let source = "source: E 2026-01-02T03:04:05Z\n";
+    w.memory(&repo, "ledger-rounding", "decision", source, "Ledger totals round half-even since ABC-77",
+        "Totals round half-even; the cents column stays an integer.");
+    w.memory(&repo, "rounding-history", "decision", source, "Half-up rounding drifted a cent",
+        "Half-up rounding drifted one cent per thousand postings before ABC-77 moved it.");
+
+    let ctx = w.pushed("S", "ABC-77 why does this keep failing for the team today").expect("the identifier rule injects");
+    let lines: Vec<&str> = ctx.lines().skip(1).collect();
+    assert_eq!(lines.len(), 1, "a ticket in the body alone does not count: {ctx}");
+    assert!(lines[0].contains("github.com/someone/app/ledger-rounding: "), "{ctx}");
+    let log = fs::read_to_string(w.home.join(".openrecall/log/openrecall.jsonl")).unwrap();
+    let recall: Value = log
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .find(|e| e["event"] == "recall" && e["session"] == "S")
+        .unwrap();
+    let scores: Vec<f64> = recall["candidates"].as_array().unwrap().iter().map(|c| c["score"].as_f64().unwrap()).collect();
+    assert!(scores.iter().all(|&s| s < 1.5), "no candidate passes by score: {recall}");
+    assert_eq!(recall["via"], json!({"github.com/someone/app/ledger-rounding": "identifier"}), "{recall}");
+}
+
+#[test]
 fn the_status_line_totals_the_sessions_injections() {
     let w = World::new("total");
     w.branch("feat/x");
