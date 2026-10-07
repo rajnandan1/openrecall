@@ -15,7 +15,7 @@ OpenRecall keeps a handoff record for each task. A handoff record holds the goal
 
 OpenRecall is a Claude Code plugin and one small Rust binary, `openrecall`. The plugin holds hooks and an MCP server. A hook is a command that Claude Code runs at a fixed moment, for example when you send a prompt. An MCP server gives Claude tools that it can call. MCP stands for Model Context Protocol. Every hook and the MCP server run the `openrecall` binary.
 
-OpenRecall calls no model between your prompt and the start of Claude's answer. The hook that runs on each prompt adds a few milliseconds. OpenRecall keeps your memories and handoff records as plain Markdown files under `~/.openrecall/`. Nothing leaves your machine unless you configure [extraction](#extraction-optional).
+OpenRecall calls no model between your prompt and the start of Claude's answer. The hook that runs on each prompt adds a few milliseconds. OpenRecall keeps your memories and handoff records as plain Markdown files under `~/.openrecall/`. Nothing leaves your machine unless you configure [extraction](#extraction-optional) or [picks](#picks-optional).
 
 ## What Claude sees
 
@@ -207,7 +207,7 @@ OpenRecall does no recall for these prompts:
 
 ### MCP tools
 
-The hooks inject very little: one handoff record, and at most 3 one-line memories per prompt. This keeps prompts fast and Claude's context small. But sometimes Claude needs more:
+The hooks inject very little: one handoff record, and at most 3 one-line memories per prompt. With [picks](#picks-optional) on, a pick adds at most one more memory per prompt. This keeps prompts fast and Claude's context small. But sometimes Claude needs more:
 
 - Claude needs the full text of a memory.
 - Claude needs a memory that the gate blocked.
@@ -298,6 +298,47 @@ Dedupe never replaces a built-in memory or a global memory.
 
 Sometimes the model finds a standing rule: a rule for every session in the repo, such as a coding standard. Extraction writes such rules to `~/.openrecall/repos/<host>/<owner>/<repo>/claude-md-suggestions.md`. You copy the rules that you want into CLAUDE.md by hand. OpenRecall never recalls that file.
 
+## Picks (optional)
+
+A pick is the one memory, or none, that an LLM chooses for your prompt. The LLM also reads the session so far, so a pick can find a memory that the words of the prompt do not match. Picks send your session text to the provider of extraction. The provider sees that text. Each pick also costs money. Picks are off until you turn them on.
+
+The prompt hook is the hook that Claude Code runs when you send a prompt. On each prompt that recall does not skip, the prompt hook starts a background job. The job sends one request to the provider. The request holds three parts:
+
+- Every memory that recall searches for this repo, one line each, with its name and its description.
+- The short form of the session, newest turn first. It is the same short form that extraction sends: your prompts, Claude's text, and one line per tool call, with no tool output. OpenRecall replaces each secret in it with `[REDACTED:<rule-id>]` first.
+- Your prompt.
+
+The request holds at most 32,000 characters. OpenRecall cuts the oldest turns first. If the memory list and the prompt alone are too long, OpenRecall sends nothing.
+
+The prompt hook does not wait for the job. Claude starts its answer while the job runs. So the call to the provider never delays the start of Claude's answer.
+
+The plugin also has a tool hook. Claude Code runs it after each tool call that Claude makes. A pick reaches Claude with the result of the turn's first tool call that finds it ready, never inside a subagent, and a turn with no tool call drops it.
+
+A picked memory skips the gate. OpenRecall still drops a pick in each case where it does not inject a memory, as listed in [Recalled memories](#recalled-memories). It also drops a pick that is an echo of the prompt.
+
+Each pick makes at most one call to the model. With Claude Sonnet 5.5 through OpenRouter, a call costs $0.0323 at most. A session makes at most 10 calls. A day of 57 to 72 prompts costs about $1.50 to $1.90. This cost comes on top of the cost of extraction.
+
+Picks need Claude Code 2.1.196 or later. On an older version, the prompt hook starts no job, so nothing is sent and nothing is spent.
+
+Picks use the provider, the model and the key of extraction. To turn picks on:
+
+1. Configure [extraction](#extraction-optional).
+2. Add the line `pick = true` to `~/.openrecall/extract.toml`.
+
+```toml
+base_url = "https://openrouter.ai/api/v1"
+model = "anthropic/claude-sonnet-5.5"
+pick = true
+```
+
+To turn picks off, remove the line or change it to `pick = false`. Without a configured provider, picks are off too.
+
+OpenRecall logs each pick to `~/.openrecall/log/openrecall.jsonl`:
+
+- A `pick` line holds the tokens and the cost of the call, and the picked memory. If OpenRecall made no call or dropped the pick, the line also gives the reason.
+- A `deliver` line shows that a pick reached Claude.
+- A `pick_drop` line shows that a pick did not reach Claude, and why.
+
 ## Statusline
 
 On each prompt, OpenRecall writes one line, such as `recall 3 · 4 ms`, to `~/.openrecall/status/<session_id>`. The line has two numbers:
@@ -345,9 +386,10 @@ OpenRecall keeps all its files under `~/.openrecall/`. To use a different folder
 | `repos/<host>/<owner>/<repo>/claude-md-suggestions.md` | It holds rules that you can copy into CLAUDE.md. |
 | `global/` | It holds the global memories, which every repo may recall. |
 | `index.db` | It is the index. You can delete it at any time. |
-| `log/openrecall.jsonl` | It holds one line per event. Extraction runs also log their tokens and cost here. |
+| `log/openrecall.jsonl` | It holds one line per event. Extraction runs and picks also log their tokens and cost here. |
 | `status/<session_id>` | It holds the statusline text for that session. |
-| `api-key`, `extract.toml` | They hold the extraction settings. |
+| `picks/<session_id>/` | It holds the pick results of that session. OpenRecall deletes it when the session ends. |
+| `api-key`, `extract.toml` | They hold the extraction and pick settings. |
 
 ## Working on OpenRecall
 
