@@ -9,6 +9,8 @@ use std::process::Stdio;
 /// 16,000 tokens at 2.0 characters a token, the system prompt included (spec 3.3).
 const MAX_INPUT: usize = 32_000;
 const MAX_CALLS: u64 = 10;
+/// Past this many memories, a request lists only those that best match the prompt and the newest turn (issue #23).
+const MAX_LISTED: usize = 50;
 /// `PICK_SYSTEM["strict"]` of ticket 07's prototype, quoted in spec 3.4.
 const SYSTEM: &str = "You pick memories for a coding assistant (Claude Code) that is about to act on the user's prompt. \
     You get the list of memories (id, name and description), the session so far, newest turn first, and the prompt. \
@@ -67,8 +69,19 @@ fn pick(input: &Value, sid: &str, line: &mut Value) -> crate::Result<Option<Valu
     let prompt = input["prompt"].as_str().unwrap_or("");
     let repo = git::Repo::find(input["cwd"].as_str().unwrap_or(""));
     let (ix, scopes) = index::open_for(&home, &crate::user_home(), repo.as_ref())?;
+    let turns = turns(input, prompt);
     let memories = ix.all(&scopes)?;
-    let Some(user) = message(&memories, input, prompt) else {
+    line["memories"] = json!(memories.len());
+    let memories = if memories.len() <= MAX_LISTED {
+        memories
+    } else {
+        let newest = turns.last().map(extract::short_form).unwrap_or_default();
+        let mut best = ix.search(&index::terms(&format!("{prompt}\n{newest}")), &scopes, MAX_LISTED)?;
+        best.sort_by(|a, b| a.address.cmp(&b.address));
+        best
+    };
+    line["listed"] = json!(memories.len());
+    let Some(user) = message(&memories, &turns, prompt) else {
         line["skip"] = json!("too_big");
         return Ok(None);
     };
@@ -122,9 +135,24 @@ fn pick(input: &Value, sid: &str, line: &mut Value) -> crate::Result<Option<Valu
     Ok(Some(json!({"address": c.address, "text": text})))
 }
 
+/// The session's real turns, oldest first, without the transcript's copy of the prompt.
+fn turns(input: &Value, prompt: &str) -> Vec<turn::Turn> {
+    // ken: parses the whole transcript (p90 5 MB); read it from the end if pick ms grows with transcript size.
+    let data = fs::read(input["transcript_path"].as_str().unwrap_or("")).unwrap_or_default();
+    let mut turns: Vec<turn::Turn> = turn::turns(&data)
+        .into_iter()
+        .map(|(t, _)| t)
+        .filter(|t| t.real)
+        .collect();
+    if turns.last().is_some_and(|t| t.ask == prompt) {
+        turns.pop();
+    }
+    turns
+}
+
 /// The memory list, the session's turns newest first while they fit, and the prompt (notes call 6). None when the list,
 /// the system prompt and the prompt alone pass `MAX_INPUT` characters.
-fn message(memories: &[index::Candidate], input: &Value, prompt: &str) -> Option<String> {
+fn message(memories: &[index::Candidate], turns: &[turn::Turn], prompt: &str) -> Option<String> {
     let scanner = scan::Scanner::new();
     let list: Vec<String> = memories
         .iter()
@@ -142,16 +170,6 @@ fn message(memories: &[index::Candidate], input: &Value, prompt: &str) -> Option
     let mut room = MAX_INPUT
         .checked_sub(fixed)
         .filter(|r| *r >= NO_TURN.chars().count())?;
-    // ken: parses the whole transcript (p90 5 MB); read it from the end if pick ms grows with transcript size.
-    let data = fs::read(input["transcript_path"].as_str().unwrap_or("")).unwrap_or_default();
-    let mut turns: Vec<turn::Turn> = turn::turns(&data)
-        .into_iter()
-        .map(|(t, _)| t)
-        .filter(|t| t.real)
-        .collect();
-    if turns.last().is_some_and(|t| t.ask == prompt) {
-        turns.pop();
-    }
     let mut kept: Vec<String> = vec![];
     for t in turns.iter().rev() {
         let text = scanner.redact(&extract::short_form(t)).0;
