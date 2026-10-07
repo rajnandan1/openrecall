@@ -447,7 +447,7 @@ class HarnessTest(unittest.TestCase):
         self.assertEqual((results[0]["pick"]["memory"], results[0]["pick"]["cost"]), (address + "filler-0", 0.01))
         self.assertEqual(results[0]["injected"], [address + "export-empty-rows"])
         self.assertEqual(results[1]["picked"], [], "recall injected the picked memory first")
-        self.assertEqual(results[1]["pick"]["skip"], "ledger")
+        self.assertEqual((results[1]["pick"]["skip"], results[1]["pick"]["reason"]), (None, "ledger"))
         self.assertIsNone(results[2].get("pick"), "a skipped prompt starts no job")
         self.assertEqual(len(sent), 2)
         self.assertIn("## Session so far, newest turn first\n[user] plan the export fix for the empty rows\n"
@@ -493,7 +493,7 @@ class HarnessTest(unittest.TestCase):
             self.assertEqual(new["picked"], [dict(address="n", text_hash=harness.fnv(fh.read()))],
                              "a memory that is no candidate is hashed from its file")
         self.assertEqual(ledger["picked"], [], "recall injected it first")
-        self.assertEqual(ledger["pick"]["skip"], "ledger")
+        self.assertEqual((ledger["pick"]["skip"], ledger["pick"]["reason"]), (None, "ledger"), "the pick_drop line's name")
         self.assertEqual(below["picked"], [dict(address="o", text_hash="ho")], "a candidate under the gate keeps its hash")
         cases = [dict(id="C%d" % i, session="s", at="2026-01-05T10:40:00Z", prompt="fix the export") for i in (1, 2, 3)]
         results = [new, ledger, below]
