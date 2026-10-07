@@ -2,6 +2,7 @@ mod extract;
 mod git;
 mod index;
 mod mcp;
+mod pick;
 mod record;
 mod scan;
 mod turn;
@@ -54,6 +55,8 @@ fn run(args: &[String], started: u128) {
         ["capture", "--job"] => capture_job(),
         ["extract"] => extract_hook(),
         ["extract", "--job"] => extract::work(),
+        ["pick", "--job"] => pick::job(started),
+        ["deliver"] => pick::deliver(started),
         ["update", "--job"] => update::job(),
         _ => return,
     };
@@ -236,7 +239,8 @@ fn recall(started: u128) -> Result<()> {
         injected.push(address);
     }
     let mut searched = json!({});
-    match index::query_of(prompt) {
+    let query = index::query_of(prompt);
+    match query {
         Err(reason) => log(
             json!({"event": "skipped", "session": sid, "reason": reason, "prompt_hash": fnv(prompt)}),
         ),
@@ -254,6 +258,11 @@ fn recall(started: u128) -> Result<()> {
             }
             Err(e) => log(json!({"event": "error", "cmd": "recall search", "error": e.to_string()})),
         },
+    }
+    if query.is_ok()
+        && let Err(e) = pick::start(&input, &s)
+    {
+        log(json!({"event": "error", "cmd": "recall pick", "error": e.to_string()}));
     }
     if !context.is_empty() {
         println!(
@@ -289,25 +298,15 @@ fn level2(
         repo.map(|r| r.identity.as_str()),
         repo.and_then(git::Repo::main_checkout),
     );
-    let today = &record::iso(now_secs())[..10];
     let mut ix = index::Index::open(&home())?;
     ix.sync(&scopes)?;
-    let own = |stamp: &str| stamp.split_whitespace().next() == Some(sid);
     let mut dropped: HashMap<&str, usize> = HashMap::new();
     let mut kept = vec![];
     for c in ix.search(&terms, &scopes, 10)? {
         let reason = if seen(s, &c.address) {
             Some("ledger")
-        } else if own(&c.source) || own(&c.updated) {
-            Some("own")
-        } else if !c.expires.is_empty() && c.expires.as_str() <= today {
-            Some("expired")
-        } else if c.kind == "pointer"
-            && index::rotted(&c.body, repo.map(|r| r.folder.as_path()), &user_home())
-        {
-            Some("rot")
         } else {
-            None
+            drop_rule(&c, sid, repo)
         };
         match reason {
             Some(r) => *dropped.entry(r).or_default() += 1,
@@ -354,6 +353,23 @@ fn level2(
         json!({"terms": terms.len(), "index_size": size, "candidates": candidates, "dropped": dropped, "via": vias,
                "echoes": echoes.iter().map(|(c, _)| &c.address).collect::<Vec<_>>()}),
     ))
+}
+
+/// Ticket 09's drops after the ledger, for recall and the pick alike: the session's own memory, an expired one, and a
+/// pointer that rotted.
+fn drop_rule(c: &index::Candidate, sid: &str, repo: Option<&git::Repo>) -> Option<&'static str> {
+    let own = |stamp: &str| stamp.split_whitespace().next() == Some(sid);
+    if own(&c.source) || own(&c.updated) {
+        Some("own")
+    } else if !c.expires.is_empty() && c.expires.as_str() <= &record::iso(now_secs())[..10] {
+        Some("expired")
+    } else if c.kind == "pointer"
+        && index::rotted(&c.body, repo.map(|r| r.folder.as_path()), &user_home())
+    {
+        Some("rot")
+    } else {
+        None
+    }
 }
 
 /// The record to push, if any, with its repo identity and route: an alias the prompt names first (several records may
@@ -430,10 +446,11 @@ fn route(
     ))
 }
 
-/// Stop: hand the turn to a detached writer and return at once (tickets 01 and 06).
+/// Stop: drop the turn's picks, then hand the turn to a detached writer and return at once (tickets 01 and 06). The
+/// picks go first, in the hook itself, so the next prompt's job cannot race them.
 fn capture_hook() -> Result<()> {
     let mut job = read_input()?;
-    session_id(&job)?;
+    pick::end_turn(&session_id(&job)?);
     let transcript = job["transcript_path"].as_str().unwrap_or("").to_string();
     job["transcript_len"] = json!(fs::metadata(&transcript).map_or(0, |m| m.len()));
     detach(&["capture", "--job"], Stdio::piped())?
@@ -444,10 +461,12 @@ fn capture_hook() -> Result<()> {
     Ok(())
 }
 
-/// SessionEnd: mark the session ended and start the extraction worker, then return (ticket 17).
+/// SessionEnd: delete the session's picks, mark it ended and start the extraction worker, then return (ticket 17).
 fn extract_hook() -> Result<()> {
     let input = read_input()?;
-    extract::mark_ended(&session_id(&input)?, true)?;
+    let sid = session_id(&input)?;
+    let _ = fs::remove_dir_all(pick::dir(&sid));
+    extract::mark_ended(&sid, true)?;
     detach(&["extract", "--job"], Stdio::null())?;
     Ok(())
 }
@@ -635,18 +654,21 @@ fn read_input() -> Result<Value> {
     Ok(serde_json::from_str(&text)?)
 }
 
-/// Session ids name files, so only a plain id is accepted.
 fn session_id(input: &Value) -> Result<String> {
     let sid = input["session_id"].as_str().unwrap_or("");
-    let plain = !sid.is_empty()
-        && sid
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
-    if plain {
+    if plain(sid) {
         Ok(sid.to_string())
     } else {
         Err("no usable session_id".into())
     }
+}
+
+/// Session and prompt ids name files, so only a plain id is accepted.
+fn plain(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// The session state, locked until the returned file drops: the hooks and the detached writer each read, change
@@ -723,6 +745,28 @@ mod tests {
         let plugin: serde_json::Value =
             serde_json::from_str(include_str!("../plugin/.claude-plugin/plugin.json")).unwrap();
         assert_eq!(plugin["version"], env!("CARGO_PKG_VERSION"));
+    }
+
+    /// Spec 3.10: before Claude Code 2.1.257 an event it does not know turns off every hook of the plugin.
+    #[test]
+    fn hooks_json_names_only_known_events_and_the_tool_hook() {
+        let hooks: serde_json::Value =
+            serde_json::from_str(include_str!("../plugin/hooks/hooks.json")).unwrap();
+        let mut events: Vec<&str> = hooks["hooks"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        events.sort();
+        assert_eq!(
+            events,
+            ["PostToolUse", "SessionEnd", "SessionStart", "Stop", "UserPromptSubmit"]
+        );
+        assert_eq!(
+            hooks["hooks"]["PostToolUse"],
+            serde_json::json!([{"hooks": [{"type": "command", "command": "openrecall", "args": ["deliver"], "timeout": 5}]}])
+        );
     }
 
     #[test]

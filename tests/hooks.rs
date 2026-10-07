@@ -1338,3 +1338,396 @@ fn dedupe_sees_a_built_in_memory_past_the_top_five_and_past_its_start() {
     assert!(dedupe.contains("/tools-build [project] ") && dedupe.contains(stated), "{dedupe}");
     assert!(log.contains("\"action\":\"skip\"") && log.contains("\"skipped\":1") && !repo.join("search-tool-fills-k.md").exists(), "{log}");
 }
+
+const PICK_SYSTEM: &str = "You pick memories for a coding assistant (Claude Code) that is about to act on the user's prompt. You get the list of memories (id, name and description), the session so far, newest turn first, and the prompt. Pick at most one memory, and only one that states a fact, decision, pointer or gotcha that the assistant needs to act on this prompt and that neither the prompt nor the session already contains. A memory about the same project but another task, or one that only repeats what the prompt or the session says, is a wrong pick. Most prompts need no memory: pick none unless you are sure. Return its id, or no id.";
+
+/// Picks on through the provider stand-in: extraction's settings plus `pick = true`.
+fn picks_on(w: &World, p: &Provider) {
+    let home = w.home.join(".openrecall");
+    fs::create_dir_all(&home).unwrap();
+    fs::write(home.join("extract.toml"), format!("base_url = \"http://127.0.0.1:{}/v1\"\nmodel = \"test/model\"\npick = true\n", p.port)).unwrap();
+    fs::write(home.join("api-key"), "sk-test-123\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(home.join("api-key"), fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+/// The prompt hook with a `prompt_id` and the session's transcript.
+fn prompt(w: &World, sid: &str, id: &str, text: &str) -> String {
+    w.hook(&["recall"], sid, json!({"prompt": text, "prompt_id": id, "transcript_path": w.root.join(format!("{sid}.jsonl"))}))
+}
+
+fn transcript(w: &World, sid: &str, lines: &[Value]) {
+    let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+    fs::write(w.root.join(format!("{sid}.jsonl")), text).unwrap();
+}
+
+fn log_of(w: &World, event: &str) -> Vec<Value> {
+    fs::read_to_string(w.home.join(".openrecall/log/openrecall.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|e| e["event"] == event)
+        .collect()
+}
+
+/// The `pick` line of one prompt, once the job has logged it.
+fn pick_line(w: &World, id: &str) -> Value {
+    let started = Instant::now();
+    loop {
+        if let Some(line) = log_of(w, "pick").into_iter().find(|e| e["prompt_id"] == id) {
+            return line;
+        }
+        assert!(started.elapsed() < Duration::from_secs(20), "no pick line for {id}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn pick_file(w: &World, sid: &str, name: &str) -> PathBuf {
+    w.home.join(".openrecall/picks").join(sid).join(name)
+}
+
+#[test]
+fn a_pick_that_passes_writes_its_result_for_the_tool_hook() {
+    let w = World::new("pick");
+    w.branch("feat/x");
+    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    let source = "source: E 2026-01-02T03:04:05Z\n";
+    w.memory(&repo, "alpha-walrus-encoding", "gotcha", source, "The walrus export writes UTF-16", "The walrus export writes UTF-16 files.");
+    w.memory(&repo, "bravo-walrus-header", "decision", source, "The walrus export puts the header row first", "The walrus export puts the header row first, before any data row.");
+    w.memory(&repo, "charlie-kiwi-checksum", "gotcha", source, "The kiwi importer drops rows without a checksum", "The kiwi importer drops every row that has no checksum.");
+    let p = Provider::start(vec![answer(json!({"ids": ["m2", "m1"]}))]);
+    picks_on(&w, &p);
+    let token = format!("ghp_{}", "Zq8Xw3Kp9Lm2Nv7Bc4Rt6Yh1Jd5Fg0Sa3Ew8");
+    let ask = "why does the walrus export drop the header row today";
+    let bash = json!({"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "cargo test walrus"}});
+    transcript(&w, "S", &[
+        user(&format!("set up the walrus export, CI pushes with {token}")),
+        said("Set it up.", Some(bash)),
+        user(ask),
+    ]);
+
+    prompt(&w, "S", "p1", ask);
+    let line = pick_line(&w, "p1");
+    let address = "github.com/someone/app/bravo-walrus-header";
+    assert_eq!(
+        (&line["session"], &line["memory"], &line["skip"], &line["tokens_in"], &line["tokens_out"], &line["cost"]),
+        (&json!("S"), &json!(address), &Value::Null, &json!(1000), &json!(200), &json!(0.01)),
+        "only the first id counts: {line}"
+    );
+    assert!(line["ms"].is_u64() && line["at"].is_u64(), "{line}");
+    let result: Value = serde_json::from_str(&fs::read_to_string(pick_file(&w, "S", "p1.json")).unwrap()).unwrap();
+    assert_eq!(result["address"], address);
+    assert_eq!(
+        result["text"],
+        "Recalled memories from earlier sessions (OpenRecall). They reflect what was true when written. Full text: \
+         mcp__plugin_openrecall_openrecall__recall with the address.\n- decision 2026-01-02 \
+         github.com/someone/app/bravo-walrus-header: The walrus export puts the header row first, before any data row."
+    );
+    assert!(!pick_file(&w, "S", "p1.running").exists());
+
+    let reqs = p.requests();
+    assert_eq!(reqs.len(), 1);
+    let body = &reqs[0].1;
+    assert_eq!((&body["model"], &body["max_tokens"], &body["reasoning"]), (&json!("test/model"), &json!(500), &json!({"effort": "low"})));
+    assert_eq!(
+        body["response_format"],
+        json!({"type": "json_schema", "json_schema": {"name": "pick", "strict": true, "schema":
+            {"type": "object", "properties": {"ids": {"type": "array", "items": {"type": "string"}}}, "required": ["ids"], "additionalProperties": false}}})
+    );
+    assert_eq!(body["messages"][0], json!({"role": "system", "content": PICK_SYSTEM}));
+    let sent = body["messages"][1]["content"].as_str().unwrap();
+    assert_eq!(
+        sent,
+        "## Memories\n\
+         - m1: alpha-walrus-encoding: The walrus export writes UTF-16\n\
+         - m2: bravo-walrus-header: The walrus export puts the header row first\n\
+         - m3: charlie-kiwi-checksum: The kiwi importer drops rows without a checksum\n\n\
+         ## Session so far, newest turn first\n\
+         [user] set up the walrus export, CI pushes with [REDACTED:github-pat]\n[assistant] Set it up.\n[tool] Bash cargo test walrus\n\n\
+         ## Prompt\nwhy does the walrus export drop the header row today",
+        "the transcript's copy of the prompt is left out"
+    );
+    let s: Value = serde_json::from_str(&fs::read_to_string(w.home.join(".openrecall/sessions/S.json")).unwrap()).unwrap();
+    assert_eq!(s["picks"], 1);
+}
+
+#[test]
+fn the_pick_input_fits_32000_characters_and_cuts_the_oldest_turns_first() {
+    let w = World::new("pick-size");
+    w.branch("feat/x");
+    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    w.memory(&repo, "walrus-header", "decision", "", "The walrus export puts the header row first", "The header row comes first.");
+    let p = Provider::start(vec![answer(json!({"ids": []})), answer(json!({"ids": []}))]);
+    picks_on(&w, &p);
+    let mut lines = vec![];
+    for i in 0..40 {
+        lines.push(user(&format!("turn-{i:02} asks about the walrus export")));
+        lines.push(said(&format!("turn-{i:02} answers. {}", "The walrus export is fine. ".repeat(40)), None));
+    }
+    transcript(&w, "S", &lines);
+    prompt(&w, "S", "p1", "what changed in the walrus export header since yesterday");
+    let line = pick_line(&w, "p1");
+    assert_eq!((&line["memory"], &line["skip"]), (&Value::Null, &Value::Null), "{line}");
+    let body = &p.requests()[0].1;
+    let sent = body["messages"][1]["content"].as_str().unwrap();
+    let chars = PICK_SYSTEM.chars().count() + sent.chars().count();
+    assert!((30_000..=32_000).contains(&chars), "{chars} characters");
+    let (newest, older) = (sent.find("[user] turn-39").unwrap(), sent.find("[user] turn-38").unwrap());
+    assert!(newest < older, "newest turn first");
+    assert!(!sent.contains("turn-00 "), "the oldest turns are cut");
+
+    transcript(&w, "S", &[user("turn-big asks"), said(&"Walrus. ".repeat(5000), None)]);
+    prompt(&w, "S", "p3", "what changed in the walrus export header since yesterday");
+    pick_line(&w, "p3");
+    let sent = p.requests()[1].1["messages"][1]["content"].as_str().unwrap().to_string();
+    assert_eq!(PICK_SYSTEM.chars().count() + sent.chars().count(), 32_000, "the newest turn alone is cut to the room left");
+    assert!(sent.contains("\n[user] turn-big asks\n[assistant] Walrus. ") && sent.ends_with("\n\n## Prompt\nwhat changed in the walrus export header since yesterday"));
+
+    let w = World::new("pick-big");
+    w.branch("feat/x");
+    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    for i in 0..250 {
+        w.memory(&repo, &format!("note-{i:03}"), "decision", "", &format!("Note {i:03}: {}", "the walrus export keeps one rule here. ".repeat(3)), "Body.");
+    }
+    let p = Provider::start(vec![answer(json!({"ids": ["m1"]}))]);
+    picks_on(&w, &p);
+    prompt(&w, "S", "p2", "what changed in the walrus export header since yesterday");
+    let line = pick_line(&w, "p2");
+    assert_eq!((&line["skip"], &line["memory"], &line["tokens_in"]), (&json!("too_big"), &Value::Null, &json!(0)), "{line}");
+    assert!(p.requests().is_empty(), "no call");
+    assert!(!pick_file(&w, "S", "p2.running").exists() && !pick_file(&w, "S", "p2.json").exists());
+    let s: Value = serde_json::from_str(&fs::read_to_string(w.home.join(".openrecall/sessions/S.json")).unwrap()).unwrap();
+    assert_eq!(s["picks"], Value::Null, "a too_big input does not count");
+}
+
+#[test]
+fn a_prompt_makes_at_most_one_call_and_a_session_ten() {
+    let w = World::new("pick-cap");
+    w.branch("feat/x");
+    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    w.memory(&repo, "walrus-header", "decision", "", "The walrus export puts the header row first", "The header row comes first.");
+    let not_json = (200, json!({"choices": [{"finish_reason": "stop", "message": {"content": "m1, I think"}}]}));
+    let mut replies = vec![(500, json!({"error": {"code": "server_error"}})), not_json, answer(json!({"ids": ["m9"]}))];
+    replies.extend((0..8).map(|_| answer(json!({"ids": []}))));
+    let p = Provider::start(replies);
+    picks_on(&w, &p);
+    transcript(&w, "S", &[]);
+    for n in 1..=10 {
+        let id = format!("p{n}");
+        prompt(&w, "S", &id, "what changed in the walrus export header since yesterday");
+        let line = pick_line(&w, &id);
+        assert_eq!(p.requests().len(), n, "one call for prompt {n}, never a retry: {line}");
+        let want = match n {
+            1 => json!({"skip": "error", "error": "http 500 server_error", "memory": null}),
+            2 => json!({"skip": "error", "error": "invalid json", "memory": null}),
+            _ => json!({"skip": null, "memory": null}),
+        };
+        for (k, v) in want.as_object().unwrap() {
+            assert_eq!(&line[k], v, "{k} of prompt {n}: {line}");
+        }
+        assert!(!pick_file(&w, "S", &format!("{id}.json")).exists(), "no result for prompt {n}");
+        assert!(!pick_file(&w, "S", &format!("{id}.running")).exists());
+    }
+    prompt(&w, "S", "p11", "what changed in the walrus export header since yesterday");
+    w.run(&["pick", "--job"], &json!({"session_id": "S", "prompt_id": "p12", "cwd": w.folder, "prompt": "walrus export header"}).to_string());
+    assert_eq!(pick_line(&w, "p12")["skip"], "cap", "the job keeps the cap too");
+    assert!(log_of(&w, "pick").iter().all(|l| l["prompt_id"] != "p11"), "the 11th prompt starts no job");
+    assert_eq!(p.requests().len(), 10);
+}
+
+#[test]
+fn own_expired_rot_and_echo_drop_a_pick() {
+    let w = World::new("pick-drop");
+    w.branch("feat/x");
+    fs::create_dir_all(w.folder.join(".scratch/x")).unwrap();
+    fs::write(w.folder.join(".scratch/x/map.md"), "").unwrap();
+    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    let old = "source: E 2026-01-02T03:04:05Z\n";
+    w.memory(&repo, "a-own", "decision", "source: S 2026-01-02T03:04:05Z\n", "This session wrote it", "The walrus export runs nightly.");
+    w.memory(&repo, "b-expired", "state", &format!("{old}expires: 2020-01-01\n"), "An old state", "PR #345 waits for review.");
+    w.memory(&repo, "c-rot", "pointer", old, "The walrus code", "The walrus export lives in src/gone.py.");
+    w.memory(&repo, "d-echo", "pointer", old, "The walrus map", "The walrus migration map lives in .scratch/x/map.md");
+    let p = Provider::start(["m1", "m2", "m3", "m4"].iter().map(|m| answer(json!({"ids": [m]}))).collect());
+    picks_on(&w, &p);
+    transcript(&w, "S", &[]);
+    for (n, (stem, reason)) in [("a-own", "own"), ("b-expired", "expired"), ("c-rot", "rot"), ("d-echo", "echo")].iter().enumerate() {
+        let id = format!("p{n}");
+        prompt(&w, "S", &id, "read .scratch/x/map.md and plan the walrus migration");
+        let line = pick_line(&w, &id);
+        assert_eq!((&line["memory"], &line["skip"]), (&json!(format!("github.com/someone/app/{stem}")), &json!(reason)), "{line}");
+        assert!(!pick_file(&w, "S", &format!("{id}.json")).exists() && !pick_file(&w, "S", &format!("{id}.running")).exists(), "{reason}");
+    }
+}
+
+#[test]
+fn nothing_starts_with_picks_off_or_without_a_plain_prompt_id() {
+    let w = World::new("pick-off");
+    w.branch("feat/x");
+    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    w.memory(&repo, "walrus-header", "decision", "", "The walrus export puts the header row first", "The header row comes first.");
+    let p = Provider::start(vec![answer(json!({"ids": []}))]);
+    picks_on(&w, &p);
+    transcript(&w, "S", &[]);
+    let home = w.home.join(".openrecall");
+    let toml = fs::read_to_string(home.join("extract.toml")).unwrap();
+    let ask = "what changed in the walrus export header since yesterday";
+    for (n, settings) in [toml.replace("pick = true\n", ""), toml.replace("pick = true", "pick = false")].iter().enumerate() {
+        fs::write(home.join("extract.toml"), settings).unwrap();
+        prompt(&w, "S", &format!("off{n}"), ask);
+    }
+    fs::write(home.join("extract.toml"), &toml).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(home.join("api-key"), fs::Permissions::from_mode(0o644)).unwrap();
+    prompt(&w, "S", "off2", ask);
+    fs::set_permissions(home.join("api-key"), fs::Permissions::from_mode(0o600)).unwrap();
+    w.hook(&["recall"], "S", json!({"prompt": ask}));
+    prompt(&w, "S", "../off3", ask);
+    prompt(&w, "S", "off4", "<task-notification>done</task-notification>");
+    prompt(&w, "S", "off5", "fix it now");
+    w.hook(&["recall"], "S", json!({"prompt": ask, "prompt_id": "off6", "agent_id": "a1"}));
+
+    prompt(&w, "S", "on", ask);
+    pick_line(&w, "on");
+    std::thread::sleep(Duration::from_millis(300));
+    let started: Vec<Value> = log_of(&w, "pick").iter().map(|l| l["prompt_id"].clone()).collect();
+    assert_eq!(started, [json!("on")], "only the prompt with picks on and a plain prompt_id starts a job");
+    assert_eq!(p.requests().len(), 1);
+}
+
+fn session_of(w: &World, sid: &str) -> Value {
+    serde_json::from_str(&fs::read_to_string(w.home.join(".openrecall/sessions").join(format!("{sid}.json"))).unwrap()).unwrap()
+}
+
+#[test]
+fn the_first_tool_call_after_a_pick_delivers_it() {
+    let w = World::new("deliver");
+    w.branch("feat/x");
+    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    let source = "source: E 2026-01-02T03:04:05Z\n";
+    w.memory(&repo, "kiwi-checksum", "gotcha", source, "The kiwi importer drops rows without a checksum", "The kiwi importer drops every row that has no checksum.");
+    w.memory(&repo, "walrus-header", "decision", source, "The walrus export puts the header row first", "The walrus export puts the header row first, before any data row.");
+    let p = Provider::start(vec![answer(json!({"ids": ["m2"]}))]);
+    picks_on(&w, &p);
+    transcript(&w, "S", &[]);
+    prompt(&w, "S", "p1", "why does the walrus export drop the header row today");
+    pick_line(&w, "p1");
+
+    let out = w.hook(&["deliver"], "S", json!({"prompt_id": "p1", "tool_name": "Bash"}));
+    let address = "github.com/someone/app/walrus-header";
+    assert_eq!(
+        serde_json::from_str::<Value>(out.trim()).unwrap(),
+        json!({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext":
+            "Recalled memories from earlier sessions (OpenRecall). They reflect what was true when written. Full text: \
+             mcp__plugin_openrecall_openrecall__recall with the address.\n- decision 2026-01-02 \
+             github.com/someone/app/walrus-header: The walrus export puts the header row first, before any data row."}})
+    );
+    assert_eq!(session_of(&w, "S")["ledger"], json!([address]));
+    let lines = log_of(&w, "deliver");
+    assert_eq!(lines.len(), 1);
+    assert_eq!((&lines[0]["session"], &lines[0]["prompt_id"], &lines[0]["memory"]), (&json!("S"), &json!("p1"), &json!(address)));
+    assert!(lines[0]["ms"].is_u64() && lines[0]["at"].is_u64(), "{}", lines[0]);
+    assert!(!pick_file(&w, "S", "p1.json").exists() && !pick_file(&w, "S", "p1.taken").exists());
+
+    assert_eq!(w.hook(&["deliver"], "S", json!({"prompt_id": "p1", "tool_name": "Read"})), "", "a later tool call finds nothing");
+    assert_eq!(log_of(&w, "deliver").len(), 1);
+}
+
+const WALRUS: &str = "github.com/someone/app/walrus-header";
+
+/// A pick's result file, written by hand in the job's format.
+fn ready(w: &World, sid: &str, id: &str) {
+    let path = pick_file(w, sid, &format!("{id}.json"));
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, json!({"address": WALRUS, "text": format!("Recalled.\n- decision 2026-01-02 {WALRUS}: Header first.")}).to_string()).unwrap();
+}
+
+#[test]
+fn the_session_ledger_drops_a_pick_that_recall_already_injected() {
+    let w = World::new("deliver-ledger");
+    picks_on(&w, &Provider::start(vec![]));
+    ready(&w, "S", "p1");
+    fs::create_dir_all(w.home.join(".openrecall/sessions")).unwrap();
+    fs::write(w.home.join(".openrecall/sessions/S.json"), json!({"ledger": [WALRUS]}).to_string()).unwrap();
+
+    assert_eq!(w.hook(&["deliver"], "S", json!({"prompt_id": "p1"})), "");
+    let drops = log_of(&w, "pick_drop");
+    assert_eq!(drops.len(), 1);
+    assert_eq!(
+        (&drops[0]["session"], &drops[0]["prompt_id"], &drops[0]["memory"], &drops[0]["reason"]),
+        (&json!("S"), &json!("p1"), &json!(WALRUS), &json!("ledger"))
+    );
+    assert!(log_of(&w, "deliver").is_empty());
+    assert_eq!(session_of(&w, "S")["ledger"], json!([WALRUS]));
+    assert!(!pick_file(&w, "S", "p1.json").exists() && !pick_file(&w, "S", "p1.taken").exists());
+}
+
+#[test]
+fn parallel_tool_hooks_of_one_turn_deliver_the_pick_once() {
+    let w = World::new("deliver-race");
+    picks_on(&w, &Provider::start(vec![]));
+    let input = json!({"session_id": "S", "cwd": w.folder, "prompt_id": "p1"}).to_string();
+    for round in 0..3 {
+        ready(&w, "S", "p1");
+        fs::remove_file(w.home.join(".openrecall/sessions/S.json")).ok();
+        let mut hooks: Vec<Child> = (0..8).map(|_| w.spawn(&["deliver"])).collect();
+        for h in &mut hooks {
+            h.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+        }
+        let outs: Vec<String> = hooks
+            .into_iter()
+            .map(|h| String::from_utf8(h.wait_with_output().unwrap().stdout).unwrap())
+            .collect();
+        assert_eq!(outs.iter().filter(|o| !o.is_empty()).count(), 1, "round {round}: {outs:?}");
+        assert_eq!(session_of(&w, "S")["ledger"], json!([WALRUS]));
+        assert_eq!(log_of(&w, "deliver").len(), round + 1);
+    }
+    assert!(log_of(&w, "pick_drop").is_empty());
+}
+
+#[test]
+fn nothing_is_delivered_in_a_subagent_for_another_prompt_or_with_picks_off() {
+    let w = World::new("deliver-none");
+    picks_on(&w, &Provider::start(vec![]));
+    ready(&w, "S", "p1");
+    for extra in [json!({"prompt_id": "p1", "agent_id": "a1"}), json!({"prompt_id": "p2"}), json!({})] {
+        assert_eq!(w.hook(&["deliver"], "S", extra.clone()), "", "{extra}");
+    }
+    let toml = w.home.join(".openrecall/extract.toml");
+    fs::write(&toml, fs::read_to_string(&toml).unwrap().replace("pick = true", "pick = false")).unwrap();
+    assert_eq!(w.hook(&["deliver"], "S", json!({"prompt_id": "p1"})), "", "picks off");
+    assert!(pick_file(&w, "S", "p1.json").exists());
+    assert!(!w.home.join(".openrecall/log/openrecall.jsonl").exists(), "nothing to do writes no log line");
+    assert!(!w.home.join(".openrecall/sessions/S.json").exists());
+}
+
+#[test]
+fn the_stop_hook_drops_what_the_turn_left_and_session_end_deletes_the_folder() {
+    let w = World::new("deliver-stop");
+    w.branch("feat/x");
+    ready(&w, "S", "p1");
+    fs::write(pick_file(&w, "S", "p2.running"), "").unwrap();
+    ready(&w, "T", "p1");
+    transcript(&w, "S", &[user("plan the walrus export"), said("ok", None)]);
+    w.hook(&["capture"], "S", json!({"transcript_path": w.root.join("S.jsonl"), "last_assistant_message": "ok"}));
+
+    let mut drops = log_of(&w, "pick_drop");
+    drops.sort_by_key(|l| l["prompt_id"].to_string());
+    for l in &mut drops {
+        assert!(l.as_object_mut().unwrap().remove("at").unwrap().is_u64());
+    }
+    assert_eq!(
+        drops,
+        [
+            json!({"event": "pick_drop", "session": "S", "prompt_id": "p1", "memory": WALRUS, "reason": "no_tool_call"}),
+            json!({"event": "pick_drop", "session": "S", "prompt_id": "p2", "memory": null, "reason": "late"}),
+        ]
+    );
+    assert!(!pick_file(&w, "S", "p1.json").exists() && !pick_file(&w, "S", "p2.running").exists());
+    assert!(pick_file(&w, "T", "p1.json").exists(), "another session's pick stays");
+
+    ready(&w, "S", "p3");
+    fs::write(pick_file(&w, "S", "p4.running"), "").unwrap();
+    w.hook(&["extract"], "S", json!({}));
+    assert!(!pick_file(&w, "S", "").exists(), "SessionEnd deletes the session's folder");
+    assert!(pick_file(&w, "T", "p1.json").exists());
+}
