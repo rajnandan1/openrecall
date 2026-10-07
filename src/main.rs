@@ -56,6 +56,7 @@ fn run(args: &[String], started: u128) {
         ["extract"] => extract_hook(),
         ["extract", "--job"] => extract::work(),
         ["pick", "--job"] => pick::job(started),
+        ["deliver"] => pick::deliver(started),
         ["update", "--job"] => update::job(),
         _ => return,
     };
@@ -445,10 +446,11 @@ fn route(
     ))
 }
 
-/// Stop: hand the turn to a detached writer and return at once (tickets 01 and 06).
+/// Stop: drop the turn's picks, then hand the turn to a detached writer and return at once (tickets 01 and 06). The
+/// picks go first, in the hook itself, so the next prompt's job cannot race them.
 fn capture_hook() -> Result<()> {
     let mut job = read_input()?;
-    session_id(&job)?;
+    pick::end_turn(&session_id(&job)?);
     let transcript = job["transcript_path"].as_str().unwrap_or("").to_string();
     job["transcript_len"] = json!(fs::metadata(&transcript).map_or(0, |m| m.len()));
     detach(&["capture", "--job"], Stdio::piped())?
@@ -459,10 +461,12 @@ fn capture_hook() -> Result<()> {
     Ok(())
 }
 
-/// SessionEnd: mark the session ended and start the extraction worker, then return (ticket 17).
+/// SessionEnd: delete the session's picks, mark it ended and start the extraction worker, then return (ticket 17).
 fn extract_hook() -> Result<()> {
     let input = read_input()?;
-    extract::mark_ended(&session_id(&input)?, true)?;
+    let sid = session_id(&input)?;
+    let _ = fs::remove_dir_all(pick::dir(&sid));
+    extract::mark_ended(&sid, true)?;
     detach(&["extract", "--job"], Stdio::null())?;
     Ok(())
 }
@@ -741,6 +745,28 @@ mod tests {
         let plugin: serde_json::Value =
             serde_json::from_str(include_str!("../plugin/.claude-plugin/plugin.json")).unwrap();
         assert_eq!(plugin["version"], env!("CARGO_PKG_VERSION"));
+    }
+
+    /// Spec 3.10: before Claude Code 2.1.257 an event it does not know turns off every hook of the plugin.
+    #[test]
+    fn hooks_json_names_only_known_events_and_the_tool_hook() {
+        let hooks: serde_json::Value =
+            serde_json::from_str(include_str!("../plugin/hooks/hooks.json")).unwrap();
+        let mut events: Vec<&str> = hooks["hooks"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        events.sort();
+        assert_eq!(
+            events,
+            ["PostToolUse", "SessionEnd", "SessionStart", "Stop", "UserPromptSubmit"]
+        );
+        assert_eq!(
+            hooks["hooks"]["PostToolUse"],
+            serde_json::json!([{"hooks": [{"type": "command", "command": "openrecall", "args": ["deliver"], "timeout": 5}]}])
+        );
     }
 
     #[test]
