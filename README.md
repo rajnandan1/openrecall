@@ -304,7 +304,7 @@ A pick is the one memory, or none, that an LLM chooses for your prompt. The LLM 
 
 The prompt hook is the hook that Claude Code runs when you send a prompt. On each prompt that recall does not skip, the prompt hook starts a background job. The job sends one request to the provider. The request holds three parts:
 
-- Every memory that recall searches for this repo, one line each, with its name and its description.
+- The memories that recall searches for this repo, one line each, with its name and its description. When there are 50 memories or fewer, the request holds all of them. When there are more, it holds the 50 that best match the words of your prompt and of the newest turn.
 - The short form of the session, newest turn first. It is the same short form that extraction sends: your prompts, Claude's text, and one line per tool call, with no tool output. OpenRecall replaces each secret in it with `[REDACTED:<rule-id>]` first.
 - Your prompt.
 
@@ -335,7 +335,7 @@ To turn picks off, remove the line or change it to `pick = false`. Without a con
 
 OpenRecall logs each pick to `~/.openrecall/log/openrecall.jsonl`:
 
-- A `pick` line holds the tokens and the cost of the call, and the picked memory. If OpenRecall made no call or dropped the pick, the line also gives the reason.
+- A `pick` line holds the tokens and the cost of the call, and the picked memory. It also holds two counts: `memories` is the number of memories that recall searches for this repo, and `listed` is the number that went into the request. If OpenRecall made no call or dropped the pick, the line also gives the reason.
 - A `deliver` line shows that a pick reached Claude.
 - A `pick_drop` line shows that a pick did not reach Claude, and why.
 
