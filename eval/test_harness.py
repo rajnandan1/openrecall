@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 import glob
+import http.server
 import json
 import os
 import random
+import re
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timezone
 
@@ -85,8 +88,8 @@ class HarnessTest(unittest.TestCase):
         with open(os.path.join(harness.EVAL, "appendix-a.jsonl"), "w") as fh:
             fh.write(json.dumps(dict(id="A00", session="headless", at="2026-01-05T11:00:00Z")) + "\n")
 
-    def report(self, binary):
-        harness.report(binary=binary)
+    def report(self, binary, **kw):
+        harness.report(binary=binary, **kw)
         [path] = glob.glob(os.path.join(harness.EVAL, "runs", "*", "report.md"))
         with open(path) as fh:
             text = fh.read()
@@ -129,6 +132,19 @@ class HarnessTest(unittest.TestCase):
                     "Late pushes, after a turn on the push's branch edited a file or ran `git commit`: 0% (0/3,",
                     "Live pushes by route, in the recall log: none.",
                     "At real prompt 1: 0, 2: 3, 3: 0, later: 0.", "Binary errors in the replay: none."):
+            self.assertIn(row, report)
+        self.assertNotIn("picks on", report)
+        home = os.path.dirname(harness.EVAL)
+        with open(os.path.join(home, "extract.toml"), "w") as fh:
+            fh.write('base_url = "http://127.0.0.1:9"\nmodel = "made-up"\n')
+        with open(os.path.join(home, "api-key"), "w") as fh:
+            fh.write("made-up-key")
+        report = self.report(harness.BINARY, picks=True)
+        for row in ("process start included, with picks on: each prompt starts "
+                    "the pick job, against a made-up provider that cannot answer: p50",
+                    "Picks with a memory: 0; dropped: none; injected: 0.", "Errors: 4 (4 × curl exit 7).",
+                    "Cost of the pick lines: $0.00.",
+                    "searched cases, process start included, with picks on: p50"):
             self.assertIn(row, report)
 
     def test_level_two_metrics(self):
@@ -338,8 +354,8 @@ class HarnessTest(unittest.TestCase):
             with open(fact) as fh:
                 self.assertEqual("expires:" in fh.read(), kept)
 
-    @unittest.skipUnless(os.path.exists(harness.BINARY), "needs cargo build --release")
-    def test_replay_cases_through_the_binary(self):
+    def checkout_with_memories(self):
+        """A repo folder with `src/export.py`, and its built-in memory: one export fact and 40 fillers."""
         tmp = tempfile.mkdtemp(dir="/var/tmp")
         os.makedirs(os.path.join(tmp, ".git"))
         with open(os.path.join(tmp, ".git", "config"), "w") as fh:
@@ -358,6 +374,11 @@ class HarnessTest(unittest.TestCase):
             text = "The %s %s runs the %s before the %s step." % tuple(bank[(i * 7 + k * 5) % len(bank)] for k in range(4))
             with open(os.path.join(mem, "filler-%d.md" % i), "w") as fh:
                 fh.write("---\nname: filler-%d\ndescription: %s\nmetadata:\n  type: project\n---\n\n%s\n" % (i, text, text))
+        return tmp, mem
+
+    @unittest.skipUnless(os.path.exists(harness.BINARY), "needs cargo build --release")
+    def test_replay_cases_through_the_binary(self):
+        tmp, mem = self.checkout_with_memories()
         later = dict(id="L1", session="new", at="2030-01-01T00:00:00Z", prompt="why do exports fail on empty rows in ABC-12",
                      repo="github.com/someone/app", branch="feat-a", folder=tmp)
         before = dict(later, id="L2", at="2000-01-01T00:00:00Z")
@@ -376,6 +397,62 @@ class HarnessTest(unittest.TestCase):
                          "a gone folder still finds the repo's memory directory through another case")
         self.assertEqual(results[3]["skipped"], "empty-args")
         self.assertFalse(any(r["errors"] for r in results))
+
+    @unittest.skipUnless(os.path.exists(harness.BINARY), "needs cargo build --release")
+    def test_picks_through_the_binary(self):
+        tmp, mem = self.checkout_with_memories()
+        prompt = "why do exports fail on empty rows in ABC-12"
+        with open(os.path.join(harness.PROJECTS, "-w-app", "picked.jsonl"), "w") as fh:
+            fh.writelines(json.dumps(o) + "\n" for o in (
+                user("2030-01-01T00:00:00Z", "plan the export fix for the empty rows", "feat-a"),
+                said("2030-01-01T00:01:00Z", "The null check runs late.", "feat-a", "p1"),
+                user("2030-01-01T00:10:00Z", prompt, "feat-a"),
+                said("2030-01-01T00:11:00Z", "It reads the rows first.", "feat-a", "p2")))
+        sent = []
+
+        class Provider(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_POST(self):
+                text = json.loads(self.rfile.read(int(self.headers["Content-Length"])))["messages"][1]["content"]
+                sent.append(text)
+                name = "export-empty-rows" if text.endswith("again") else "filler-0"
+                ids = re.findall(r"^- (m\d+): %s:" % name, text, re.M)
+                reply = json.dumps(dict(choices=[dict(finish_reason="stop", message=dict(content=json.dumps(dict(ids=ids))))],
+                                        usage=dict(prompt_tokens=900, completion_tokens=12, cost=0.01))).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(reply)))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(reply)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Provider)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.addCleanup(setattr, harness, "PICK_WAIT", harness.PICK_WAIT)
+        harness.PICK_WAIT = 30
+        case = dict(id="P1", session="picked", at="2030-01-01T00:10:00Z", prompt=prompt, repo="github.com/someone/app",
+                    branch="feat-a", folder=tmp)
+        cases = [case, dict(case, id="P2", prompt=prompt + " again"), dict(case, id="P3", prompt="/implement")]
+        toml = 'base_url = "http://127.0.0.1:%d"\npick = false\nmodel = "made-up"\n' % server.server_address[1]
+        results = harness.replay_cases(harness.BINARY, cases, harness.mains_of(cases), (toml, "made-up-key"))
+        address = "builtin/%s/" % harness.slug(tmp)
+        with open(os.path.join(mem, "filler-0.md")) as fh:
+            self.assertEqual(results[0]["picked"], [dict(address=address + "filler-0", text_hash=harness.fnv(fh.read()))])
+        self.assertEqual((results[0]["pick"]["memory"], results[0]["pick"]["cost"]), (address + "filler-0", 0.01))
+        self.assertEqual(results[0]["injected"], [address + "export-empty-rows"])
+        self.assertEqual(results[1]["picked"], [], "recall injected the picked memory first")
+        self.assertEqual((results[1]["pick"]["skip"], results[1]["pick"]["reason"]), (None, "ledger"))
+        self.assertIsNone(results[2].get("pick"), "a skipped prompt starts no job")
+        self.assertEqual(len(sent), 2)
+        self.assertIn("## Session so far, newest turn first\n[user] plan the export fix for the empty rows\n"
+                      "[assistant] The null check runs late.\n\n## Prompt\n" + prompt, sent[0])
+        self.assertNotIn("It reads the rows first", sent[0], "the transcript stops before the case's prompt")
 
     def test_a_task_that_moves_to_a_sibling_repo(self):
         header = ("Handoff record for branch feat/x, last written 2026-01-05T10:01:00Z by an earlier session on this task "
@@ -397,6 +474,64 @@ class HarnessTest(unittest.TestCase):
         self.assertTrue(harness.push_is_right(web, dict(aliases={"ABC-12"}, branch="feat/x")))
         self.assertIsNone(harness.task_key(by_sid["shapes"], api), "a false shape pairs nothing")
         self.assertEqual(harness.tickets_in("ABC-12 in docs/handoff-def-34.md, not Ghi-56"), {"ABC-12", "DEF-34"})
+
+    def test_a_pick_is_one_more_injection(self):
+        mem = {}
+        for name, about in (("m", "Exports fail on empty rows"), ("n", "The export job reads the null check first"),
+                            ("o", "Release notes go out on Monday")):
+            mem[name] = os.path.join(harness.EVAL, name + ".md")
+            with open(mem[name], "w") as fh:
+                fh.write("---\nname: %s\ndescription: %s\n---\n\n%s.\n" % (name, about, about))
+        cand = lambda a, h: dict(address=a, score=3.0, text_hash=h, rot=None)
+        result = lambda cands, injected: dict(candidates=cands, injected=injected, memories=dict(mem), index_size=20)
+        line = lambda memory: dict(event="pick", session="s", prompt_id="p", memory=memory, skip=None, cost=0.03)
+        new, ledger, below = result([cand("m", "hm")], ["m"]), result([cand("m", "hm")], ["m"]), result([cand("o", "ho")], [])
+        harness.take_pick(new, line("n"), "n")
+        harness.take_pick(ledger, line("m"), "m")
+        harness.take_pick(below, line("o"), "o")
+        with open(mem["n"]) as fh:
+            self.assertEqual(new["picked"], [dict(address="n", text_hash=harness.fnv(fh.read()))],
+                             "a memory that is no candidate is hashed from its file")
+        self.assertEqual(ledger["picked"], [], "recall injected it first")
+        self.assertEqual((ledger["pick"]["skip"], ledger["pick"]["reason"]), (None, "ledger"), "the pick_drop line's name")
+        self.assertEqual(below["picked"], [dict(address="o", text_hash="ho")], "a candidate under the gate keeps its hash")
+        cases = [dict(id="C%d" % i, session="s", at="2026-01-05T10:40:00Z", prompt="fix the export") for i in (1, 2, 3)]
+        results = [new, ledger, below]
+        asked = []
+
+        def label(c, todo, memories, earlier):
+            asked.append((c["id"], [x["address"] for x in todo]))
+            return [dict(case=c["id"], address=x["address"], text_hash=x["text_hash"], judge="test", at="", note={},
+                         label="noise" if x["address"] == "o" else "useful") for x in todo]
+
+        labels = harness.label_candidates(cases, results, {}, label)
+        self.assertEqual(asked, [("C1", ["m", "n"]), ("C2", ["m"]), ("C3", ["o"])], "each memory is labeled once")
+        m = harness.gate_metrics(cases, results, labels)
+        self.assertEqual((m["injections"], m["useful"], m["cases"]), (2, 2, 2), "without the picks")
+        m = harness.gate_metrics(cases, results, labels, picks=True)
+        self.assertEqual((m["injections"], m["useful"], m["cases"], m["false"]), (4, 3, 3, 1), "the ledger drop counts once")
+
+        for job in (dict(line("o"), skip="echo"), dict(line(None), skip="too_big", cost=0), dict(line(None), cost=0.02),
+                    dict(line(None), skip="error", error="http 500", cost=0)):
+            results.append(result([], []))
+            harness.take_pick(results[-1], job, None)
+        results.append(result([], []))
+        cases += [dict(cases[0], id="C%d" % i) for i in range(4, 9)]
+        text = "\n".join(harness.pick_lines(cases, results, labels))
+        for part in ("At the binary's gate with the picks (spec 5.2): injections 4 on 3 cases (picks 2), useful 3 (picks 1), "
+                     "precision 75% (3/4,", "Goals: precision 0.67 or more, useful 13 or more. Without the picks: "
+                     "injections 2, useful 2, precision 100% (2/2,",
+                     "Pick jobs started: 7. Picks with a memory: 4; dropped: echo 1, ledger 1; injected: 2. No memory "
+                     "picked: 1. Skips: too_big 1. Errors: 1 (1 × http 500). Cost of the pick lines: $0.14."):
+            self.assertIn(part, text)
+
+    def test_report_args(self):
+        self.assertEqual(harness.report_args([]), (harness.BINARY, False), "picks are off by default")
+        self.assertEqual(harness.report_args(["--picks"]), (harness.BINARY, True))
+        self.assertEqual(harness.report_args(["--binary", "x/openrecall"]), (os.path.abspath("x/openrecall"), False))
+        self.assertEqual(harness.report_args(["--binary", "x/openrecall", "--picks"]), (os.path.abspath("x/openrecall"), True))
+        for wrong in (["--pick"], ["--picks", "--picks"], ["--binary"], ["--binary", "--picks"], ["--picks", "--binary", "x"]):
+            self.assertIsNone(harness.report_args(wrong), wrong)
 
     def test_rules(self):
         edit, commit = ("Edit", {}), ("Bash", dict(command="git -C /w/app commit -m x"))
