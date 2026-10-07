@@ -137,11 +137,9 @@ impl World {
 
     /// The route of each push to the session, in order, from the log.
     fn routes(&self, sid: &str) -> Vec<String> {
-        fs::read_to_string(self.home.join(".openrecall/log/openrecall.jsonl"))
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-            .filter(|e| e["event"] == "pushed" && e["session"] == sid)
+        log_of(self, "pushed")
+            .into_iter()
+            .filter(|e| e["session"] == sid)
             .map(|e| e["how"].as_str().unwrap_or("").to_string())
             .collect()
     }
@@ -966,7 +964,7 @@ fn a_prompt_during_the_capture_writer_keeps_both_updates() {
         assert!(child.wait_with_output().unwrap().status.success());
     }
 
-    let s: Value = serde_json::from_str(&fs::read_to_string(w.home.join(".openrecall/sessions/S.json")).unwrap()).unwrap();
+    let s = session_of(&w, "S");
     let mut ledger: Vec<&str> = s["ledger"].as_array().unwrap().iter().map(|a| a.as_str().unwrap()).collect();
     ledger.sort();
     assert_eq!(ledger, [
@@ -1447,8 +1445,7 @@ fn a_pick_that_passes_writes_its_result_for_the_tool_hook() {
          ## Prompt\nwhy does the walrus export drop the header row today",
         "the transcript's copy of the prompt is left out"
     );
-    let s: Value = serde_json::from_str(&fs::read_to_string(w.home.join(".openrecall/sessions/S.json")).unwrap()).unwrap();
-    assert_eq!(s["picks"], 1);
+    assert_eq!(session_of(&w, "S")["picks"], 1);
 }
 
 #[test]
@@ -1496,8 +1493,7 @@ fn the_pick_input_fits_32000_characters_and_cuts_the_oldest_turns_first() {
     assert_eq!((&line["skip"], &line["memory"], &line["tokens_in"]), (&json!("too_big"), &Value::Null, &json!(0)), "{line}");
     assert!(p.requests().is_empty(), "no call");
     assert!(!pick_file(&w, "S", "p2.running").exists() && !pick_file(&w, "S", "p2.json").exists());
-    let s: Value = serde_json::from_str(&fs::read_to_string(w.home.join(".openrecall/sessions/S.json")).unwrap()).unwrap();
-    assert_eq!(s["picks"], Value::Null, "a too_big input does not count");
+    assert_eq!(session_of(&w, "S")["picks"], Value::Null, "a too_big input does not count");
 }
 
 #[test]
