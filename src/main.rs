@@ -318,11 +318,10 @@ fn level2(
     kept.truncate(5);
     let (size, scores) = ix.scores(&terms, &kept)?;
     let mut lines = vec![];
+    let mut via = serde_json::Map::new();
     let mut chars = index::FRAME.chars().count();
-    for (c, _) in kept
-        .iter()
-        .zip(&scores)
-        .filter(|&(_, &score)| size >= index::MIN_ROWS && score >= index::GATE)
+    for (c, how) in index::gate(&kept, &scores, size, query)
+        .into_iter()
         .take(index::MAX_LINES)
     {
         let line = index::line(c, 0);
@@ -330,6 +329,7 @@ fn level2(
             break;
         }
         chars += line.chars().count() + 1;
+        via.insert(c.address.clone(), json!(how));
         lines.push((c, line));
     }
     for (c, line) in &mut lines {
@@ -349,7 +349,7 @@ fn level2(
         .collect();
     Ok((
         lines,
-        json!({"terms": terms.len(), "index_size": size, "candidates": candidates, "dropped": dropped}),
+        json!({"terms": terms.len(), "index_size": size, "candidates": candidates, "dropped": dropped, "via": via}),
     ))
 }
 
