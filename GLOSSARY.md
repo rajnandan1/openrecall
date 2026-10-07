@@ -171,7 +171,7 @@ How well a candidate matches a prompt, as a number that does not grow with the i
 _Avoid_: bm25 (that only orders the candidates), relevance, confidence
 
 **Threshold**:
-The number inside the gate. A candidate with a score below it is never injected.
+The number inside the gate. A candidate with a score below it is injected only through the identifier rule.
 _Avoid_: cutoff, gate (that is the rule)
 
 **Injection**:
