@@ -9,8 +9,7 @@ Reads Claude Code transcripts under ~/.claude/projects and writes only under ~/.
 {"id", "session", "at"} line per spec Appendix A prompt, `at` being the prompt line's timestamp.
 The report replays every session through the openrecall binary (default: target/release/openrecall) in a
 scratch world, then every frozen case for level 2, labeled by Jev through judge.py; without a binary it prints the
-baseline alone. `--picks` also runs the binary's pick job on every frozen case with the provider of extract.toml and
-api-key, which costs money (about $1.60 a run), and in the replay with a made-up provider that cannot answer.
+baseline alone. `--picks` also runs the pick job with the provider of extract.toml, about $1.60 a run.
 """
 import glob
 import json
@@ -380,8 +379,8 @@ def replay(binary, sessions, snapshot=(), picks=False):
     stand-in folder per worktree whose `.git` holds the origin URL, HEAD and refs, and each transcript copied turn by
     turn with its folder and home moved into the world. Returns what each session was pushed (real prompt number, text,
     the record's branch and aliases), recall timings in ms, the binary's log events, and for each (earlier, new) pair
-    in `snapshot` the earlier session's record as it stood when the new session started. `picks` turns picks on with
-    a made-up provider that cannot answer, so each prompt with a `prompt_id` starts the pick job at no cost (spec 5.4)."""
+    in `snapshot` the earlier session's record as it stood when the new session started. `picks` starts the pick job
+    on each prompt, against a provider that cannot answer (spec 5.4)."""
     tmp = scratch()
     home = os.path.join(tmp, "home")
     env = dict(HOME=home, OPENRECALL_HOME=os.path.join(home, ".openrecall"), CLAUDE_CODE_ENTRYPOINT="cli",
@@ -485,8 +484,6 @@ def replay(binary, sessions, snapshot=(), picks=False):
             for x, how in zip(xs, routes[sid]):
                 x["how"] = how
     finally:
-        # Each `handoff` starts a detached extraction worker, which finds no extract.toml here, or with picks no
-        # session that ended or went quiet, and exits.
         shutil.rmtree(tmp, ignore_errors=True)
     return pushes, timings, events, snaps
 
@@ -741,8 +738,7 @@ def replay_cases(binary, cases, mains, provider=None):
     case's origin and branch, the repo's main checkout linked in so the path check sees today's tree, a scratch home
     with the built-in memory files born before the prompt at the slug the binary computes, and OpenRecall's own
     facts with a `source` date before it. Returns one result per case: candidates, injections, drops, timing.
-    `provider`, the extract.toml text and api-key of a `--picks` run, turns picks on (spec 5.2): `recall` also gets a
-    `prompt_id` and the transcript before the prompt, and a case that no skip rule stopped waits for its pick job."""
+    `provider`, the extract.toml text and api-key, turns picks on (spec 5.2)."""
     tmp = scratch()
     orhome = os.environ.get("OPENRECALL_HOME") or os.path.expanduser("~/.openrecall")
     results = []
@@ -815,14 +811,13 @@ def replay_cases(binary, cases, mains, provider=None):
 
 
 def take_pick(r, line, address):
-    """Spec 5.2: the pick job's log `line` and the address of its result file (None without one) on a case's result.
-    A pick of an address `recall` injected is the tool hook's ledger drop. Any other pick is one more injection, in
-    `picked`, with the logged candidate's text hash, else its file's (07-proto.py hash_of())."""
+    """Spec 5.2: the pick job's log `line` and its result file's `address` (None without one) on a case's result. A
+    pick that `recall` injected is the tool hook's `ledger` drop; any other is one more injection, in `picked`."""
     r["pick"], r["picked"] = dict(line), []
     if address is None:
         return
     if address in r["injected"]:
-        r["pick"]["skip"] = "ledger"
+        r["pick"]["reason"] = "ledger"
         return
     hashes = {x["address"]: x["text_hash"] for x in r["candidates"]}
     if address not in hashes and address in r["memories"]:
@@ -1040,7 +1035,7 @@ def pick_lines(cases, results, labels):
     jobs = [r["pick"] for r in results if r.get("pick")]
     errors = [j for j in jobs if j.get("skip") == "error"]
     chosen = [j for j in jobs if j.get("memory") and j.get("skip") != "error"]
-    dropped = Counter(j["skip"] for j in chosen if j.get("skip"))
+    dropped = Counter(filter(None, (j.get("skip") or j.get("reason") for j in chosen)))
     skips = Counter(j["skip"] for j in jobs if not j.get("memory") and j.get("skip") not in (None, "error"))
     listed = lambda counts: ", ".join("%s %d" % kv for kv in sorted(counts.items())) or "none"
     return [
@@ -1270,7 +1265,7 @@ def report(now=None, binary=BINARY, label_fn=None, gate=None, dedupe_fn=None, pi
     """`label_fn(case, candidates, memories, earlier_prompts)` returns label rows (judge.label_case); None labels
     nothing new. `gate` is binary_gate()'s (threshold, minimum index size), printed beside the binary's results; the
     sweep keeps its minimum. `dedupe_fn` checks written facts (judge.dedupe_check); None checks nothing new. `picks`
-    runs the pick job on the frozen cases with the user's provider, and in the replay with one that cannot answer."""
+    runs the pick job too."""
     now = now or datetime.now(timezone.utc)
     earlier = sorted(d for d in glob.glob(os.path.join(EVAL, "runs", "*")) if os.path.isdir(d))
     since = datetime.strptime(os.path.basename(earlier[-1]), "%Y-%m-%dT%H%M%SZ").replace(tzinfo=timezone.utc) if earlier else None
@@ -1447,11 +1442,12 @@ def report_args(args):
 
 if __name__ == "__main__":
     cmd, rest = (sys.argv[1] if len(sys.argv) > 1 else ""), sys.argv[2:]
+    args = report_args(rest) if cmd == "report" else None
     if cmd == "freeze" and not rest:
         freeze()
-    elif cmd == "report" and report_args(rest):
+    elif args:
         import judge
-        binary, picks = report_args(rest)
+        binary, picks = args
         report(binary=binary, label_fn=judge.label_case, gate=binary_gate(), dedupe_fn=judge.dedupe_check, picks=picks)
     else:
         sys.exit(__doc__)

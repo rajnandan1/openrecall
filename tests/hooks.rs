@@ -137,11 +137,9 @@ impl World {
 
     /// The route of each push to the session, in order, from the log.
     fn routes(&self, sid: &str) -> Vec<String> {
-        fs::read_to_string(self.home.join(".openrecall/log/openrecall.jsonl"))
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-            .filter(|e| e["event"] == "pushed" && e["session"] == sid)
+        log_of(self, "pushed")
+            .into_iter()
+            .filter(|e| e["session"] == sid)
             .map(|e| e["how"].as_str().unwrap_or("").to_string())
             .collect()
     }
@@ -966,7 +964,7 @@ fn a_prompt_during_the_capture_writer_keeps_both_updates() {
         assert!(child.wait_with_output().unwrap().status.success());
     }
 
-    let s: Value = serde_json::from_str(&fs::read_to_string(w.home.join(".openrecall/sessions/S.json")).unwrap()).unwrap();
+    let s = session_of(&w, "S");
     let mut ledger: Vec<&str> = s["ledger"].as_array().unwrap().iter().map(|a| a.as_str().unwrap()).collect();
     ledger.sort();
     assert_eq!(ledger, [
@@ -1447,8 +1445,7 @@ fn a_pick_that_passes_writes_its_result_for_the_tool_hook() {
          ## Prompt\nwhy does the walrus export drop the header row today",
         "the transcript's copy of the prompt is left out"
     );
-    let s: Value = serde_json::from_str(&fs::read_to_string(w.home.join(".openrecall/sessions/S.json")).unwrap()).unwrap();
-    assert_eq!(s["picks"], 1);
+    assert_eq!(session_of(&w, "S")["picks"], 1);
 }
 
 #[test]
@@ -1496,8 +1493,7 @@ fn the_pick_input_fits_32000_characters_and_cuts_the_oldest_turns_first() {
     assert_eq!((&line["skip"], &line["memory"], &line["tokens_in"]), (&json!("too_big"), &Value::Null, &json!(0)), "{line}");
     assert!(p.requests().is_empty(), "no call");
     assert!(!pick_file(&w, "S", "p2.running").exists() && !pick_file(&w, "S", "p2.json").exists());
-    let s: Value = serde_json::from_str(&fs::read_to_string(w.home.join(".openrecall/sessions/S.json")).unwrap()).unwrap();
-    assert_eq!(s["picks"], Value::Null, "a too_big input does not count");
+    assert_eq!(session_of(&w, "S")["picks"], Value::Null, "a too_big input does not count");
 }
 
 #[test]
@@ -1507,8 +1503,10 @@ fn a_prompt_makes_at_most_one_call_and_a_session_ten() {
     let repo = w.home.join(".openrecall/repos/github.com/someone/app");
     w.memory(&repo, "walrus-header", "decision", "", "The walrus export puts the header row first", "The header row comes first.");
     let not_json = (200, json!({"choices": [{"finish_reason": "stop", "message": {"content": "m1, I think"}}]}));
-    let mut replies = vec![(500, json!({"error": {"code": "server_error"}})), not_json, answer(json!({"ids": ["m9"]}))];
-    replies.extend((0..8).map(|_| answer(json!({"ids": []}))));
+    let cut = (200, json!({"choices": [{"finish_reason": "length", "message": {"content": ""}}],
+                           "usage": {"prompt_tokens": 900, "completion_tokens": 500, "cost": 0.02}}));
+    let mut replies = vec![(500, json!({"error": {"code": "server_error"}})), not_json, cut, answer(json!({"ids": ["m9"]}))];
+    replies.extend((0..7).map(|_| answer(json!({"ids": []}))));
     let p = Provider::start(replies);
     picks_on(&w, &p);
     transcript(&w, "S", &[]);
@@ -1520,6 +1518,7 @@ fn a_prompt_makes_at_most_one_call_and_a_session_ten() {
         let want = match n {
             1 => json!({"skip": "error", "error": "http 500 server_error", "memory": null}),
             2 => json!({"skip": "error", "error": "invalid json", "memory": null}),
+            3 => json!({"skip": "error", "error": "length", "memory": null, "tokens_in": 900, "tokens_out": 500, "cost": 0.02}),
             _ => json!({"skip": null, "memory": null}),
         };
         for (k, v) in want.as_object().unwrap() {
@@ -1658,6 +1657,18 @@ fn the_session_ledger_drops_a_pick_that_recall_already_injected() {
     );
     assert!(log_of(&w, "deliver").is_empty());
     assert_eq!(session_of(&w, "S")["ledger"], json!([WALRUS]));
+    assert!(!pick_file(&w, "S", "p1.json").exists() && !pick_file(&w, "S", "p1.taken").exists());
+}
+
+#[test]
+fn a_pick_the_tool_hook_cannot_deliver_leaves_no_taken_file() {
+    let w = World::new("deliver-broken");
+    picks_on(&w, &Provider::start(vec![]));
+    fs::create_dir_all(pick_file(&w, "S", "")).unwrap();
+    fs::write(pick_file(&w, "S", "p1.json"), "{}").unwrap();
+
+    assert_eq!(w.hook(&["deliver"], "S", json!({"prompt_id": "p1"})), "");
+    assert_eq!(log_of(&w, "error")[0]["error"], "no address in the pick");
     assert!(!pick_file(&w, "S", "p1.json").exists() && !pick_file(&w, "S", "p1.taken").exists());
 }
 

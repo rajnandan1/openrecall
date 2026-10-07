@@ -292,21 +292,14 @@ fn level2(
     s: &Value,
 ) -> Result<(Vec<(String, String)>, Value)> {
     let terms = index::terms(query);
-    let scopes = index::scopes(
-        &home(),
-        &user_home(),
-        repo.map(|r| r.identity.as_str()),
-        repo.and_then(git::Repo::main_checkout),
-    );
-    let mut ix = index::Index::open(&home())?;
-    ix.sync(&scopes)?;
+    let (ix, scopes) = index::open_for(&home(), &user_home(), repo)?;
     let mut dropped: HashMap<&str, usize> = HashMap::new();
     let mut kept = vec![];
     for c in ix.search(&terms, &scopes, 10)? {
         let reason = if seen(s, &c.address) {
             Some("ledger")
         } else {
-            drop_rule(&c, sid, repo)
+            drop_reason(&c, sid, repo)
         };
         match reason {
             Some(r) => *dropped.entry(r).or_default() += 1,
@@ -357,7 +350,7 @@ fn level2(
 
 /// Ticket 09's drops after the ledger, for recall and the pick alike: the session's own memory, an expired one, and a
 /// pointer that rotted.
-fn drop_rule(c: &index::Candidate, sid: &str, repo: Option<&git::Repo>) -> Option<&'static str> {
+fn drop_reason(c: &index::Candidate, sid: &str, repo: Option<&git::Repo>) -> Option<&'static str> {
     let own = |stamp: &str| stamp.split_whitespace().next() == Some(sid);
     if own(&c.source) || own(&c.updated) {
         Some("own")
@@ -465,7 +458,7 @@ fn capture_hook() -> Result<()> {
 fn extract_hook() -> Result<()> {
     let input = read_input()?;
     let sid = session_id(&input)?;
-    let _ = fs::remove_dir_all(pick::dir(&sid));
+    pick::end_session(&sid);
     extract::mark_ended(&sid, true)?;
     detach(&["extract", "--job"], Stdio::null())?;
     Ok(())

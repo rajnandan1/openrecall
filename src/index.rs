@@ -1,4 +1,4 @@
-use crate::{record, turn};
+use crate::{git, record, turn};
 use regex::Regex;
 use rusqlite::{Connection, params};
 use std::collections::HashMap;
@@ -94,6 +94,19 @@ pub fn scopes(home: &Path, user_home: &Path, identity: Option<&str>, main: Optio
         builtin: false,
     });
     out
+}
+
+/// The index, synced to the scopes of the repo a session works in, and those scopes.
+pub fn open_for(home: &Path, user_home: &Path, repo: Option<&git::Repo>) -> rusqlite::Result<(Index, Vec<Scope>)> {
+    let scopes = scopes(
+        home,
+        user_home,
+        repo.map(|r| r.identity.as_str()),
+        repo.and_then(git::Repo::main_checkout),
+    );
+    let mut ix = Index::open(home)?;
+    ix.sync(&scopes)?;
+    Ok((ix, scopes))
 }
 
 /// Claude Code's project slug: every character that is not ASCII alphanumeric becomes `-`.
@@ -309,11 +322,6 @@ impl Index {
             .map(|t| phrase(t))
             .collect::<Vec<_>>()
             .join(" OR ");
-        let dir = |i: usize| {
-            scopes
-                .get(i)
-                .map_or(String::new(), |s| s.dir.to_string_lossy().into_owned())
-        };
         let sql = format!(
             "SELECT m.id, f.address, m.bm25, f.hash, f.kind, f.date, f.source, f.updated, f.expires, m.name, m.description, m.body
              FROM (SELECT rowid AS id, -bm25(ft, {WEIGHTS}) / ?6 AS bm25, name, description, body FROM ft WHERE ft MATCH ?1) m
@@ -324,7 +332,7 @@ impl Index {
         self.conn
             .prepare(&sql)?
             .query_map(
-                params![query, dir(0), dir(1), dir(2), limit as i64, (terms.len() as f64).sqrt()],
+                params![query, dir(scopes, 0), dir(scopes, 1), dir(scopes, 2), limit as i64, (terms.len() as f64).sqrt()],
                 candidate,
             )?
             .collect()
@@ -332,7 +340,6 @@ impl Index {
 
     /// Every memory of the scopes, by address: the pick's list (notes call 5).
     pub fn all(&self, scopes: &[Scope]) -> rusqlite::Result<Vec<Candidate>> {
-        let dir = |i: usize| scopes.get(i).map_or(String::new(), |s| s.dir.to_string_lossy().into_owned());
         self.conn
             .prepare(
                 "SELECT f.id, f.address, 0.0, f.hash, f.kind, f.date, f.source, f.updated, f.expires, m.name, m.description, m.body
@@ -340,7 +347,7 @@ impl Index {
                  WHERE f.dir IN (?1, ?2, ?3)
                  ORDER BY f.address",
             )?
-            .query_map(params![dir(0), dir(1), dir(2)], candidate)?
+            .query_map(params![dir(scopes, 0), dir(scopes, 1), dir(scopes, 2)], candidate)?
             .collect()
     }
 
@@ -389,6 +396,13 @@ impl Index {
         let root = (terms.len() as f64).sqrt();
         Ok((size, sums.into_iter().map(|s| s / root).collect()))
     }
+}
+
+/// The folder of the `i`th scope for the queries' `f.dir IN (...)`, empty past the last scope.
+fn dir(scopes: &[Scope], i: usize) -> String {
+    scopes
+        .get(i)
+        .map_or(String::new(), |s| s.dir.to_string_lossy().into_owned())
 }
 
 fn candidate(r: &rusqlite::Row) -> rusqlite::Result<Candidate> {
