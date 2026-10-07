@@ -1011,14 +1011,14 @@ def level2_lines(cases, results, labels, by_sid, gate, label_fn=None):
     lines += [
         "",
         "Threshold sweep over the logged scores, the top 3 candidates at the threshold or above injected in an index of "
-        "%d rows or more (the 1,040-character cap left out). Pick: %.2f, %s." % (
+        "%d rows or more (the 1,040-character cap left out). Best threshold: %.2f, %s." % (
             min_rows, pick, "precision %s with %d misses and %d false injections"
             % (rate(best["useful"], best["injections"]), best["misses"], best["false"])
             + ("" if met else "; no threshold reaches 0.67 over 5 or more injections")),
         "",
         "| Threshold | Injections | Cases | Precision | Misses | False injections |", "|---|---|---|---|---|---|",
     ]
-    lines += ["| %.2f%s | %d | %d | %s | %d | %d |" % (t, " (pick)" if t == pick else "", m["injections"], m["cases"],
+    lines += ["| %.2f%s | %d | %d | %s | %d | %d |" % (t, " (best threshold)" if t == pick else "", m["injections"], m["cases"],
                                                         rate(m["useful"], m["injections"]), m["misses"], m["false"])
               for t, m in rows if t in shown]
     variants = ["%s: injections %d, precision %s, misses %d, false injections %d" % (
@@ -1029,7 +1029,7 @@ def level2_lines(cases, results, labels, by_sid, gate, label_fn=None):
         "",
         "Rot (ticket 09): the binary drops a pointer fact whose path or symbol is gone; dropped in this replay: %d. Candidates "
         "citing a path the main checkout lacks: %d of %d (every cited path missing: %d). Dropping them too, at the "
-        "pick: %s." % (dropped["rot"], sum(1 for _, x in cands if x.get("rot")), len(cands),
+        "best threshold: %s." % (dropped["rot"], sum(1 for _, x in cands if x.get("rot")), len(cands),
                        sum(1 for _, x in cands if x.get("rot") == "all"), "; ".join(variants)),
         "",
         "Replay latency of `openrecall recall` over the %d searched cases, process start included: p50 %.1f ms, "

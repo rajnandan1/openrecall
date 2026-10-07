@@ -167,8 +167,11 @@ Recall reads a PR URL in the prompt as its PR number, such as 345 for `https://g
 Recall gives each memory it finds a score. The score tells how well the memory matches the prompt. Then a rule, the gate, decides which memories OpenRecall injects:
 
 - The gate allows at most 3 memories, about 400 tokens in all.
-- The gate allows only a memory with a score of 1.50 or more. This number is the threshold. If no memory reaches the threshold, OpenRecall injects nothing.
+- The gate allows a memory with a score of 1.50 or more. This number is the threshold.
+- The gate also allows a memory with a lower score when its file name, name or description shares a ticket ID, a PR number or a path with the prompt. This is the identifier rule.
 - The gate allows nothing while the index holds fewer than 10 memories. This count covers all repos together.
+
+If no memory passes the gate, OpenRecall injects nothing. OpenRecall also does not inject a memory whose line only points at a path that the prompt already names. Such a memory is an echo.
 
 The score does not grow when the index grows. So one threshold works at every index size.
 
