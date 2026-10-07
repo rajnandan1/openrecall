@@ -292,14 +292,7 @@ fn level2(
     s: &Value,
 ) -> Result<(Vec<(String, String)>, Value)> {
     let terms = index::terms(query);
-    let scopes = index::scopes(
-        &home(),
-        &user_home(),
-        repo.map(|r| r.identity.as_str()),
-        repo.and_then(git::Repo::main_checkout),
-    );
-    let mut ix = index::Index::open(&home())?;
-    ix.sync(&scopes)?;
+    let (ix, scopes) = index::open_for(&home(), &user_home(), repo)?;
     let mut dropped: HashMap<&str, usize> = HashMap::new();
     let mut kept = vec![];
     for c in ix.search(&terms, &scopes, 10)? {

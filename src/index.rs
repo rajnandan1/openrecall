@@ -1,4 +1,4 @@
-use crate::{record, turn};
+use crate::{git, record, turn};
 use regex::Regex;
 use rusqlite::{Connection, params};
 use std::collections::HashMap;
@@ -94,6 +94,19 @@ pub fn scopes(home: &Path, user_home: &Path, identity: Option<&str>, main: Optio
         builtin: false,
     });
     out
+}
+
+/// The index, synced to the scopes of the repo a session works in, and those scopes.
+pub fn open_for(home: &Path, user_home: &Path, repo: Option<&git::Repo>) -> rusqlite::Result<(Index, Vec<Scope>)> {
+    let scopes = scopes(
+        home,
+        user_home,
+        repo.map(|r| r.identity.as_str()),
+        repo.and_then(git::Repo::main_checkout),
+    );
+    let mut ix = Index::open(home)?;
+    ix.sync(&scopes)?;
+    Ok((ix, scopes))
 }
 
 /// Claude Code's project slug: every character that is not ASCII alphanumeric becomes `-`.

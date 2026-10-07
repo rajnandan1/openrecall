@@ -66,14 +66,8 @@ impl Server {
             return Ok(format!("{}\n\n{text}", path.display()));
         }
         let repo = git::Repo::find(&self.cwd);
-        let scopes = index::scopes(
-            &self.home,
-            &self.user_home,
-            repo.as_ref().map(|r| r.identity.as_str()),
-            repo.as_ref().and_then(git::Repo::main_checkout),
-        );
-        let mut ix = index::Index::open(&self.home).map_err(|e| e.to_string())?;
-        ix.sync(&scopes).map_err(|e| e.to_string())?;
+        let (ix, scopes) =
+            index::open_for(&self.home, &self.user_home, repo.as_ref()).map_err(|e| e.to_string())?;
         let k = p.k.unwrap_or(DEFAULT_K).clamp(1, MAX_K);
         let found = ix
             .search(&index::terms(query), &scopes, k)

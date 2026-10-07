@@ -66,14 +66,7 @@ fn pick(input: &Value, sid: &str, line: &mut Value) -> crate::Result<Option<Valu
     let settings = Settings::load(&home)?;
     let prompt = input["prompt"].as_str().unwrap_or("");
     let repo = git::Repo::find(input["cwd"].as_str().unwrap_or(""));
-    let scopes = index::scopes(
-        &home,
-        &crate::user_home(),
-        repo.as_ref().map(|r| r.identity.as_str()),
-        repo.as_ref().and_then(git::Repo::main_checkout),
-    );
-    let mut ix = index::Index::open(&home)?;
-    ix.sync(&scopes)?;
+    let (ix, scopes) = index::open_for(&home, &crate::user_home(), repo.as_ref())?;
     let memories = ix.all(&scopes)?;
     let Some(user) = message(&memories, input, prompt) else {
         line["skip"] = json!("too_big");
