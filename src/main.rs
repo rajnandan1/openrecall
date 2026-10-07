@@ -274,9 +274,8 @@ fn recall(started: u128) -> Result<()> {
     status(&sid, &format!("recall {total} · {} ms", ended - started))
 }
 
-/// Ticket 15's last steps: search the scope, drop what must not be injected (the ledger, this session's own facts,
-/// a state fact past its `expires`, a pointer whose path is gone: ticket 09), keep at most 3 lines above the gate that are not echoes (spec 2.2) within the 400-token budget. Returns the lines with their addresses, and the log detail.
-/// The lines are picked first; then each, best first, takes its whole memory if that fits in the room they leave.
+/// Ticket 15's last steps: drop what must not be injected (ticket 09), keep at most 3 lines that pass the gate and are not echoes (issue 19).
+/// The lines are chosen first; then each, best first, takes its whole memory if that fits in the room they leave in the 400-token budget.
 fn level2(
     query: &str,
     repo: Option<&git::Repo>,
@@ -318,7 +317,7 @@ fn level2(
     kept.truncate(5);
     let (size, scores) = ix.scores(&terms, &kept)?;
     let mut lines = vec![];
-    let mut via = serde_json::Map::new();
+    let mut vias = serde_json::Map::new();
     let mut chars = index::FRAME.chars().count();
     let (echoes, passing): (Vec<_>, Vec<_>) = index::gate(&kept, &scores, size, query)
         .into_iter()
@@ -326,13 +325,13 @@ fn level2(
     if !echoes.is_empty() {
         dropped.insert("echo", echoes.len());
     }
-    for (c, how) in passing.into_iter().take(index::MAX_LINES) {
+    for (c, via) in passing.into_iter().take(index::MAX_LINES) {
         let line = index::line(c, 0);
         if chars + line.chars().count() + 1 > index::MAX_CHARS {
             break;
         }
         chars += line.chars().count() + 1;
-        via.insert(c.address.clone(), json!(how));
+        vias.insert(c.address.clone(), json!(via));
         lines.push((c, line));
     }
     for (c, line) in &mut lines {
@@ -352,7 +351,7 @@ fn level2(
         .collect();
     Ok((
         lines,
-        json!({"terms": terms.len(), "index_size": size, "candidates": candidates, "dropped": dropped, "via": via,
+        json!({"terms": terms.len(), "index_size": size, "candidates": candidates, "dropped": dropped, "via": vias,
                "echoes": echoes.iter().map(|(c, _)| &c.address).collect::<Vec<_>>()}),
     ))
 }

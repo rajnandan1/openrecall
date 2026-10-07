@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::UNIX_EPOCH;
 
-/// The threshold: inject a memory only at this score or above (the gate-threshold spec, rule R4).
+/// The threshold: a score at or above it passes the gate; the identifier rule can pass a lower one (gate-threshold spec, rule R4).
 pub const GATE: f64 = 1.50;
 /// The gate stays closed in an index of fewer rows: no floor probe ran below 10 (the gate-threshold spec).
 pub const MIN_ROWS: i64 = 10;
@@ -633,7 +633,7 @@ fn prefix(c: &Candidate) -> String {
     format!("- {} {} {}: ", c.kind, c.date, c.address)
 }
 
-/// Spec 2.2: the line names a path that the query names, and at most 2 identifiers that it lacks. The identifiers are
+/// Issue 19: the line names a path that the query names, and at most 2 identifiers that it lacks. The identifiers are
 /// `IDENT` of `eval/harness.py` over the text after the prefix, since every address holds a `/`.
 pub fn echo(c: &Candidate, query: &str) -> bool {
     let line = line(c, 0);
@@ -741,6 +741,14 @@ mod tests {
         assert!(!echo_of("The map is .scratch/x/map.md for ABC-12, PR #345 and abc1234def"), "3 the query lacks");
         assert!(!echo_of("The map is .scratch/y/map.md"), "another path");
         assert!(!echo(&candidate("d", "The map is https://example.com/x/map.md"), "see https://example.com/x/map.md"), "a URL");
+    }
+
+    #[test]
+    fn a_map_pointer_is_an_echo_only_when_the_query_names_its_path() {
+        let mut pointer = candidate("The walrus migration map", "The walrus migration map lives in .scratch/x/map.md");
+        pointer.kind = "pointer".into();
+        assert!(echo(&pointer, "read .scratch/x/map.md and plan the walrus migration"));
+        assert!(!echo(&pointer, "where does the walrus migration map live"));
     }
 
     #[test]
