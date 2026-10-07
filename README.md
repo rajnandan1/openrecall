@@ -316,7 +316,7 @@ The plugin also has a tool hook. Claude Code runs it after each tool call that C
 
 A picked memory skips the gate. OpenRecall still drops a pick in each case where it does not inject a memory, as listed in [Recalled memories](#recalled-memories). It also drops a pick that is an echo of the prompt.
 
-Each pick makes at most one call to the model. With Claude Sonnet 5.5 through OpenRouter, a call costs $0.0323 at most. A session makes at most 10 calls. A day of 57 to 72 prompts costs about $1.50 to $1.90. This cost comes on top of the cost of extraction.
+Each pick makes at most one call to the model. With Claude Sonnet 5.5 through OpenRouter, a call costs about $0.02. The largest call that we measured cost $0.034. A session makes at most 10 calls. A day of 57 to 72 prompts costs about $1.50 to $1.90. This cost comes on top of the cost of extraction.
 
 Picks need Claude Code 2.1.196 or later. On an older version, the prompt hook starts no job, so nothing is sent and nothing is spent.
 
