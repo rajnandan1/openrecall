@@ -786,13 +786,28 @@ impl Settings {
 }
 
 #[derive(Default)]
-struct Usage {
+pub struct Usage {
     /// The upstream a router served the call from, when it says (OpenRouter's `provider`).
     provider: String,
-    tokens_in: u64,
-    tokens_out: u64,
+    pub tokens_in: u64,
+    pub tokens_out: u64,
     reasoning: u64,
-    cost: f64,
+    pub cost: f64,
+}
+
+impl Usage {
+    fn add(&mut self, reply: &Value) {
+        let used = &reply["usage"];
+        if let Some(provider) = reply["provider"].as_str() {
+            self.provider = provider.into();
+        }
+        self.tokens_in += used["prompt_tokens"].as_u64().unwrap_or(0);
+        self.tokens_out += used["completion_tokens"].as_u64().unwrap_or(0);
+        self.reasoning += used["completion_tokens_details"]["reasoning_tokens"]
+            .as_u64()
+            .unwrap_or(0);
+        self.cost += used["cost"].as_f64().unwrap_or(0.0);
+    }
 }
 
 /// One strict-schema request, sent again once when the reply is not what the schema asks (ticket 24).
@@ -811,17 +826,7 @@ fn ask<T>(
         "response_format": {"type": "json_schema", "json_schema": {"name": name, "strict": true, "schema": schema}},
     });
     for _ in 0..2 {
-        let (content, reply) = post(s, &body)?;
-        let used = &reply["usage"];
-        if let Some(provider) = reply["provider"].as_str() {
-            usage.provider = provider.into();
-        }
-        usage.tokens_in += used["prompt_tokens"].as_u64().unwrap_or(0);
-        usage.tokens_out += used["completion_tokens"].as_u64().unwrap_or(0);
-        usage.reasoning += used["completion_tokens_details"]["reasoning_tokens"]
-            .as_u64()
-            .unwrap_or(0);
-        usage.cost += used["cost"].as_f64().unwrap_or(0.0);
+        let content = post(s, &body, usage)?;
         if let Some(parsed) = parse(&content) {
             return Ok(parsed);
         }
@@ -831,7 +836,7 @@ fn ask<T>(
 
 /// One `POST <base_url>/chat/completions` through macOS curl. The key goes in curl's config on stdin, never in `ps`;
 /// the body goes in a 0600 file, because stdin cannot carry both (ticket 24).
-pub fn post(s: &Settings, body: &Value) -> Result<(String, Value), Fail> {
+pub fn post(s: &Settings, body: &Value, usage: &mut Usage) -> Result<String, Fail> {
     let dir = crate::home().join("extract");
     fs::create_dir_all(&dir)?;
     let tmp = dir.join(format!("request.{}", std::process::id()));
@@ -867,16 +872,18 @@ pub fn post(s: &Settings, body: &Value) -> Result<(String, Value), Fail> {
     let out = run();
     let _ = fs::remove_file(&tmp);
     let out = out?;
-    classify(out.status.code(), &String::from_utf8_lossy(&out.stdout))
+    classify(out.status.code(), &String::from_utf8_lossy(&out.stdout), usage)
 }
 
-/// curl's result as ticket 24's classes: the reply's content and the whole reply, a strike, or a stop.
-fn classify(exit: Option<i32>, stdout: &str) -> Result<(String, Value), Fail> {
+/// curl's result as ticket 24's classes: the reply's content, a strike, or a stop. The usage of every reply goes into
+/// `usage`, since a cut reply is billed too.
+fn classify(exit: Option<i32>, stdout: &str, usage: &mut Usage) -> Result<String, Fail> {
     if exit != Some(0) {
         return Err(Fail::Stop(format!("curl exit {}", exit.unwrap_or(-1))));
     }
     let (raw, status) = stdout.rsplit_once('\n').unwrap_or(("", stdout));
     let reply: Value = serde_json::from_str(raw).unwrap_or(Value::Null);
+    usage.add(&reply);
     let error = &reply["error"];
     let code = error["metadata"]["error_type"]
         .as_str()
@@ -891,10 +898,7 @@ fn classify(exit: Option<i32>, stdout: &str) -> Result<(String, Value), Fail> {
     }
     let choice = &reply["choices"][0];
     match choice["finish_reason"].as_str() {
-        Some("stop") => Ok((
-            choice["message"]["content"].as_str().unwrap_or("").into(),
-            reply.clone(),
-        )),
+        Some("stop") => Ok(choice["message"]["content"].as_str().unwrap_or("").into()),
         Some("length") => Err(Fail::Strike("length".into())),
         // A filtered session would otherwise stop every run after it for good.
         Some("content_filter") => Err(Fail::Strike("content filter".into())),
@@ -942,18 +946,24 @@ mod tests {
 
     #[test]
     fn replies_are_classified() {
+        let mut usage = Usage::default();
         let ok = r#"{"choices": [{"finish_reason": "stop", "message": {"content": "{}"}}], "usage": {"cost": 0.01}}"#;
+        assert_eq!(classify(Some(0), &format!("{ok}\n200"), &mut usage).unwrap(), "{}");
+        assert_eq!(usage.cost, 0.01);
+        let mut usage = Usage::default();
+        let cut = r#"{"choices": [{"finish_reason": "length"}], "usage": {"completion_tokens": 500, "cost": 0.02}}"#;
         assert_eq!(
-            classify(Some(0), &format!("{ok}\n200")).unwrap().1["usage"]["cost"],
-            0.01
+            classify(Some(0), &format!("{cut}\n200"), &mut usage).unwrap_err(),
+            Fail::Strike("length".into())
         );
+        assert_eq!((usage.tokens_out, usage.cost), (500, 0.02), "a cut reply is billed too");
+        let classified = |exit: Option<i32>, stdout: &str| classify(exit, stdout, &mut Usage::default());
         let finish = |r: &str| {
-            classify(
+            classified(
                 Some(0),
                 &format!("{{\"choices\": [{{\"finish_reason\": \"{r}\"}}]}}\n200"),
             )
         };
-        assert_eq!(finish("length").unwrap_err(), Fail::Strike("length".into()));
         assert_eq!(
             finish("content_filter").unwrap_err(),
             Fail::Strike("content filter".into())
@@ -967,20 +977,20 @@ mod tests {
             r#"{"error": {"code": "context_length_exceeded"}}"#,
         ] {
             assert_eq!(
-                classify(Some(0), &format!("{context}\n400")).unwrap_err(),
+                classified(Some(0), &format!("{context}\n400")).unwrap_err(),
                 Fail::Strike("context length".into())
             );
         }
         assert_eq!(
-            classify(Some(0), "{\"error\": {\"code\": \"invalid_api_key\"}}\n401").unwrap_err(),
+            classified(Some(0), "{\"error\": {\"code\": \"invalid_api_key\"}}\n401").unwrap_err(),
             Fail::Stop("http 401 invalid_api_key".into())
         );
         assert_eq!(
-            classify(Some(0), "{}\n400").unwrap_err(),
+            classified(Some(0), "{}\n400").unwrap_err(),
             Fail::Stop("http 400".into())
         );
         assert_eq!(
-            classify(Some(28), "").unwrap_err(),
+            classified(Some(28), "").unwrap_err(),
             Fail::Stop("curl exit 28".into())
         );
         assert_eq!(quote(r#"a"b\c"#), r#"a\"b\\c"#);

@@ -98,12 +98,12 @@ fn pick(input: &Value, sid: &str, line: &mut Value) -> crate::Result<Option<Valu
             {"type": "object", "properties": {"ids": {"type": "array", "items": {"type": "string"}}},
              "required": ["ids"], "additionalProperties": false}}},
     });
-    let (content, reply) =
-        extract::post(&settings, &body).map_err(|(Fail::Strike(e) | Fail::Stop(e))| e)?;
-    let used = &reply["usage"];
-    line["tokens_in"] = json!(used["prompt_tokens"].as_u64().unwrap_or(0));
-    line["tokens_out"] = json!(used["completion_tokens"].as_u64().unwrap_or(0));
-    line["cost"] = json!(used["cost"].as_f64().unwrap_or(0.0));
+    let mut usage = extract::Usage::default();
+    let content = extract::post(&settings, &body, &mut usage);
+    line["tokens_in"] = json!(usage.tokens_in);
+    line["tokens_out"] = json!(usage.tokens_out);
+    line["cost"] = json!(usage.cost);
+    let content = content.map_err(|(Fail::Strike(e) | Fail::Stop(e))| e)?;
     let reply: Value = serde_json::from_str(&content).map_err(|_| "invalid json")?;
     let ids = reply["ids"].as_array().ok_or("invalid json")?;
     let Some((c, _)) = ids.first().and_then(Value::as_str).and_then(|id| {

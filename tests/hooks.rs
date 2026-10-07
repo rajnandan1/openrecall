@@ -1507,8 +1507,10 @@ fn a_prompt_makes_at_most_one_call_and_a_session_ten() {
     let repo = w.home.join(".openrecall/repos/github.com/someone/app");
     w.memory(&repo, "walrus-header", "decision", "", "The walrus export puts the header row first", "The header row comes first.");
     let not_json = (200, json!({"choices": [{"finish_reason": "stop", "message": {"content": "m1, I think"}}]}));
-    let mut replies = vec![(500, json!({"error": {"code": "server_error"}})), not_json, answer(json!({"ids": ["m9"]}))];
-    replies.extend((0..8).map(|_| answer(json!({"ids": []}))));
+    let cut = (200, json!({"choices": [{"finish_reason": "length", "message": {"content": ""}}],
+                           "usage": {"prompt_tokens": 900, "completion_tokens": 500, "cost": 0.02}}));
+    let mut replies = vec![(500, json!({"error": {"code": "server_error"}})), not_json, cut, answer(json!({"ids": ["m9"]}))];
+    replies.extend((0..7).map(|_| answer(json!({"ids": []}))));
     let p = Provider::start(replies);
     picks_on(&w, &p);
     transcript(&w, "S", &[]);
@@ -1520,6 +1522,7 @@ fn a_prompt_makes_at_most_one_call_and_a_session_ten() {
         let want = match n {
             1 => json!({"skip": "error", "error": "http 500 server_error", "memory": null}),
             2 => json!({"skip": "error", "error": "invalid json", "memory": null}),
+            3 => json!({"skip": "error", "error": "length", "memory": null, "tokens_in": 900, "tokens_out": 500, "cost": 0.02}),
             _ => json!({"skip": null, "memory": null}),
         };
         for (k, v) in want.as_object().unwrap() {
