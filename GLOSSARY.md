@@ -127,7 +127,7 @@ Finding the memories that match a prompt or a session start.
 _Avoid_: search, lookup, retrieval (retrieval is only the index query step inside recall)
 
 **Prompt path**:
-The work that runs between the user pressing enter and Claude starting to answer. It has a hard time budget and no LLM calls.
+The work that runs between the user pressing enter and Claude starting to answer. It has a time budget, and it makes no LLM call and no network call.
 _Avoid_: hot path, critical path
 
 **Skip rule**:
@@ -155,8 +155,16 @@ A session started by `claude -p` or the SDK, with no person typing. OpenRecall d
 _Avoid_: batch session, non-interactive run, sdk session
 
 **Gate**:
-The rule that decides whether a recalled memory is confident enough to inject. Silence is the default.
+The rule that decides whether a recalled memory is confident enough to inject. Silence is the default. The identifier rule is part of the gate.
 _Avoid_: threshold (that is the number inside the gate), filter
+
+**Identifier rule**:
+The part of the gate that lets a candidate through, whatever its score, when its file name, name or description shares a ticket ID, a PR number or a path with the prompt.
+_Avoid_: identifier route (that pushes a handoff record), identifier boost
+
+**Echo**:
+A candidate whose injected line names a path that the prompt also names, and adds at most 2 identifiers that the prompt lacks. An echo is never injected, and a pick can be one too.
+_Avoid_: repeat (that is a fact dedupe skips), skip rule (that stops a session or a prompt), duplicate
 
 **Score**:
 How well a candidate matches a prompt, as a number that does not grow with the index size.
