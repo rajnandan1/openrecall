@@ -155,7 +155,7 @@ A session started by `claude -p` or the SDK, with no person typing. OpenRecall d
 _Avoid_: batch session, non-interactive run, sdk session
 
 **Gate**:
-The rule that decides whether a recalled memory is confident enough to inject. Silence is the default. The identifier rule is part of the gate.
+The rule that decides whether a recalled memory is confident enough to inject. Silence is the default. The identifier rule is part of the gate, and a pick skips it.
 _Avoid_: threshold (that is the number inside the gate), filter
 
 **Identifier rule**:
@@ -163,7 +163,7 @@ The part of the gate that lets a candidate through, whatever its score, when its
 _Avoid_: identifier route (that pushes a handoff record), identifier boost
 
 **Echo**:
-A candidate whose injected line names a path that the prompt also names, and adds at most 2 identifiers that the prompt lacks. An echo is never injected.
+A candidate whose injected line names a path that the prompt also names, and adds at most 2 identifiers that the prompt lacks. An echo is never injected, and a pick can be one too.
 _Avoid_: repeat (that is a fact dedupe skips), skip rule (that stops a session or a prompt), duplicate
 
 **Score**:
@@ -177,6 +177,10 @@ _Avoid_: cutoff, gate (that is the rule)
 **Injection**:
 Handing recalled memories to Claude as extra context.
 _Avoid_: digest, push (only when contrasting with pull)
+
+**Pick**:
+The one memory, or none, that an LLM chooses for a prompt in a background job that the prompt hook starts, off the prompt path. It reaches Claude with the result of the turn's first tool call that finds it ready, never inside a subagent, and a turn with no tool call drops it. A picked memory skips the gate. Picks are off until the user turns them on.
+_Avoid_: prefetch, rerank, suggestion (that is a line for CLAUDE.md)
 
 **Session ledger**:
 The per-context-window record of which memories were already injected, and which handoff records the window created, so none is injected twice. It is cleared with the context, on clear and compact.
@@ -197,7 +201,7 @@ The step in extraction that compares each proposed fact with the existing memori
 _Avoid_: merge, consolidation, cleanup
 
 **Provider**:
-The LLM service that extraction sends a session to, chosen by the user. OpenRecall has no default provider; with none set, extraction is off.
+The LLM service that extraction and picks send session text to, chosen by the user. OpenRecall has no default provider; with none set, extraction and picks are off.
 _Avoid_: vendor, backend, model (one provider serves many models)
 
 **Quiet**:
