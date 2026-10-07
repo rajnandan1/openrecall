@@ -1,6 +1,6 @@
 {
   "name": "openrecall",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Hands a new Claude Code session the state its task was left in by the last session",
   "author": {
     "name": "Raj Nandan Sharma"
