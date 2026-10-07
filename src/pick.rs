@@ -8,7 +8,7 @@ use std::process::Stdio;
 
 /// 16,000 tokens at 2.0 characters a token, the system prompt included (spec 3.3).
 const MAX_INPUT: usize = 32_000;
-const CAP: u64 = 10;
+const MAX_CALLS: u64 = 10;
 /// `PICK_SYSTEM["strict"]` of ticket 07's prototype, quoted in spec 3.4.
 const SYSTEM: &str = "You pick memories for a coding assistant (Claude Code) that is about to act on the user's prompt. \
     You get the list of memories (id, name and description), the session so far, newest turn first, and the prompt. \
@@ -22,7 +22,7 @@ const NO_TURN: &str = "(no earlier turn)";
 /// `prompt_id` and the session has calls left (spec 3.2). The hook never waits for the job.
 pub fn start(input: &Value, s: &Value) -> crate::Result<()> {
     if prompt_id(input).is_none()
-        || s["picks"].as_u64().unwrap_or(0) >= CAP
+        || s["picks"].as_u64().unwrap_or(0) >= MAX_CALLS
         || !extract::picks_on(&crate::home())
     {
         return Ok(());
@@ -75,7 +75,7 @@ fn pick(input: &Value, sid: &str, line: &mut Value) -> crate::Result<Option<Valu
     {
         let (_lock, mut s) = crate::load_session(sid)?;
         let picks = s["picks"].as_u64().unwrap_or(0);
-        if picks >= CAP {
+        if picks >= MAX_CALLS {
             line["skip"] = json!("cap");
             return Ok(None);
         }
@@ -108,7 +108,7 @@ fn pick(input: &Value, sid: &str, line: &mut Value) -> crate::Result<Option<Valu
         return Ok(None);
     };
     line["memory"] = json!(c.address);
-    let drop = crate::drop_rule(c, sid, repo.as_ref())
+    let drop = crate::drop_reason(c, sid, repo.as_ref())
         .or_else(|| index::echo(c, prompt).then_some("echo"));
     if let Some(reason) = drop {
         line["skip"] = json!(reason);
@@ -243,8 +243,13 @@ pub fn end_turn(sid: &str) {
     }
 }
 
+/// The SessionEnd hook deletes the session's picks (spec 3.8).
+pub fn end_session(sid: &str) {
+    let _ = fs::remove_dir_all(dir(sid));
+}
+
 /// A session's pick results: `<prompt_id>.running` while the job works, then `.json`, then `.taken` in the tool hook.
-pub fn dir(sid: &str) -> PathBuf {
+fn dir(sid: &str) -> PathBuf {
     crate::home().join("picks").join(sid)
 }
 
