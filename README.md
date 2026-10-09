@@ -286,7 +286,7 @@ To check extraction:
 
 The worker starts each time a session starts or ends. It takes each session that ended, or that was quiet for 30 minutes. Quiet means that the transcript of the session did not change. The worker reads only the turns that it did not read before. It sends the earlier turns too, but only as context. Only one worker runs at a time.
 
-The worker sends a short form of the session through `/usr/bin/curl`. The short form holds your prompts, Claude's text, and one line per tool call. It holds no tool output. OpenRecall replaces each secret in it with `[REDACTED:<rule-id>]` first. The worker gives the key to curl on stdin, never on a command line. If you use OpenRouter, turn on "deny data collection" in its privacy settings.
+The worker sends a short form of the session through `/usr/bin/curl`. The short form holds your prompts, Claude's text, and one line per tool call. It holds no tool output, and it leaves out calls to OpenRecall's own tools, `recall`, `remember` and `forget`. OpenRecall replaces each secret in it with `[REDACTED:<rule-id>]` first. The worker gives the key to curl on stdin, never on a command line. If you use OpenRouter, turn on "deny data collection" in its privacy settings.
 
 The second call to the model stops duplicate facts. This step is dedupe. Dedupe compares each new fact with the 10 most similar memories. Then the model picks one of three actions for the fact:
 

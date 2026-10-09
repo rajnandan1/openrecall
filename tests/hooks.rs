@@ -787,6 +787,70 @@ fn a_memory_goes_in_whole_only_in_the_room_the_other_lines_leave() {
     assert_eq!(ctx.lines().skip(1).collect::<Vec<_>>(), [whole], "alone, it goes in whole: {ctx}");
 }
 
+/// Claude Code hands Claude at most 10,000 characters from one hook. Past that it writes the text to a file and
+/// passes a 2,000-character preview instead (https://code.claude.com/docs/en/hooks, "JSON output").
+const HOOK_CAP: usize = 10_000;
+
+#[test]
+fn the_longest_prompt_hook_output_stays_under_the_hook_cap() {
+    let w = World::new("cap");
+    w.branch("feat/abc-12-exports-stop-failing-on-empty-rows-after-the-null-check-moves-ahead-of-the-seal");
+    w.hook(&["handoff"], "E", json!({"source": "startup"}));
+    let edits: Vec<Value> = (0..12)
+        .map(|i| json!({"type": "tool_use", "id": format!("t{i}"), "name": "Edit",
+            "input": {"file_path": w.folder.join(format!("src/exports/module_{i}/handler.py"))}}))
+        .collect();
+    let mut content = vec![json!({"type": "text", "text": "Plan: edit every handler."})];
+    content.extend(edits);
+    w.turn(
+        "E",
+        &[
+            user("Build ABC-12 so exports stop failing on empty rows, and keep the batch seal order the same for every handler"),
+            json!({"type": "assistant", "message": {"role": "assistant", "content": content}}),
+        ],
+        "",
+    );
+    let answer = format!(
+        "Opened PR #345 at abc1234def. {} Next: ask for review.",
+        "The null check now runs before the batch seals, so an empty row no longer reaches the export writer. "
+            .repeat(13)
+    );
+    w.turn(
+        "E",
+        &[
+            user("open the PR and say what changed in every handler, step by step, so the reviewer can follow it"),
+            said(&answer, Some(json!({"type": "tool_use", "id": "b1", "name": "Bash", "input": {"command": "cargo test export -- --nocapture"}}))),
+        ],
+        "",
+    );
+
+    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    w.fillers(&repo);
+    let source = "source: E 2026-01-02T03:04:05Z\n";
+    w.memory(&repo, "ledger-rounding-history", "decision", source, "Ledger totals round half-even since ABC-12",
+        "Ledger totals round half-even since ABC-12, because half-up rounding drifted one cent per thousand postings. \
+         The rule lives in `ledger::round_total`; every caller passes the minor unit of its currency. Settlement \
+         exports keep half-even too, since the bank file expects it. Older ledger notes that say half-up are wrong now.");
+    w.memory(&repo, "ledger-rounding-test", "gotcha", source, "The rounding test needs its fixture first",
+        "The ledger rounding test needs the ABC-12 fixture loaded first, or it compares against half-up totals and \
+         fails on the third posting. Load it in the test setup, never by hand.");
+    w.memory(&repo, "ledger-cents-column", "decision", source, "The cents column stays an integer",
+        "The ledger cents column stays an integer; ABC-12 rounding happens before the write, so the database never \
+         sees a fraction of a cent. Reports divide by a hundred only when they print.");
+
+    w.hook(&["handoff"], "S", json!({"source": "startup"}));
+    assert!(w.pushed("S", "continue please").is_none(), "not settled before one completed turn");
+    w.turn("S", &[user("continue please"), said("Reading the handlers first.", None)], "");
+    let ctx = w.pushed("S", "ledger rounding ABC-12 cents").expect("the record and three memories");
+    let (record, memories) = ctx.split_once("\n\nRecalled memories from earlier sessions").unwrap_or_else(|| panic!("both blocks: {ctx}"));
+    assert!(record.starts_with("Handoff record for branch feat/abc-12") && record.contains("## Last answer\n"), "{ctx}");
+    assert_eq!(memories.lines().count(), 4, "the frame and three lines: {memories}");
+    let body = record.split_once("\n\n").map_or("", |(_, b)| b).chars().count();
+    assert!(body > 1700 && body <= 2080, "the record sits near its 2,080-character budget: {body}");
+    let total = ctx.chars().count();
+    assert!(total < HOOK_CAP, "{total} characters would make Claude Code replace the text with a preview");
+}
+
 #[test]
 fn the_gate_opens_at_ten_rows_from_every_scope() {
     let w = World::new("small");
