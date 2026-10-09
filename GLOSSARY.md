@@ -154,6 +154,10 @@ _Avoid_: user message, turn (a turn also follows a task notification)
 A session started by `claude -p` or the SDK, with no person typing. OpenRecall does nothing in it.
 _Avoid_: batch session, non-interactive run, sdk session
 
+**Hook cap**:
+Claude Code's limit of 10,000 characters on the text one hook hands Claude. Over it, Claude gets a file path and a 2,000-character preview instead of the text.
+_Avoid_: output limit, truncation, context limit
+
 **Gate**:
 The rule that decides whether a recalled memory is confident enough to inject. Silence is the default. The identifier rule is part of the gate, and a pick skips it.
 _Avoid_: threshold (that is the number inside the gate), filter
@@ -219,6 +223,10 @@ _Avoid_: error, retry
 **Suggestion**:
 A line that extraction proposes for a repo's CLAUDE.md, kept in a per-repo file for the user to copy by hand. It is never a fact and never recalled.
 _Avoid_: rule (a rule lives in CLAUDE.md), tip, recommendation
+
+**Own tool call**:
+A call Claude makes to one of OpenRecall's three MCP tools: recall, remember or forget. Extraction and picks never see one, since a memory about using memory is noise and a remembered fact is already stored.
+_Avoid_: self call, meta call, memory tool use
 
 **Secret scan**:
 The check every text OpenRecall stores or sends goes through, using gitleaks' rules. A hit drops a fact; in a handoff record or in extraction's input it is replaced by `[REDACTED:<rule-id>]`.

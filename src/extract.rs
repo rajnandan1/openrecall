@@ -18,6 +18,8 @@ const STRIKES: u32 = 3;
 /// repeated built-in file ranked 8th (build step 7).
 const CANDIDATES: usize = 10;
 const TOOL_CHARS: usize = 200;
+/// An own tool call: `recall`, `remember` and `forget` are OpenRecall's doing, so the short form leaves them out.
+const OWN_TOOL: &str = "mcp__plugin_openrecall_openrecall__";
 const TOOL_KEYS: [&str; 8] = [
     "command",
     "file_path",
@@ -474,12 +476,14 @@ fn condense(turns: &[(Turn, usize)], split: usize) -> (String, bool) {
     (out.join("\n"), marked)
 }
 
-/// One turn's lines of the short form: its prompt, the assistant's text and one line per tool call.
+/// One turn's lines of the short form: its prompt, the assistant's text and one line per tool call that is not
+/// OpenRecall's own.
 pub fn short_form(t: &Turn) -> String {
     let mut out = vec![format!("[user] {}", t.ask)];
     for event in &t.events {
         match event {
             Event::Text(text) => out.push(format!("[assistant] {text}")),
+            Event::Tool(name, _) if name.starts_with(OWN_TOOL) => {}
             Event::Tool(name, input) => out.push(format!("[tool] {}", tool_line(name, input))),
             Event::Output(..) => {}
         }
@@ -1067,5 +1071,25 @@ mod tests {
             marked && text.contains("[tool] Bash cargo test\n=== NEW TURNS ===\n[user] second ask")
         );
         assert!(!condense(&turns, 3).1);
+    }
+
+    #[test]
+    fn the_short_form_leaves_out_own_tool_calls() {
+        let tool = |name: &str, input: Value| Event::Tool(name.into(), input);
+        let t = Turn {
+            ask: "store it".into(),
+            real: true,
+            events: vec![
+                tool("mcp__plugin_openrecall_openrecall__remember", json!({"text": "the runner kills slow tests"})),
+                Event::Text("Stored. Checking the runner.".into()),
+                tool("mcp__plugin_openrecall_openrecall__recall", json!({"query": "runner"})),
+                tool("Bash", json!({"command": "cargo test"})),
+                tool("mcp__plugin_openrecall_openrecall__forget", json!({"address": "a/b"})),
+            ],
+        };
+        assert_eq!(
+            short_form(&t),
+            "[user] store it\n[assistant] Stored. Checking the runner.\n[tool] Bash cargo test"
+        );
     }
 }
