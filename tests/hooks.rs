@@ -1629,6 +1629,118 @@ fn the_pick_input_fits_32000_characters_and_cuts_the_oldest_turns_first() {
     assert_eq!(session_of(&w, "S")["picks"], Value::Null, "a too_big input does not count");
 }
 
+const PICK_SYSTEM_FILE: &str = "You pick memories for a coding assistant (Claude Code) that is about to act on the user's prompt. You get the list of memories (id, name and description), the text of the files the prompt names, the session so far, newest turn first, and the prompt. Pick at most one memory, and only one that states a fact, decision, pointer or gotcha that the assistant needs to act on this prompt and that neither the prompt, the named files nor the session already contains. A memory about the same project but another task, or one that only repeats what the prompt, the named files or the session says, is a wrong pick. Most prompts need no memory: pick none unless you are sure. Return its id, or no id.";
+
+/// One prompt's pick: its `pick` line, its system prompt, and the named text of its request (None without one).
+fn named_pick(w: &World, p: &Provider, sid: &str, id: &str, text: &str) -> (Value, String, Option<String>) {
+    prompt(w, sid, id, text);
+    let line = pick_line(w, id);
+    let body = p.requests().last().unwrap().1.clone();
+    let user = body["messages"][1]["content"].as_str().unwrap().to_string();
+    let named = user
+        .split_once("## Named files\n")
+        .map(|(_, rest)| rest.split_once("\n\n## Session so far").unwrap().0.to_string());
+    (line, body["messages"][0]["content"].as_str().unwrap().to_string(), named)
+}
+
+fn put(path: &Path, text: &str) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, text).unwrap();
+}
+
+#[test]
+fn a_file_led_prompt_sends_its_documents_after_the_scan_under_one_cap() {
+    let w = World::new("pick-named");
+    w.branch("feat/x");
+    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    w.memory(&repo, "walrus-header", "decision", "", "The walrus export puts the header row first", "The header row comes first.");
+    let p = Provider::start((0..12).map(|_| answer(json!({"ids": []}))).collect());
+    picks_on(&w, &p);
+    let named = |line: &Value| (line["named_docs"].clone(), line["named_chars"].clone(), line["named_sent"].clone());
+    put(&w.folder.join("docs/plan.md"), "Build the walrus export.");
+
+    let long = "please read docs/plan.md and then tell me what we should build next";
+    let (line, system, text) = named_pick(&w, &p, "A", "a1", long);
+    assert_eq!((system.as_str(), text), (PICK_SYSTEM, None), "1. 11 words besides the path");
+    assert_eq!(named(&line), (json!(0), json!(0), json!(0)), "8. each 0 with no document read");
+    let today = p.requests().last().unwrap().1.clone();
+    fs::rename(w.folder.join("docs/plan.md"), w.folder.join("docs/gone.md")).unwrap();
+    named_pick(&w, &p, "A", "a2", long);
+    assert_eq!(p.requests().last().unwrap().1, today, "1. today's request, byte for byte");
+    fs::rename(w.folder.join("docs/gone.md"), w.folder.join("docs/plan.md")).unwrap();
+    let (line, system, text) = named_pick(&w, &p, "A", "a3", "please read docs/plan.md and then tell me what we should build");
+    assert_eq!((system.as_str(), text.as_deref()), (PICK_SYSTEM_FILE, Some("=== docs/plan.md\nBuild the walrus export.")), "1. 10 words");
+    assert_eq!(named(&line), (json!(1), json!(41), json!(41)), "8");
+    let (line, _, _) = named_pick(&w, &p, "A", "a4", "what changed in the walrus export header since yesterday");
+    assert_eq!(named(&line), (json!(0), json!(0), json!(0)), "8. a prompt with no path");
+
+    let exts = ["a.md", "b.MD", "c.txt", "d.TXT", "e.rst", "f.RST", "g.org", "h.ORG", "i.adoc", "j.ADOC", "k.rs"];
+    for e in exts {
+        put(&w.folder.join("docs").join(e), e);
+    }
+    let paths: Vec<String> = exts.iter().map(|e| format!("docs/{e}")).collect();
+    let (line, _, text) = named_pick(&w, &p, "B", "b1", &format!("read {}", paths.join(" ")));
+    let want: Vec<String> = exts[..10].iter().map(|e| format!("=== docs/{e}\n{e}")).collect();
+    assert_eq!(text.unwrap(), want.join("\n\n"), "2. five extensions in either case, no .rs");
+    assert_eq!(line["named_docs"], 10);
+
+    put(&w.folder.join("docs/big.md"), &"x".repeat(262_145));
+    put(&w.folder.join("docs/edge.md"), &"y".repeat(262_144));
+    let (line, _, text) = named_pick(&w, &p, "C", "c1", "read docs/big.md");
+    assert_eq!((named(&line), text), ((json!(0), json!(0), json!(0)), None), "3. 262,145 bytes");
+    let (line, _, _) = named_pick(&w, &p, "C", "c2", "read docs/edge.md");
+    assert_eq!(named(&line), (json!(1), json!(262_161), json!(8000)), "3. 262,144 bytes");
+
+    let abs = w.root.join("abs/one.md");
+    put(&abs, "one");
+    put(&w.home.join("notes/two.md"), "two");
+    put(&w.folder.join("docs/three.md"), "three");
+    put(&w.folder.join("docs/four.md"), "four");
+    put(&w.folder.join("five.md"), "five");
+    put(&w.folder.join("six.md"), "six");
+    let ask = format!("read {} ~/notes/two.md docs/three.md @docs/four.md five.md @six.md", abs.display());
+    let (_, _, text) = named_pick(&w, &p, "D", "d1", &ask);
+    assert_eq!(
+        text.unwrap(),
+        format!("=== {}\none\n\n=== ~/notes/two.md\ntwo\n\n=== docs/three.md\nthree\n\n=== docs/four.md\nfour\n\n=== six.md\nsix", abs.display()),
+        "4. absolute, ~/, relative and @ paths, not a bare file name"
+    );
+
+    let token = format!("ghp_{}", "Zq8Xw3Kp9Lm2Nv7Bc4Rt6Yh1Jd5Fg0Sa3Ew8");
+    let body = format!("{}\nCI pushes with {token}", "z".repeat(20_000 - 16 - token.len()));
+    put(&w.folder.join("docs/secret.md"), &body);
+    let (line, _, text) = named_pick(&w, &p, "E", "e1", "read docs/secret.md");
+    let redacted = "=== docs/secret.md\n".len() + body.len() - token.len() + "[REDACTED:github-pat]".len();
+    assert_eq!(named(&line), (json!(1), json!(redacted), json!(8000)), "5. the scan runs on the whole file");
+    assert!(!text.unwrap().contains("ghp_"));
+
+    put(&w.folder.join("docs/first.md"), &"a".repeat(6000));
+    put(&w.folder.join("docs/second.md"), &"b".repeat(6000));
+    let (line, _, text) = named_pick(&w, &p, "F", "f1", "compare docs/first.md with docs/second.md");
+    let joined = format!("=== docs/first.md\n{}\n\n=== docs/second.md\n{}", "a".repeat(6000), "b".repeat(6000));
+    assert_eq!(text.unwrap(), joined.chars().take(8000).collect::<String>(), "6. one cap, in prompt order");
+    assert_eq!(named(&line), (json!(2), json!(joined.len()), json!(8000)), "6");
+}
+
+#[test]
+fn the_named_text_takes_only_the_room_the_memory_list_and_prompt_leave() {
+    let w = World::new("pick-named-room");
+    w.branch("feat/x");
+    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    for i in 0..30 {
+        w.memory(&repo, &format!("note-{i:03}"), "decision", "", &format!("Note {i:03}: {}", "the walrus export keeps one rule here. ".repeat(23)), "Body.");
+    }
+    put(&w.folder.join("docs/plan.md"), &"p".repeat(20_000));
+    let p = Provider::start(vec![answer(json!({"ids": []}))]);
+    picks_on(&w, &p);
+    let (line, system, text) = named_pick(&w, &p, "S", "s1", "read docs/plan.md");
+    let user = p.requests()[0].1["messages"][1]["content"].as_str().unwrap().to_string();
+    let sent = text.unwrap().chars().count();
+    assert_eq!((&line["skip"], &line["named_sent"]), (&Value::Null, &json!(sent)), "{line}");
+    assert!((2_500..3_500).contains(&sent), "7. about 3,000 characters of room: {sent}");
+    assert_eq!(system.chars().count() + user.chars().count(), 32_000, "7. the text fills the room and no more");
+}
+
 #[test]
 fn past_50_memories_a_pick_lists_the_50_that_best_match_the_prompt_and_the_newest_turn() {
     let w = World::new("pick-short");

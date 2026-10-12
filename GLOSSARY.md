@@ -154,6 +154,10 @@ _Avoid_: user message, turn (a turn also follows a task notification)
 A local text file whose path a real prompt names, such as a handoff document the user wrote for the next session.
 _Avoid_: attachment, shared file, linked file
 
+**File-led prompt**:
+A prompt with 10 words or fewer besides the paths of its named files, such as `do /tmp/handoff.md`. Its real ask is in the file.
+_Avoid_: pointer prompt
+
 **Headless session**:
 A session started by `claude -p` or the SDK, with no person typing. OpenRecall does nothing in it.
 _Avoid_: batch session, non-interactive run, sdk session
