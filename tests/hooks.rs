@@ -331,9 +331,11 @@ fn a_prompt_that_names_the_branchs_record_gets_it_before_the_branch_settles() {
         assert!(ctx.starts_with("Handoff record for branch feat/x"), "{prompt}: {ctx}");
         assert_eq!(w.routes(sid), ["identifier"], "{prompt}");
     }
+    let other = first("F", "check docs/y.md").unwrap_or_default();
+    assert!(other.contains("branch feat/y"), "only another branch's record lists it: {other}");
+    assert_eq!(w.routes("F"), ["file"], "the File route, not the identifier route");
     let pasted = format!("docs/x.md {}", "pasted ".repeat(300));
     for (sid, prompt, why) in [
-        ("F", "check docs/y.md", "only another branch's record lists it"),
         ("G", pasted.as_str(), "2,000 characters or more"),
         ("H", "docs/x.md for XYZ-99", "a ticket the record does not list"),
         ("I", "is abc123 in?", "a 6-character prefix"),
@@ -460,9 +462,7 @@ fn the_file_route_pushes_another_tasks_record_that_names_the_document() {
     let edit = |r: &World, p: &str| json!({"type": "tool_use", "id": "t1", "name": "Edit", "input": {"file_path": r.folder.join(p)}});
     let ask = |r: &World, sid: &str, prompt: &str| {
         start(r, sid);
-        let out = r.hook(&["recall"], sid, json!({"prompt": prompt, "cwd": r.folder}));
-        let v: Value = serde_json::from_str(out.trim()).ok()?;
-        v["hookSpecificOutput"]["additionalContext"].as_str().map(str::to_string)
+        r.pushed(sid, prompt)
     };
 
     api.branch("feat/a");

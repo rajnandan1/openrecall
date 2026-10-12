@@ -459,7 +459,7 @@ pub(crate) fn is_doc(path: &str) -> bool {
 }
 
 /// The documents a prompt names by an absolute, `~/`, relative or `@` path: each as typed without its `@`, and resolved
-/// against the session folder.
+/// against `folder`.
 pub(crate) fn named_docs(prompt: &str, folder: &Path, home: &Path) -> Vec<(String, PathBuf)> {
     paths_in(prompt)
         .into_iter()

@@ -209,12 +209,11 @@ fn recall(started: u128) -> Result<()> {
         );
         return status(&sid, &format!("recall {total} · skipped"));
     }
-    let cwd = input["cwd"].as_str().unwrap_or("");
-    let repo = git::Repo::find(cwd);
+    let repo = git::Repo::find(input["cwd"].as_str().unwrap_or(""));
     let mut context = vec![];
     let mut injected = vec![];
     if let Some(repo) = &repo
-        && let Some((identity, path, rec, how, file)) = route(repo, cwd, &s, &sid, prompt)
+        && let Some((identity, path, rec, how, file)) = route(repo, &s, &sid, prompt)
     {
         let address = address_of(&identity, &path);
         let text = fs::read_to_string(&path)?;
@@ -387,7 +386,6 @@ fn drop_reason(c: &index::Candidate, sid: &str, repo: Option<&git::Repo>) -> Opt
 /// newest record of another branch or a sibling repo that names a document the prompt names, with that path as typed.
 fn route(
     repo: &git::Repo,
-    cwd: &str,
     s: &Value,
     sid: &str,
     prompt: &str,
@@ -460,7 +458,7 @@ fn route(
     if prompt.chars().count() >= PASTED_CHARS {
         return None;
     }
-    let docs = turn::named_docs(prompt, Path::new(cwd), &user_home());
+    let docs = turn::named_docs(prompt, &repo.folder, &user_home());
     if docs.is_empty() {
         return None;
     }
