@@ -1312,7 +1312,7 @@ def report(now=None, binary=BINARY, label_fn=None, gate=None, dedupe_fn=None, pi
                         for k, v in enumerate((b, present(cls, i, typed), 1, c, c or b, present(cls, i, left))):
                             hits[key][k] += v
     level1 = [(by_sid[sid], x) for sid, xs in pushes.items() for x in xs]
-    judged = [(s, x) for s, x in level1 if x.get("how") != "sibling"]
+    judged = [(s, x) for s, x in level1 if x.get("how") not in ("sibling", "file")]
     right = sum(push_is_right(s, x) for s, x in judged)
     how = Counter(e.get("how") for e in events if e.get("event") == "pushed")
     verdicts = defaultdict(Counter)
@@ -1380,14 +1380,14 @@ def report(now=None, binary=BINARY, label_fn=None, gate=None, dedupe_fn=None, pi
             "## Level 1: the handoff push",
             "",
             "Every session replayed: %d pushes in %d sessions of %d. Right, by ticket 13's test (the session shares an "
-            "alias with the record, or does 2 or more real turns on its branch): %s. Each of the %d sibling pushes "
-            "shares an alias with its record, so the test cannot judge them and leaves them out. Prototype baseline: "
+            "alias with the record, or does 2 or more real turns on its branch): %s. The test cannot judge the %d sibling "
+            "and file pushes, so it leaves them out. Prototype baseline: "
             "106 of 111."
             % (len(level1), len(pushes), len(sessions), rate(right, len(judged)), len(level1) - len(judged)),
             "",
             "- By route: %s." % (", ".join("%s %d" % kv for kv in sorted(how.items())) or "none"),
             "- Right by route: %s." % ("; ".join(
-                "sibling %d not judged" % sum(v.values()) if k == "sibling" else
+                "%s %d not judged" % (k, sum(v.values())) if k in ("sibling", "file") else
                 "%s %d right, %d wrong, %d unjudged" % (k, v["right"], v["wrong"], v["unjudged"])
                 for k, v in sorted(verdicts.items())) or "none"),
             "- Late pushes, after a turn on the push's branch edited a file or ran `git commit`: %s. Edits by a subagent "

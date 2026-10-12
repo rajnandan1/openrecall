@@ -213,27 +213,41 @@ fn recall(started: u128) -> Result<()> {
     let mut context = vec![];
     let mut injected = vec![];
     if let Some(repo) = &repo
-        && let Some((identity, path, rec, how)) = route(repo, &s, &sid, prompt)
+        && let Some((identity, path, rec, how, file)) = route(repo, &s, &sid, prompt)
     {
         let address = address_of(&identity, &path);
         let text = fs::read_to_string(&path)?;
         let body = text.split_once("\n---\n").map_or(text.as_str(), |(_, b)| b);
         let written = if rec.answered_at.is_empty() { &rec.updated_at } else { &rec.answered_at };
-        let reflects = if how == "sibling" {
+        let reflects = if identity != repo.identity {
             format!(
                 "It reflects what was true then in another repo, {identity}, in the folder {}. Its paths are paths of \
                  that repo, not of this one; check them in that folder before acting on it.",
+                rec.folder
+            )
+        } else if how == "file" {
+            format!(
+                "It reflects what was true then on that branch, in the folder {}; check its paths there before \
+                 acting on it.",
                 rec.folder
             )
         } else {
             "It reflects what was true then; check the working tree before acting on it."
                 .to_string()
         };
-        context.push(format!(
-            "Handoff record for branch {}, last written {} by an earlier session on this task ({address}). \
-             {reflects}\n\n{body}",
-            rec.branch, written
-        ));
+        let header = if how == "file" {
+            format!(
+                "Handoff record of another task, not this session's: branch {}, last written {written} ({address}). \
+                 It names {file}, the file that this prompt names.",
+                rec.branch
+            )
+        } else {
+            format!(
+                "Handoff record for branch {}, last written {written} by an earlier session on this task ({address}).",
+                rec.branch
+            )
+        };
+        context.push(format!("{header} {reflects}\n\n{body}"));
         see(&mut s, &address);
         log(json!({"event": "pushed", "session": sid, "address": address, "how": how}));
         injected.push(address);
@@ -368,13 +382,14 @@ fn drop_reason(c: &index::Candidate, sid: &str, repo: Option<&git::Repo>) -> Opt
 /// The record to push, if any, with its repo identity and route: an alias the prompt names first (several records may
 /// share a ticket: the newest wins, and the one written from this folder breaks a tie, ticket 12), then the newest
 /// record of a sibling repo with the alias (issue 14), then the branch's record once the branch is settled, or before
-/// that when the prompt names one of its paths, PR numbers or commits (issue 9).
+/// that when the prompt names one of its paths, PR numbers or commits (issue 9). Last, the File route (issue 26): the
+/// newest record of another branch or a sibling repo that names a document the prompt names, with that path as typed.
 fn route(
     repo: &git::Repo,
     s: &Value,
     sid: &str,
     prompt: &str,
-) -> Option<(String, PathBuf, Record, &'static str)> {
+) -> Option<(String, PathBuf, Record, &'static str, String)> {
     let source = s["source"].as_str().unwrap_or("startup");
     if matches!(source, "resume" | "fork") {
         return None;
@@ -400,43 +415,69 @@ fn route(
                 )
             });
         if let Some((path, rec)) = hit {
-            return Some((repo.identity.clone(), path, rec, "alias"));
+            return Some((repo.identity.clone(), path, rec, "alias", String::new()));
         }
         let hit = siblings(&repo.identity)
             .into_iter()
             .filter(|(identity, p, r)| usable(identity, p, r) && names(r))
             .max_by_key(|(_, _, r)| r.updated_at.clone());
         if let Some((identity, path, rec)) = hit {
-            return Some((identity, path, rec, "sibling"));
+            return Some((identity, path, rec, "sibling", String::new()));
         }
     }
-    let branch = repo.branch().filter(|b| git::is_task(b))?;
-    let settled = source == "compact"
-        || (s["branch"] == branch.as_str() && s["turns"].as_u64().unwrap_or(0) >= 1);
-    let path = dir.join(format!("{}.md", record::stem(&branch)));
-    let rec = Record::parse(&fs::read_to_string(&path).ok()?);
-    let how = if source == "compact" {
-        "compact"
-    } else if settled {
-        "settle"
-    } else if prompt.chars().count() < PASTED_CHARS
-        && rec.named_in(
-            prompt,
-            &repo.folder.to_string_lossy(),
-            &user_home().to_string_lossy(),
-        )
-    {
-        "identifier"
-    } else {
-        return None;
+    let branch = repo.branch().filter(|b| git::is_task(b));
+    let own = branch
+        .as_ref()
+        .map(|b| dir.join(format!("{}.md", record::stem(b))));
+    let mine = || {
+        let (branch, path) = (branch.as_deref()?, own.clone()?);
+        let rec = Record::parse(&fs::read_to_string(&path).ok()?);
+        let settled = source == "compact"
+            || (s["branch"] == branch && s["turns"].as_u64().unwrap_or(0) >= 1);
+        let how = if source == "compact" {
+            "compact"
+        } else if settled {
+            "settle"
+        } else if prompt.chars().count() < PASTED_CHARS
+            && rec.named_in(
+                prompt,
+                &repo.folder.to_string_lossy(),
+                &user_home().to_string_lossy(),
+            )
+        {
+            "identifier"
+        } else {
+            return None;
+        };
+        let foreign = named.iter().any(|t| !rec.aliases.contains(t));
+        (!foreign && usable(&repo.identity, &path, &rec)).then_some((path, rec, how))
     };
-    let foreign = named.iter().any(|t| !rec.aliases.contains(t));
-    (!foreign && usable(&repo.identity, &path, &rec)).then_some((
-        repo.identity.clone(),
-        path,
-        rec,
-        how,
-    ))
+    if let Some((path, rec, how)) = mine() {
+        return Some((repo.identity.clone(), path, rec, how, String::new()));
+    }
+    if prompt.chars().count() >= PASTED_CHARS {
+        return None;
+    }
+    let docs = turn::named_docs(prompt, &repo.folder, &user_home());
+    if docs.is_empty() {
+        return None;
+    }
+    record::live(&dir)
+        .into_iter()
+        .filter(|(p, _)| Some(p) != own.as_ref())
+        .map(|(p, r)| (repo.identity.clone(), p, r))
+        .chain(siblings(&repo.identity))
+        .filter(|(identity, p, r)| usable(identity, p, r))
+        .filter_map(|(identity, p, r)| {
+            let text = fs::read_to_string(&p).ok()?;
+            let body = text.split_once("\n---\n").map_or(text.as_str(), |(_, b)| b);
+            let (typed, _) = docs
+                .iter()
+                .find(|(_, file)| r.names_file(body, file, &user_home()))?;
+            Some((identity, p, r, typed.clone()))
+        })
+        .max_by_key(|(_, _, r, _)| r.updated_at.clone())
+        .map(|(identity, p, r, typed)| (identity, p, r, "file", typed))
 }
 
 /// Stop: drop the turn's picks, then hand the turn to a detached writer and return at once (tickets 01 and 06). The

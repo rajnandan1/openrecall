@@ -127,7 +127,7 @@ class HarnessTest(unittest.TestCase):
                     "first push at prompt 1: 0, 2: 1, 3: 0.", "3 pushes in 3 sessions of 4", "Right, by ticket 13's test",
                     "the session shares an alias with the record, or does 2 or more real turns on its branch): 67% (2/3,",
                     "By route: settle 3.", "Right by route: settle 2 right, 1 wrong, 0 unjudged.",
-                    "Each of the 0 sibling pushes shares an alias with its record",
+                    "The test cannot judge the 0 sibling and file pushes, so it leaves them out.",
                     "Handoff pairs whose two sessions have different repo identities: 0, 0 of them measured.",
                     "Late pushes, after a turn on the push's branch edited a file or ran `git commit`: 0% (0/3,",
                     "Live pushes by route, in the recall log: none.",

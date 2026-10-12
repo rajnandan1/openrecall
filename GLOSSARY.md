@@ -89,8 +89,8 @@ The state of a session's branch after one completed turn on it, counted from the
 _Avoid_: stable, confirmed
 
 **Route**:
-The way a handoff record reaches a session. Alias: the prompt names one of the aliases of a record of any branch of the session's repo. Sibling: the prompt names an alias that no usable record of the session's repo has, and a record of a sibling repo has it. Identifier: before the branch is settled, the prompt names one of the paths, PR numbers or commits of the branch's record. Settle: the branch is settled, so its record comes with the next prompt. Compact: the context was just compacted.
-_Avoid_: trigger, source
+The way a handoff record reaches a session. Alias: the prompt names one of the aliases of a record of any branch of the session's repo. Sibling: the prompt names an alias that no usable record of the session's repo has, and a record of a sibling repo has it. Identifier: before the branch is settled, the prompt names one of the paths, PR numbers or commits of the branch's record. Settle: the branch is settled, so its record comes with the next prompt. Compact: the context was just compacted. File: no other route pushes a record, and the prompt names a document that a record of another task, in the session's repo or a sibling repo, also names.
+_Avoid_: trigger, source, path route (the identifier route also matches paths), writer route
 
 **Task hop**:
 A session that switches to a new task's branch after it starts, so the branch it started on belongs to the previous task. A rename keeps the task; a hop changes it.
@@ -101,7 +101,7 @@ The state of a handoff record whose task went idle. A retired record is never in
 _Avoid_: expired, archived, stale
 
 **Scope**:
-The set of memories a session may recall: those of its repo identity, when it has one, plus global ones. A handoff record of a sibling repo is outside the scope and reaches a session only by the sibling route.
+The set of memories a session may recall: those of its repo identity, when it has one, plus global ones. A handoff record of a sibling repo is outside the scope and reaches a session only by the sibling route or the file route.
 _Avoid_: namespace, project, folder
 
 **Scope size**:
@@ -149,6 +149,10 @@ _Avoid_: system prompt, background message
 **Real prompt**:
 A prompt the user typed that reaches the model. A task notification is not one, and neither is a built-in command such as `/model` or `/effort`, which never fires a hook.
 _Avoid_: user message, turn (a turn also follows a task notification)
+
+**Named file**:
+A local text file whose path a real prompt names, such as a handoff document the user wrote for the next session.
+_Avoid_: attachment, shared file, linked file
 
 **Headless session**:
 A session started by `claude -p` or the SDK, with no person typing. OpenRecall does nothing in it.
@@ -295,7 +299,7 @@ The share of an earlier session's final-state identifiers that reach a new sessi
 _Avoid_: recall rate, hit rate, continuity score
 
 **Right push**:
-A handoff record push to a session that shares one of the record's aliases, or that does 2 or more real turns ending on the record's branch. A push to a session with one real prompt and no shared alias is unjudged: the test can never call it right. The test does not apply to a push by the sibling route. A person judges such a push.
+A handoff record push to a session that shares one of the record's aliases, or that does 2 or more real turns ending on the record's branch. A push to a session with one real prompt and no shared alias is unjudged: the test can never call it right. The test does not apply to a push by the sibling route or the file route. A person judges such a push.
 _Avoid_: correct push, hit, good push
 
 **Late push**:

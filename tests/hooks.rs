@@ -331,9 +331,11 @@ fn a_prompt_that_names_the_branchs_record_gets_it_before_the_branch_settles() {
         assert!(ctx.starts_with("Handoff record for branch feat/x"), "{prompt}: {ctx}");
         assert_eq!(w.routes(sid), ["identifier"], "{prompt}");
     }
+    let other = first("F", "check docs/y.md").unwrap_or_default();
+    assert!(other.contains("branch feat/y"), "only another branch's record lists it: {other}");
+    assert_eq!(w.routes("F"), ["file"], "the File route, not the identifier route");
     let pasted = format!("docs/x.md {}", "pasted ".repeat(300));
     for (sid, prompt, why) in [
-        ("F", "check docs/y.md", "only another branch's record lists it"),
         ("G", pasted.as_str(), "2,000 characters or more"),
         ("H", "docs/x.md for XYZ-99", "a ticket the record does not list"),
         ("I", "is abc123 in?", "a 6-character prefix"),
@@ -450,6 +452,72 @@ fn a_session_gets_the_record_of_a_sibling_repo_that_names_the_alias() {
         "the MCP tool reads a sibling record by its address: {text}"
     );
     m.close();
+}
+
+#[test]
+fn the_file_route_pushes_another_tasks_record_that_names_the_document() {
+    let w = World::new("file-route");
+    let api = w.repo("api", Some("git@github.com:someone/api.git"));
+    let twin = w.repo("w2", Some("git@github.com:someone/app.git"));
+    let edit = |r: &World, p: &str| json!({"type": "tool_use", "id": "t1", "name": "Edit", "input": {"file_path": r.folder.join(p)}});
+    let ask = |r: &World, sid: &str, prompt: &str| {
+        start(r, sid);
+        r.pushed(sid, prompt)
+    };
+
+    api.branch("feat/a");
+    start(&api, "A");
+    turn(&api, "A", "Plan the export", "Wrote the plan to /tmp/openrecall-export-handoff.md. Next: build it in app.");
+    w.branch("feat/b");
+    let ctx = ask(&w, "S1", "do /tmp/openrecall-export-handoff.md").expect("1. the sibling record names the /tmp file");
+    let (head, body) = ctx.split_once("\n\n").unwrap();
+    assert!(
+        head.starts_with("Handoff record of another task, not this session's: branch feat/a, last written 20")
+            && head.ends_with(&format!(
+                "(github.com/someone/api/handoffs/feat--a). It names /tmp/openrecall-export-handoff.md, the file that \
+                 this prompt names. It reflects what was true then in another repo, github.com/someone/api, in the \
+                 folder {}. Its paths are paths of that repo, not of this one; check them in that folder before acting \
+                 on it.",
+                api.folder.display()
+            )),
+        "1. the sibling header: {head}"
+    );
+    assert!(body.starts_with("## Last ask\nPlan the export\n"), "1. the body: {body}");
+    assert_eq!(w.routes("S1"), ["file"], "1");
+
+    w.branch("feat/c");
+    start(&w, "C");
+    w.turn("C", &[user("Write the plan"), said("Editing.", Some(edit(&w, "docs/plan.md")))], "");
+    w.turn("C", &[user("And the code"), said("Editing.", Some(edit(&w, "src/lib.rs")))], "");
+    w.branch("feat/d");
+    let ctx = ask(&w, "D", "implement @docs/plan.md").expect("2. another branch's record lists the document");
+    let head = ctx.split_once("\n\n").unwrap().0;
+    assert!(
+        head.contains("branch feat/c, last written 20")
+            && head.ends_with(&format!(
+                "(github.com/someone/app/handoffs/feat--c). It names docs/plan.md, the file that this prompt names. It \
+                 reflects what was true then on that branch, in the folder {}; check its paths there before acting on it.",
+                w.folder.display()
+            )),
+        "2. the same-repo header: {head}"
+    );
+    assert_eq!(w.routes("D"), ["file"], "2");
+    assert!(ask(&w, "D3", "fix src/lib.rs").is_none(), "3. a code file");
+    let pasted = format!("implement docs/plan.md {}", "pasted ".repeat(300));
+    assert!(ask(&w, "D4", &pasted).is_none(), "4. a prompt of 2,000 characters or more");
+    twin.branch("feat/e");
+    assert!(ask(&twin, "E", "implement docs/plan.md").is_none(), "5. the same repo path in another worktree");
+
+    w.turn("D", &[user("implement @docs/plan.md"), said("Editing.", Some(edit(&w, "docs/plan.md")))], "");
+    w.branch("feat/c");
+    assert!(ask(&w, "C6", "implement docs/plan.md").is_some_and(|c| c.contains("handoffs/feat--c)")), "6");
+    assert_eq!(w.routes("C6"), ["identifier"], "6. the own branch record wins");
+    w.branch("feat/f");
+    assert!(
+        ask(&w, "F7", "implement docs/plan.md").is_some_and(|c| c.contains("(github.com/someone/app/handoffs/feat--d)")),
+        "7. the newer of two records"
+    );
+    assert_eq!(w.routes("F7"), ["file"], "7");
 }
 
 #[test]

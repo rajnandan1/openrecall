@@ -1,4 +1,4 @@
-use crate::turn::{Found, TICKET, commits_in, norm_path, paths_in, prs_in};
+use crate::turn::{Found, TICKET, commits_in, norm_path, paths_in, prs_in, resolve};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -297,6 +297,43 @@ impl Record {
                     .any(|k| k.len() >= 7 && (k.starts_with(c) || c.starts_with(k.as_str())))
             })
     }
+
+    /// The File route's test: one of the record's paths, resolved through its own folder, is `file`, or `body` (the
+    /// record's text) holds the file's absolute, `/private/` or `~/` spelling as a whole path.
+    pub fn names_file(&self, body: &str, file: &Path, home: &Path) -> bool {
+        if self.paths.iter().any(|p| resolve(p, Path::new(&self.folder), home) == file) {
+            return true;
+        }
+        let abs = file.to_string_lossy();
+        let mut spellings = vec![abs.to_string()];
+        if abs.starts_with("/tmp/") || abs.starts_with("/var/") {
+            spellings.push(format!("/private{abs}"));
+        }
+        if let Ok(rest) = file.strip_prefix(home).map(Path::to_string_lossy)
+            && !home.as_os_str().is_empty()
+        {
+            spellings.push(format!("~/{rest}"));
+        }
+        spellings.iter().any(|s| whole_in(body, s))
+    }
+}
+
+/// `path` stands in `text` with no path character before it, and neither a path character nor a `.` that goes on
+/// with a letter or digit after it.
+fn whole_in(text: &str, path: &str) -> bool {
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    text.match_indices(path).any(|(i, _)| {
+        let mut after = text[i + path.len()..].chars();
+        !text[..i]
+            .chars()
+            .next_back()
+            .is_some_and(|c| word(c) || ".~/-".contains(c))
+            && match after.next() {
+                Some('.') => !after.next().is_some_and(char::is_alphanumeric),
+                Some(c) => !word(c) && !"/-".contains(c),
+                None => true,
+            }
+    })
 }
 
 /// The live records in a handoffs directory, with their files.
@@ -609,6 +646,22 @@ mod tests {
         ask(&mut r, "Why does ABC-12 fail on empty rows?");
         ask(&mut r, work);
         assert_eq!(r.goal, "Why does ABC-12 fail on empty rows?", "a question that names a ticket is the task");
+    }
+
+    #[test]
+    fn names_file_by_its_paths_or_a_whole_path_in_its_text() {
+        let home = Path::new("/h");
+        let r = Record { folder: "/w/app".into(), paths: vec!["docs/a.md".into(), "~/n/b.md".into()], ..Default::default() };
+        let names = |body: &str, file: &str| r.names_file(body, Path::new(file), home);
+        assert!(names("", "/w/app/docs/a.md") && names("", "/h/n/b.md"));
+        assert!(!names("", "/w/other/docs/a.md"), "another worktree's file");
+        for body in ["see /tmp/h.md.", "(/private/tmp/h.md)", "`/tmp/h.md`: done"] {
+            assert!(names(body, "/tmp/h.md"), "{body}");
+        }
+        assert!(names("in ~/n/c.md", "/h/n/c.md"));
+        for body in ["/tmp/h.md.bak", "/tmp/h.mdx", "/tmp/h.md/x", "x/tmp/h.md", "~/tmp/h.md", "/tmp/h.md-2"] {
+            assert!(!names(body, "/tmp/h.md"), "{body}");
+        }
     }
 
     #[test]
