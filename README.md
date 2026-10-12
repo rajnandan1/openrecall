@@ -115,14 +115,15 @@ At the end of each turn, OpenRecall updates the handoff record of the task in th
 
 Before OpenRecall writes a record, it replaces each secret with `[REDACTED:<rule-id>]`. It finds secrets with the rules of gitleaks, a secret scanner.
 
-OpenRecall injects a handoff record only when the new session shows which task it is on. To inject means to add text to Claude's context before Claude reads your prompt. The session shows its task in one of four ways:
+OpenRecall injects a handoff record only when the new session shows which task it is on. To inject means to add text to Claude's context before Claude reads your prompt. The session shows its task in one of five ways:
 
 - A prompt names one of the tickets in the record. OpenRecall injects the record with that prompt. The ticket can be in upper case, such as `ABC-12`. It can also be in lower case inside a path or a file name, such as `docs/handoff-abc-12.md`, but only when a record already has the ticket.
 - Before the session finishes a turn on the branch, a prompt names one of the paths, PR numbers or commits in the record of the branch. OpenRecall injects the record with that prompt. A path must include its folder, such as `src/export.py` or `@src/export.py`. A prompt of 2,000 characters or more does not count, because it is usually pasted text.
 - The session finishes one turn on the branch of the record, without a switch to another branch. OpenRecall injects the record with the next prompt.
 - A prompt names a ticket that no record of this repo has, and a record of another repo with the same owner has it. For example, a session in `github.com/acme/web` gets a record of `github.com/acme/api`. OpenRecall injects that record with the prompt. Its header names the other repo and its folder, because the paths in the record are paths of that repo.
+- No other way injects a record, and a prompt of under 2,000 characters names a document (`.md`, `.txt`, `.rst`, `.org` or `.adoc`) that the record of another branch also names. That record can be in this repo or in another repo with the same owner. OpenRecall injects the newest such record with the prompt. Its header says that the record belongs to another task.
 
-The fourth way has a risk. When one owner has a public repo and a private repo, a record of the private repo can reach a session of the public repo. Claude could then repeat private text in a commit, a PR or an issue of the public repo. OpenRecall cannot see which repo is public.
+The fourth and fifth ways have a risk. When one owner has a public repo and a private repo, a record of the private repo can reach a session of the public repo. Claude could then repeat private text in a commit, a PR or an issue of the public repo. OpenRecall cannot see which repo is public.
 
 The rest of the rules for handoff records:
 

@@ -1,6 +1,7 @@
 use regex::Regex;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+use std::path::{Component, Path, PathBuf};
 use std::sync::LazyLock;
 
 /// One turn of a transcript: the prompt that opened it and what the assistant did after it.
@@ -449,6 +450,52 @@ pub(crate) fn norm_path(raw: &str, folder: &str, home: &str) -> Option<String> {
     (!p.is_empty()).then(|| p.to_string())
 }
 
+/// A file whose name ends in `.md`, `.txt`, `.rst`, `.org` or `.adoc`, in any letter case.
+pub(crate) fn is_doc(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| ["md", "txt", "rst", "org", "adoc"].iter().any(|d| e.eq_ignore_ascii_case(d)))
+}
+
+/// The documents a prompt names by an absolute, `~/`, relative or `@` path: each as typed without its `@`, and resolved
+/// against the session folder.
+pub(crate) fn named_docs(prompt: &str, folder: &Path, home: &Path) -> Vec<(String, PathBuf)> {
+    paths_in(prompt)
+        .into_iter()
+        .map(|p| p.strip_prefix('@').unwrap_or(p))
+        .filter_map(|p| {
+            let bare = LINE_SUFFIX.replace(p, "");
+            is_doc(&bare).then(|| (p.to_string(), resolve(&bare, folder, home)))
+        })
+        .collect()
+}
+
+/// One spelling per file: `~/` is the home, a relative path sits in `folder`, `.` and `..` are gone, and macOS
+/// `/private/tmp` and `/private/var` are `/tmp` and `/var`.
+pub(crate) fn resolve(path: &str, folder: &Path, home: &Path) -> PathBuf {
+    let joined = match path.strip_prefix("~/") {
+        Some(rest) => home.join(rest),
+        None => folder.join(path),
+    };
+    let mut out = PathBuf::new();
+    for c in joined.components() {
+        match c {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            c => out.push(c),
+        }
+    }
+    for alias in ["/private/tmp", "/private/var"] {
+        if let Ok(rest) = out.strip_prefix(alias) {
+            return Path::new(&alias["/private".len()..]).join(rest);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,6 +506,26 @@ mod tests {
             .map(|l| l.to_string() + "\n")
             .collect::<String>()
             .into_bytes()
+    }
+
+    #[test]
+    fn named_docs_resolve_to_one_spelling() {
+        let (folder, home) = (Path::new("/w/app"), Path::new("/h"));
+        let docs = named_docs(
+            "read /private/tmp/a.md, ~/n/b.TXT:3 and @docs/../c.org then src/x.rs, d.md and ./e.adoc",
+            folder,
+            home,
+        );
+        let got: Vec<(&str, &Path)> = docs.iter().map(|(t, p)| (t.as_str(), p.as_path())).collect();
+        assert_eq!(
+            got,
+            [
+                ("/private/tmp/a.md", Path::new("/tmp/a.md")),
+                ("~/n/b.TXT:3", Path::new("/h/n/b.TXT")),
+                ("docs/../c.org", Path::new("/w/app/c.org")),
+                ("./e.adoc", Path::new("/w/app/e.adoc")),
+            ]
+        );
     }
 
     #[test]
