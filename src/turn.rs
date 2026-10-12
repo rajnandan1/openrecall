@@ -58,6 +58,8 @@ static PATH: LazyLock<Regex> = LazyLock::new(|| {
     .unwrap()
 });
 pub(crate) static LINE_SUFFIX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r":\d+(?:-\d+)?$").unwrap());
+static AT_FILE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^@[\w.-]*[A-Za-z][\w.-]*\.[A-Za-z]\w{0,7}(?::\d+(?:-\d+)?)?$").unwrap());
 
 pub fn is_notification(prompt: &str) -> bool {
     prompt.contains("<task-notification>")
@@ -458,15 +460,32 @@ pub(crate) fn is_doc(path: &str) -> bool {
         .is_some_and(|e| ["md", "txt", "rst", "org", "adoc"].iter().any(|d| e.eq_ignore_ascii_case(d)))
 }
 
-/// The documents a prompt names by an absolute, `~/`, relative or `@` path: each as typed without its `@`, and resolved
-/// against `folder`.
+/// The paths a prompt names, in prompt order: those of `paths_in`, and the `@` mentions of a file with no folder, such
+/// as `@notes.md`, which `paths_in` leaves out.
+pub(crate) fn named_paths(text: &str) -> Vec<&str> {
+    let mut out = paths_in(text);
+    out.extend(
+        text.split_whitespace()
+            .map(|t| {
+                t.trim_start_matches(|c| "`'\"()[]<>,;:!?*".contains(c))
+                    .trim_end_matches(|c| "`'\"()[]<>,;:!?*.".contains(c))
+            })
+            .filter(|t| AT_FILE.is_match(t)),
+    );
+    out.sort_by_key(|p| p.as_ptr() as usize);
+    out
+}
+
+/// The documents a prompt names by an absolute, `~/`, relative or `@` path: each as typed without its `@` and line
+/// number, and resolved against `folder`.
 pub(crate) fn named_docs(prompt: &str, folder: &Path, home: &Path) -> Vec<(String, PathBuf)> {
-    paths_in(prompt)
+    named_paths(prompt)
         .into_iter()
-        .map(|p| p.strip_prefix('@').unwrap_or(p))
-        .filter_map(|p| {
-            let bare = LINE_SUFFIX.replace(p, "");
-            is_doc(&bare).then(|| (p.to_string(), resolve(&bare, folder, home)))
+        .map(|p| LINE_SUFFIX.replace(p.strip_prefix('@').unwrap_or(p), "").into_owned())
+        .filter(|p| is_doc(p))
+        .map(|p| {
+            let full = resolve(&p, folder, home);
+            (p, full)
         })
         .collect()
 }
@@ -512,7 +531,7 @@ mod tests {
     fn named_docs_resolve_to_one_spelling() {
         let (folder, home) = (Path::new("/w/app"), Path::new("/h"));
         let docs = named_docs(
-            "read /private/tmp/a.md, ~/n/b.TXT:3 and @docs/../c.org then src/x.rs, d.md and ./e.adoc",
+            "read /private/tmp/a.md, ~/n/b.TXT:3 and @docs/../c.org then src/x.rs, d.md, (@f.rst) and ./e.adoc",
             folder,
             home,
         );
@@ -521,8 +540,9 @@ mod tests {
             got,
             [
                 ("/private/tmp/a.md", Path::new("/tmp/a.md")),
-                ("~/n/b.TXT:3", Path::new("/h/n/b.TXT")),
+                ("~/n/b.TXT", Path::new("/h/n/b.TXT")),
                 ("docs/../c.org", Path::new("/w/app/c.org")),
+                ("f.rst", Path::new("/w/app/f.rst")),
                 ("./e.adoc", Path::new("/w/app/e.adoc")),
             ]
         );
