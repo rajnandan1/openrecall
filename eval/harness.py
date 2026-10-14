@@ -935,6 +935,13 @@ def load_labels(path):
     return {(r["case"], r["address"], r["text_hash"]): r["label"] for r in (read(path) if os.path.exists(path) else [])}
 
 
+def reply_before(s, at):
+    """Claude's last text before the prompt at `at`: the last text block of the session's last real turn."""
+    turns = [t for t in s["turns"] if t["real"] and t["at"] < at] if s else []
+    texts = [x for g in turns[-1]["groups"] for x in g["text"]] if turns else []
+    return texts[-1] if texts else ""
+
+
 def label_candidates(cases, results, by_sid, label_fn, path=None):
     """Ticket 16: every logged candidate and pick gets a label in `path` (the eval set's labels.jsonl by default),
     reused until the memory's text changes. The judge is called only for memories with no label yet, one call per
@@ -951,7 +958,7 @@ def label_candidates(cases, results, by_sid, label_fn, path=None):
                 continue
             s = by_sid.get(c["session"])
             earlier = c["earlier"] if "earlier" in c else [t["ask"] for t in s["turns"] if t["real"] and t["at"] < c["at"]][-2:] if s else []
-            for row in label_fn(c, todo, r["memories"], earlier):
+            for row in label_fn(c, todo, r["memories"], earlier, reply_before(s, c["at"])):
                 labels[(row["case"], row["address"], row["text_hash"])] = row["label"]
                 fh.write(json.dumps(row) + "\n")
     return labels
@@ -1462,7 +1469,8 @@ def report_set(folder, binary=BINARY, label_fn=None, picks=False, now=None):
     now = now or datetime.now(timezone.utc)
     cases = read(os.path.join(folder, "cases.jsonl"))
     results = replay_cases(binary, cases, {c["id"]: c["main"] for c in cases}, real_provider() if picks else None, folder)
-    labels = label_candidates(cases, results, {}, label_fn, os.path.join(folder, "labels.jsonl"))
+    by_sid = {sid: scan(os.path.join(folder, "transcripts", sid + ".jsonl")) for sid in {c["session"] for c in cases}}
+    labels = label_candidates(cases, results, by_sid, label_fn, os.path.join(folder, "labels.jsonl"))
     off = gate_metrics(cases, results, labels)
     skips = Counter(r["skipped"] for r in results if r["skipped"])
     jobs = [(c, r) for c, r in zip(cases, results) if r.get("pick")]

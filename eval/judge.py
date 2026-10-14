@@ -26,9 +26,10 @@ JUDGE = [os.environ.get("OPENRECALL_JUDGE", ""),
          os.path.expanduser("~/.claude/plugins/marketplaces/sensibility/skills/judge/scripts/judge.py"),
          os.path.expanduser("~/Code/sensibility/skills/judge/scripts/judge.py")]
 MEMORY_CHARS = 1500
-# What the index holds of a memory's body (src/index.rs BODY_BYTES): a dedupe candidate is read that far, in calls of 5.
-CANDIDATE_CHARS = 4096
+# What the index holds of a body (src/index.rs BODY_BYTES): a labeled memory and a dedupe candidate are read that far.
+BODY_CHARS = 4096
 CONTEXT_CHARS = 400
+REPLY_CHARS = 4000
 
 
 class JudgeError(Exception):
@@ -55,15 +56,17 @@ def ask(state, questions):
 def question(key):
     return dict(type="choice", criteria=CRITERIA,
                 instructions="A coding assistant is about to answer `prompt`; `earlier_prompts` is what the user asked "
-                             "before. Would the memory `memories.%s` help it answer or act on `prompt`?" % key)
+                             "before, and `last_reply` is the end of the assistant's last message before `prompt` (empty "
+                             "when `prompt` opens the session). Would the memory `memories.%s` help it answer or act on "
+                             "`prompt`?" % key)
 
 
-def label_texts(prompt, earlier, texts):
+def label_texts(prompt, earlier, texts, reply=""):
     """Labels {key: memory text} for one prompt in one call. Returns {key: (label, probabilities)}."""
     if not texts:
         return {}
-    state = dict(prompt=prompt, earlier_prompts=[e[:CONTEXT_CHARS] for e in earlier],
-                 memories={k: t[:MEMORY_CHARS] for k, t in texts.items()})
+    state = dict(prompt=prompt, earlier_prompts=[e[:CONTEXT_CHARS] for e in earlier], last_reply=reply[-REPLY_CHARS:],
+                 memories={k: t[:BODY_CHARS] for k, t in texts.items()})
     answers = ask(state, {k: question(k) for k in texts})
     out = {}
     for k, a in answers.items():
@@ -72,10 +75,11 @@ def label_texts(prompt, earlier, texts):
     return out
 
 
-def label_case(case, candidates, memories, earlier):
+def label_case(case, candidates, memories, earlier, reply):
     """Jev labels of a case's unlabeled candidates: rows for labels.jsonl."""
     keys = {"m%d" % i: c for i, c in enumerate(candidates, 1) if c["address"] in memories}
-    got = label_texts(case["prompt"], earlier, {k: harness.memory_text(memories[c["address"]]) for k, c in keys.items()})
+    got = label_texts(case["prompt"], earlier, {k: harness.memory_text(memories[c["address"]]) for k, c in keys.items()},
+                      reply)
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     return [dict(case=case["id"], address=c["address"], text_hash=c["text_hash"], label=got[k][0], judge="jev", at=now,
                  note=got[k][1]) for k, c in keys.items() if k in got]
@@ -86,7 +90,7 @@ def dedupe_check(fact, candidates, old=None):
     fact make it out of date (supersede); for a replace, does the merged fact keep the old copy's detail."""
     repeat, supersede = [], []
     for at in range(0, len(candidates), 5):
-        texts = {"c%d" % i: t[:CANDIDATE_CHARS] for i, t in enumerate(candidates[at:at + 5])}
+        texts = {"c%d" % i: t[:BODY_CHARS] for i, t in enumerate(candidates[at:at + 5])}
         questions = {}
         for k in texts:
             questions["repeat_" + k] = dict(type="noul", instructions="Does `candidates.%s` already state what `fact` says, "
@@ -163,7 +167,7 @@ def calibrate():
             continue
         s = harness.scan(glob.glob(os.path.join(harness.PROJECTS, "*", case["session"] + ".jsonl"))[0])
         earlier = [t["ask"] for t in s["turns"] if t["real"] and t["at"] < case["at"]][-2:]
-        got = label_texts(case["prompt"], earlier, {"m1": block})["m1"]
+        got = label_texts(case["prompt"], earlier, {"m1": block}, harness.reply_before(s, case["at"]))["m1"]
         rows.append(dict(case=case["id"], hand=hand, jev=got[0], note=got[1]))
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with open(os.path.join(harness.EVAL, "calibration.jsonl"), "a") as fh:
