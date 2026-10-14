@@ -8,6 +8,7 @@ import re
 import tempfile
 import threading
 import unittest
+import unittest.mock
 from datetime import datetime, timezone
 
 import harness
@@ -147,6 +148,19 @@ class HarnessTest(unittest.TestCase):
                     "searched cases, process start included, with picks on: p50"):
             self.assertIn(row, report)
 
+    def test_judge_reads_the_reply_end_and_the_indexed_body(self):
+        import judge
+        s = harness.scan(os.path.join(harness.PROJECTS, "-w-app", "new.jsonl"))
+        self.assertEqual(harness.reply_before(s, "2026-01-05T10:40:00Z"), "On it.")
+        self.assertEqual(harness.reply_before(s, "2026-01-05T10:30:01Z"), "", "the session's first prompt has no reply")
+        reply = "x" * 5000 + "Options: 1. retry the export, 2. skip empty rows."
+        with unittest.mock.patch.object(judge, "ask", side_effect=lambda state, q: {k: dict(choice="useful") for k in q}) as ask:
+            got = judge.label_texts("let us do 1", ["which fix?"], {"m1": "a" * 5000}, reply)
+        state = ask.call_args[0][0]
+        self.assertEqual(got["m1"][0], "useful")
+        self.assertEqual((len(state["memories"]["m1"]), len(state["last_reply"])), (4096, 4000))
+        self.assertTrue(state["last_reply"].endswith("2. skip empty rows."), "a long reply keeps its end")
+
     def test_level_two_metrics(self):
         cases = [dict(id="C1", session="new", at="2026-01-05T10:40:00Z", prompt="check src/export.py again", repo="github.com/x/app"),
                  dict(id="C2", session="new", at="2026-01-05T10:30:01Z", prompt="/implement continue the export work", repo=None)]
@@ -160,7 +174,7 @@ class HarnessTest(unittest.TestCase):
                         injected=["builtin/-w-app/m", "builtin/-w-app/n"], memories={"builtin/-w-app/m": mem}),
                    dict(case="C2", ms=2.0, terms=2, index_size=9, blind=False, skipped=None, errors=[], dropped={"rot": 1},
                         candidates=[cand("builtin/-w-app/n", 5.5)], injected=["builtin/-w-app/n"], memories={})]
-        labels = harness.label_candidates(cases, results, {}, lambda c, todo, memories, earlier: [
+        labels = harness.label_candidates(cases, results, {}, lambda c, todo, memories, earlier, reply: [
             dict(case=c["id"], address=x["address"], text_hash=x["text_hash"], judge="test", at="", note={},
                  label="useful" if x["address"].endswith("/m") else "noise") for x in todo])
         self.assertEqual(labels[("C1", "builtin/-w-app/m", "h")], "useful")
@@ -261,7 +275,7 @@ class HarnessTest(unittest.TestCase):
         by_sid = {s["sid"]: s for s in sessions}
         asked = []
 
-        def label(c, todo, memories, earlier):
+        def label(c, todo, memories, earlier, reply):
             asked.append([x["address"] for x in todo])
             return [dict(case=c["id"], address=x["address"], text_hash=x["text_hash"], judge="test", at="", note={},
                          label="useful" if x["address"].endswith("/a") else "noise") for x in todo if x["address"] in memories]
@@ -598,7 +612,7 @@ class HarnessTest(unittest.TestCase):
         results = [new, ledger, below]
         asked = []
 
-        def label(c, todo, memories, earlier):
+        def label(c, todo, memories, earlier, reply):
             asked.append((c["id"], [x["address"] for x in todo]))
             return [dict(case=c["id"], address=x["address"], text_hash=x["text_hash"], judge="test", at="", note={},
                          label="noise" if x["address"] == "o" else "useful") for x in todo]
