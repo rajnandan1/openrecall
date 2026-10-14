@@ -398,16 +398,9 @@ class HarnessTest(unittest.TestCase):
         self.assertEqual(results[3]["skipped"], "empty-args")
         self.assertFalse(any(r["errors"] for r in results))
 
-    @unittest.skipUnless(os.path.exists(harness.BINARY), "needs cargo build --release")
-    def test_picks_through_the_binary(self):
-        tmp, mem = self.checkout_with_memories()
-        prompt = "why do exports fail on empty rows in ABC-12"
-        with open(os.path.join(harness.PROJECTS, "-w-app", "picked.jsonl"), "w") as fh:
-            fh.writelines(json.dumps(o) + "\n" for o in (
-                user("2030-01-01T00:00:00Z", "plan the export fix for the empty rows", "feat-a"),
-                said("2030-01-01T00:01:00Z", "The null check runs late.", "feat-a", "p1"),
-                user("2030-01-01T00:10:00Z", prompt, "feat-a"),
-                said("2030-01-01T00:11:00Z", "It reads the rows first.", "feat-a", "p2")))
+    def provider(self, name_of):
+        """A made-up provider that picks the memory `name_of(request text)` names: the extract.toml text, and the
+        requests it got."""
         sent = []
 
         class Provider(http.server.BaseHTTPRequestHandler):
@@ -416,8 +409,7 @@ class HarnessTest(unittest.TestCase):
             def do_POST(self):
                 text = json.loads(self.rfile.read(int(self.headers["Content-Length"])))["messages"][1]["content"]
                 sent.append(text)
-                name = "export-empty-rows" if text.endswith("again") else "filler-0"
-                ids = re.findall(r"^- (m\d+): %s:" % name, text, re.M)
+                ids = re.findall(r"^- (m\d+): %s:" % name_of(text), text, re.M)
                 reply = json.dumps(dict(choices=[dict(finish_reason="stop", message=dict(content=json.dumps(dict(ids=ids))))],
                                         usage=dict(prompt_tokens=900, completion_tokens=12, cost=0.01))).encode()
                 self.send_response(200)
@@ -436,10 +428,22 @@ class HarnessTest(unittest.TestCase):
         self.addCleanup(server.shutdown)
         self.addCleanup(setattr, harness, "PICK_WAIT", harness.PICK_WAIT)
         harness.PICK_WAIT = 30
+        return 'base_url = "http://127.0.0.1:%d"\npick = false\nmodel = "made-up"\n' % server.server_address[1], sent
+
+    @unittest.skipUnless(os.path.exists(harness.BINARY), "needs cargo build --release")
+    def test_picks_through_the_binary(self):
+        tmp, mem = self.checkout_with_memories()
+        prompt = "why do exports fail on empty rows in ABC-12"
+        with open(os.path.join(harness.PROJECTS, "-w-app", "picked.jsonl"), "w") as fh:
+            fh.writelines(json.dumps(o) + "\n" for o in (
+                user("2030-01-01T00:00:00Z", "plan the export fix for the empty rows", "feat-a"),
+                said("2030-01-01T00:01:00Z", "The null check runs late.", "feat-a", "p1"),
+                user("2030-01-01T00:10:00Z", prompt, "feat-a"),
+                said("2030-01-01T00:11:00Z", "It reads the rows first.", "feat-a", "p2")))
+        toml, sent = self.provider(lambda text: "export-empty-rows" if text.endswith("again") else "filler-0")
         case = dict(id="P1", session="picked", at="2030-01-01T00:10:00Z", prompt=prompt, repo="github.com/someone/app",
                     branch="feat-a", folder=tmp)
         cases = [case, dict(case, id="P2", prompt=prompt + " again"), dict(case, id="P3", prompt="/implement")]
-        toml = 'base_url = "http://127.0.0.1:%d"\npick = false\nmodel = "made-up"\n' % server.server_address[1]
         results = harness.replay_cases(harness.BINARY, cases, harness.mains_of(cases), (toml, "made-up-key"))
         address = "builtin/%s/" % harness.slug(tmp)
         with open(os.path.join(mem, "filler-0.md")) as fh:
@@ -453,6 +457,101 @@ class HarnessTest(unittest.TestCase):
         self.assertIn("## Session so far, newest turn first\n[user] plan the export fix for the empty rows\n"
                       "[assistant] The null check runs late.\n\n## Prompt\n" + prompt, sent[0])
         self.assertNotIn("It reads the rows first", sent[0], "the transcript stops before the case's prompt")
+
+    def test_facts_as_they_stood(self):
+        orhome = os.path.dirname(harness.EVAL)
+        repo = os.path.join(orhome, "repos", "github.com", "someone", "app")
+        os.makedirs(os.path.join(repo, "replaced"))
+        fact = lambda source, body: "---\nname: deploy\nsource: S %s\n---\n\n%s\n" % (source, body)
+        for name, text in (("deploy.md", fact("2026-01-09T00:00:00Z", "Deploy on Fridays.")),
+                           ("replaced/deploy.2026-01-04T000000Z.md", fact("2026-01-01T00:00:00Z", "Deploy on Mondays.")),
+                           ("replaced/deploy.2026-01-09T000000Z.md", fact("2026-01-04T00:00:00Z", "Deploy on Tuesdays.")),
+                           ("replaced/deploy-old.2026-01-09T000000Z.md", fact("2026-01-01T00:00:00Z", "Another fact.")),
+                           ("new.md", fact("2026-01-08T00:00:00Z", "Born later."))):
+            with open(os.path.join(repo, name), "w") as fh:
+                fh.write(text)
+        at = lambda day: datetime(2026, 1, day, tzinfo=timezone.utc)
+        c = dict(repo="github.com/someone/app")
+        self.assertEqual(harness.fact_at(os.path.join(repo, "deploy.md"), at(2)),
+                         os.path.join(repo, "replaced", "deploy.2026-01-04T000000Z.md"), "the first copy stamped after it")
+        self.assertEqual(harness.memories_at(c, None, at(5), orhome),
+                         {"github.com/someone/app/deploy": os.path.join(repo, "replaced", "deploy.2026-01-09T000000Z.md")},
+                         "the version current then, which the file's later source date would hide")
+        self.assertEqual(sorted(harness.memories_at(c, None, at(10), orhome).values()),
+                         [os.path.join(repo, "deploy.md"), os.path.join(repo, "new.md")])
+        self.assertEqual(harness.memories_at(c, None, at(1), orhome), {}, "no version has a source date before it")
+
+    def test_a_removed_worktree_finds_its_main_checkout(self):
+        self.addCleanup(setattr, harness, "HOME", harness.HOME)
+        harness.HOME = tempfile.mkdtemp()
+        for repo, url in (("app", "git@github.com:someone/app.git"), ("other", "git@github.com:someone/other.git")):
+            os.makedirs(os.path.join(harness.HOME, "Code", repo, ".git"))
+            with open(os.path.join(harness.HOME, "Code", repo, ".git", "config"), "w") as fh:
+                fh.write('[remote "origin"]\n\turl = %s\n' % url)
+        gone = lambda cid, repo, name: dict(id=cid, repo="github.com/someone/app",
+                                            folder=os.path.join(harness.HOME, "orca", "workspaces", repo, name))
+        self.assertEqual(harness.mains_of([gone("G1", "app", "eel"), gone("G2", "other", "eel")]),
+                         {"G1": os.path.join(harness.HOME, "Code", "app"), "G2": None}, "only a checkout of the same repo")
+
+    @unittest.skipUnless(os.path.exists(harness.BINARY), "needs cargo build --release")
+    def test_a_frozen_case_set(self):
+        tmp, mem = self.checkout_with_memories()
+        address = "builtin/%s/" % harness.slug(tmp)
+        os.makedirs(os.path.join(tmp, "docs"))
+        with open(os.path.join(tmp, "docs", "plan.md"), "w") as fh:
+            fh.write("Plan: move the null check before the row loop.\n")
+        p1, p2 = "why do exports fail on empty rows, see docs/plan.md", "why do exports fail on empty rows again"
+        tool = dict(type="assistant", timestamp="2030-01-01T00:10:05Z", gitBranch="feat-a", message=dict(
+            id="f2", role="assistant", content=[dict(type="tool_use", id="u1", name="Read", input=dict(file_path="x"))]))
+        with open(os.path.join(harness.PROJECTS, "-w-app", "frozen.jsonl"), "w") as fh:
+            fh.writelines(json.dumps(o) + "\n" for o in (
+                user("2030-01-01T00:00:00Z", "plan the export fix for the empty rows", "feat-a", tmp),
+                said("2030-01-01T00:01:00Z", "The null check runs late.", "feat-a", "f1"),
+                dict(type="system", subtype="compact_boundary", timestamp="2030-01-01T00:05:00Z"),
+                user("2030-01-01T00:10:00Z", p1, "feat-a", tmp), tool,
+                user("2030-01-01T00:20:00Z", p2, "feat-a", tmp),
+                said("2030-01-01T00:20:05Z", "Same cause.", "feat-a", "f3")))
+        ms = lambda minute, second=0: int(datetime(2030, 1, 1, 0, minute, second, tzinfo=timezone.utc).timestamp() * 1000)
+        recall = lambda at, prompt, injected: dict(event="recall", session="frozen", at=at + 50, started_at=at,
+                                                   prompt_hash=harness.fnv(prompt), terms=4, injected=injected, via={})
+        log = [recall(ms(0), "plan the export fix for the empty rows", [address + "filler-1"]),
+               dict(event="deliver", session="frozen", at=ms(6), prompt_id="q0", memory=address + "filler-2"),
+               recall(ms(10), p1, []),
+               dict(event="pick", session="frozen", at=ms(10, 3), ms=2990, prompt_id="q1", memory=address + "filler-3",
+                    skip=None)]
+        log += [dict(event="pick", session="frozen", at=ms(11 + i), ms=100, prompt_id="q%d" % (i + 2), memory=None,
+                     skip=None) for i in range(9)]
+        log += [recall(ms(20), p2, [])]
+        os.makedirs(os.path.join(os.path.dirname(harness.EVAL), "log"))
+        with open(os.path.join(os.path.dirname(harness.EVAL), "log", "openrecall.jsonl"), "w") as fh:
+            fh.writelines(json.dumps(e) + "\n" for e in log)
+        folder = os.path.join(harness.EVAL, "week")
+        harness.freeze_set(folder, "2030-01-01T00:05:00Z", "2030-01-01T01:00:00Z")
+        cases = harness.read(os.path.join(folder, "cases.jsonl"))
+        self.assertEqual([(c["id"], c["prompt"]) for c in cases], [("C001", p1), ("C002", p2)], "the window's prompts")
+        self.assertEqual(cases[0]["state"], dict(ledger=[address + "filler-2"], picks=0), "the ledger resets at a compact")
+        self.assertEqual(cases[1]["state"]["picks"], 10)
+        self.assertEqual((cases[0]["first_tool_ms"], cases[1]["first_tool_ms"]), (5000, None))
+        self.assertEqual(cases[0]["live"], dict(gate=[], pick=address + "filler-3", pick_skip=None, delivered=None))
+        self.assertEqual(cases[0]["docs"], [["docs/plan.md", "rel", harness.blob_hash(os.path.join(tmp, "docs", "plan.md"))]])
+        self.assertEqual(len(cases[0]["memories"]), 41)
+
+        with open(os.path.join(tmp, "docs", "plan.md"), "w") as fh:
+            fh.write("Plan: rewritten after the freeze.\n")
+        with open(os.path.join(mem, "export-empty-rows.md"), "a") as fh:
+            fh.write("Edited after the freeze.\n")
+        toml, sent = self.provider(lambda text: "filler-2")
+        results = harness.replay_cases(harness.BINARY, cases, {c["id"]: c["main"] for c in cases}, (toml, "made-up-key"),
+                                       folder)
+        self.assertIn("Plan: move the null check before the row loop.", sent[0], "the frozen copy of the named document")
+        with open(os.path.join(tmp, "docs", "plan.md")) as fh:
+            self.assertEqual(fh.read(), "Plan: rewritten after the freeze.\n", "the checkout is never written")
+        self.assertNotIn("Edited after the freeze", harness.memory_text(results[0]["memories"][address + "export-empty-rows"]))
+        self.assertEqual((results[0]["pick"]["reason"], results[0]["picked"]), ("ledger", []), "the frozen ledger holds it")
+        self.assertNotIn(address + "filler-2", [x["address"] for x in results[0]["candidates"]])
+        self.assertIsNone(results[1].get("pick"), "the session has used its 10 calls")
+        self.assertEqual(len(sent), 1)
+        self.assertFalse(any(r["errors"] for r in results))
 
     def test_a_task_that_moves_to_a_sibling_repo(self):
         header = ("Handoff record for branch feat/x, last written 2026-01-05T10:01:00Z by an earlier session on this task "
@@ -522,7 +621,9 @@ class HarnessTest(unittest.TestCase):
                      "precision 75% (3/4,", "Goals: precision 0.67 or more, useful 13 or more. Without the picks: "
                      "injections 2, useful 2, precision 100% (2/2,",
                      "Pick jobs started: 7. Picks with a memory: 4; dropped: echo 1, ledger 1; injected: 2. No memory "
-                     "picked: 1. Skips: too_big 1. Errors: 1 (1 × http 500). Cost of the pick lines: $0.14."):
+                     "picked: 1. Skips: too_big 1. Errors: 1 (1 × http 500). Cost of the pick lines: $0.14.",
+                     "Picks alone: precision 50% (1/2,", "Mean cost per pick job: 2.00 cents (limit 4.4).",
+                     "ready before their turn's first tool call: 0 of 2; turns with no tool call or no transcript: 2."):
             self.assertIn(part, text)
 
     def test_report_args(self):

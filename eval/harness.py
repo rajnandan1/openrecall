@@ -3,6 +3,8 @@
 
     python3 eval/harness.py freeze                   # draw cases.jsonl once, append new handoff pairs to pairs.jsonl
     python3 eval/harness.py report [--binary PATH] [--picks]   # write runs/<UTC time>/report.md
+    python3 eval/harness.py freeze-set FOLDER SINCE UNTIL     # a case set of the live prompts in a window
+    python3 eval/harness.py report-set FOLDER [--binary PATH] [--picks]   # FOLDER/runs/<UTC time>/report.md
 
 Reads Claude Code transcripts under ~/.claude/projects and writes only under ~/.openrecall/eval/
 (OPENRECALL_HOME replaces ~/.openrecall). The first freeze needs appendix-a.jsonl there: one
@@ -10,6 +12,8 @@ Reads Claude Code transcripts under ~/.claude/projects and writes only under ~/.
 The report replays every session through the openrecall binary (default: target/release/openrecall) in a
 scratch world, then every frozen case for level 2, labeled by Jev through judge.py; without a binary it prints the
 baseline alone. `--picks` also runs the pick job with the provider of extract.toml, about $1.60 a run.
+A case set (ticket 06) is every searched real prompt of the live recall log in a window, each with frozen copies of
+what its replay reads; FOLDER is under ~/.openrecall/eval/ and SINCE and UNTIL are ISO times.
 """
 import glob
 import json
@@ -46,11 +50,15 @@ GIT_COMMIT = re.compile(r"\bgit(?:\s+-C\s+\S+)?\s+commit\b")
 IDENT = re.compile(r"\b[A-Z]{2,5}-\d{2,5}\b|#\d{2,6}\b|/pull/\d+|\b[\w.-]+/[\w./-]+|`[^`\s]{3,}`|\b[0-9a-f]{7,40}\b|https?://\S+")
 GOAL = 0.67
 PICK_WAIT = 120
+PICK_CALLS = 10  # src/pick.rs MAX_CALLS: a session with this many calls starts no pick job
 # Spec Appendix A, rows 0 to 13, in the order of appendix-a.jsonl (A00 to A13).
 HAND = ["useful", "useful", "useful", "partly", "partly", "useful", "noise", "noise", "useful", "partly", "noise",
         "noise", "noise", "noise"]
 BINARY = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "target", "release", "openrecall")
 MCP_RECALL = "mcp__plugin_openrecall_openrecall__recall"
+STAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{6}Z")
+DOC = re.compile(r"\.(?:md|txt|rst|org|adoc)$", re.I)
+MAX_DOC_BYTES = 262144
 NOT_A_PROMPT = ("<local-command-stdout>", "<local-command-caveat>", "<system-reminder>", "<bash-input>",
                 "This session is being continued from a previous conversation")
 
@@ -82,7 +90,7 @@ def prompt_of(o):
 def scan(path, until=None):
     """One transcript: its turns (a prompt, then the assistant messages, tool calls and branch after it)."""
     s = dict(sid=os.path.basename(path)[:-6], path=path, entrypoint=None, first=None, last=None, cwd=None, turns=[],
-             instructions=None, recalled=0, end_line=0)
+             instructions=None, recalled=0, end_line=0, compacts=[])
     tools, groups, cur = {}, {}, None
     with open(path, encoding="utf-8", errors="replace") as fh:
         for n, line in enumerate(fh):
@@ -106,6 +114,9 @@ def scan(path, until=None):
                 s["recalled"] += str(a.get("type")).startswith("relevant_memor")
                 if a.get("type") == "instructions" and s["instructions"] is None:
                     s["instructions"] = "\n".join(f.get("content", "") for f in a.get("files") or [])
+                continue
+            if typ == "system" and o.get("subtype") == "compact_boundary":
+                s["compacts"].append(t)
                 continue
             if o.get("isSidechain"):
                 continue
@@ -142,6 +153,7 @@ def scan(path, until=None):
                 elif b.get("type") == "tool_use":
                     tools[b.get("id")] = (b.get("name"), b.get("input") or {})
                     cur["tools"].append(tools[b.get("id")])
+                    cur.setdefault("tool_at", t)
     for t in s["turns"]:
         # Ticket 15: a built-in command (/model, /effort, ...) never reaches the hook or the model, so it is no prompt.
         t["builtin"] = t["ask"].startswith("/") and not t["groups"]
@@ -514,6 +526,76 @@ def fact_date(path):
         return None
 
 
+def fact_at(path, at):
+    """Ticket 06: an OpenRecall fact as it stood at `at`. A replace keeps the old text as `replaced/<stem>.<UTC
+    second>.md`, so the first copy stamped after `at` is that version; without one it is the file."""
+    stem, cut = os.path.basename(path)[:-3], at.strftime("%Y-%m-%dT%H%M%SZ")
+    copies = {os.path.basename(f)[len(stem) + 1:-3]: f
+              for f in glob.glob(os.path.join(os.path.dirname(path), "replaced", glob.escape(stem) + ".*.md"))}
+    later = sorted(s for s in copies if STAMP.fullmatch(s) and s > cut)
+    return copies[later[0]] if later else path
+
+
+def memories_at(c, main, at, orhome):
+    """A case's memories by address: the built-in files of its main checkout born before the prompt, with today's
+    text, and OpenRecall's facts and globals as they stood then (fact_at), with a `source` date before the prompt."""
+    out = {}
+    if main and os.path.isdir(main):
+        for f in glob.glob(os.path.join(PROJECTS, slug(main), "memory", "*.md")):
+            if os.path.basename(f) != "MEMORY.md" and born(f) < at:
+                out["builtin/%s/%s" % (slug(main), os.path.basename(f)[:-3])] = f
+    for rel, prefix in ((os.path.join("repos", c["repo"] or ""), (c["repo"] or "") + "/"), ("global", "global/")):
+        for f in glob.glob(os.path.join(orhome, rel, "*.md")) if c["repo"] or rel == "global" else []:
+            version = fact_at(f, at)
+            d = fact_date(version)
+            if d and d < at:
+                out[prefix + os.path.basename(f)[:-3]] = version
+    return out
+
+
+def home_path(address, folder):
+    """Where a memory's file sits in a stand-in home whose project folder is `folder`."""
+    parts = address.split("/")
+    if parts[0] == "builtin":
+        return os.path.join(".claude", "projects", slug(folder), "memory", parts[-1] + ".md")
+    if parts[0] == "global":
+        return os.path.join(".openrecall", "global", parts[-1] + ".md")
+    return os.path.join(".openrecall", "repos", address + ".md")
+
+
+def named_docs(prompt, folder):
+    """The documents a prompt may name, a superset of what the binary's `turn::named_docs` reads: each word that ends
+    in a document extension, without its `@` and line number, as (typed, kind, path); kind is abs, home or rel."""
+    out = []
+    for word in prompt.split():
+        typed = re.sub(r":\d+(?:-\d+)?$", "", word.strip("`'\"()[]<>,;:!?*").rstrip(".").lstrip("@"))
+        if not DOC.search(typed) or ".." in typed.split("/"):
+            continue
+        kind = "abs" if typed.startswith("/") else "home" if typed.startswith("~/") else "rel"
+        path = typed if kind == "abs" else os.path.join(HOME, typed[2:]) if kind == "home" else os.path.join(folder, typed)
+        out.append((typed, kind, os.path.normpath(path)))
+    return out
+
+
+def place(root, rel, src):
+    """Copies `src` to `root/rel`. A folder on the way that is a link into a real checkout becomes a real folder of
+    links first, so the copy never writes into the checkout."""
+    d = root
+    for part in os.path.normpath(rel).split(os.sep)[:-1]:
+        d = os.path.join(d, part)
+        if os.path.islink(d):
+            target = os.path.realpath(d)
+            os.remove(d)
+            os.makedirs(d)
+            for entry in os.listdir(target) if os.path.isdir(target) else []:
+                os.symlink(os.path.join(target, entry), os.path.join(d, entry))
+        os.makedirs(d, exist_ok=True)
+    dst = os.path.join(d, os.path.basename(rel))
+    if os.path.lexists(dst):
+        os.remove(dst)
+    shutil.copyfile(src, dst)
+
+
 def memory_text(path):
     """The memory as the judge and the used signal read it: description and body, frontmatter stripped."""
     with open(path, encoding="utf-8", errors="replace") as fh:
@@ -677,7 +759,8 @@ def extraction_lines(since, dedupe_fn=None, yes=0.7):
 
 def mains_of(cases):
     """Each case's main checkout: from its folder's .git while the folder exists, else the checkout another case of
-    the same repo identity has (one clone, one memory directory, ticket 11)."""
+    the same repo identity has (one clone, one memory directory, ticket 11), else for a removed Orca worktree
+    `~/Code/<repo>` when it has the case's identity, as identity() reads it (issue 14)."""
     by_repo, out = {}, {}
     for c in cases:
         gd = git_dirs(c["folder"])[1] if os.path.isdir(c["folder"]) else None
@@ -685,8 +768,10 @@ def mains_of(cases):
             out[c["id"]] = os.path.dirname(gd)
             by_repo.setdefault(c["repo"], out[c["id"]])
     for c in cases:
+        gone = re.search(r"/orca/workspaces/([^/]+)/", c["folder"] + "/")
+        code = os.path.join(HOME, "Code", gone.group(1)) if gone else None
         if c["id"] not in out and c["repo"]:
-            out[c["id"]] = by_repo.get(c["repo"])
+            out[c["id"]] = by_repo.get(c["repo"]) or (code if code and identity(code)[1] == c["repo"] else None)
     return out
 
 
@@ -733,12 +818,14 @@ def wait_pick(log, sid):
     return dict(event="pick", session=sid, memory=None, skip="error", error="no pick line in %d s" % PICK_WAIT, cost=0)
 
 
-def replay_cases(binary, cases, mains, provider=None):
+def replay_cases(binary, cases, mains, provider=None, frozen=None):
     """Ticket 16: each case through `openrecall recall` in its own stand-in world: a folder whose `.git` holds the
-    case's origin and branch, the repo's main checkout linked in so the path check sees today's tree, a scratch home
-    with the built-in memory files born before the prompt at the slug the binary computes, and OpenRecall's own
-    facts with a `source` date before it. Returns one result per case: candidates, injections, drops, timing.
-    `provider`, the extract.toml text and api-key, turns picks on (spec 5.2)."""
+    case's origin and branch, the case's worktree (else the repo's main checkout) linked in so the path check sees
+    today's tree, and a scratch home with the case's memories (memories_at) where the binary looks for them. Returns
+    one result per case: candidates, injections, drops, timing. `provider`, the extract.toml text and api-key, turns
+    picks on (spec 5.2).
+    `frozen`, a case set's folder (freeze_set), replays from its copies: the memories, the session's ledger and pick
+    calls, the transcript and the named documents."""
     tmp = scratch()
     orhome = os.environ.get("OPENRECALL_HOME") or os.path.expanduser("~/.openrecall")
     results = []
@@ -747,37 +834,53 @@ def replay_cases(binary, cases, mains, provider=None):
             folder, home = os.path.join(tmp, "w%d" % i), os.path.join(tmp, "h%d" % i)
             os.makedirs(folder)
             os.makedirs(home)
-            at, main, memories = ts_of(c["at"]), mains.get(c["id"]), {}
+            at, main = ts_of(c["at"]), mains.get(c["id"])
             if c["repo"]:
                 os.makedirs(os.path.join(folder, ".git", "refs", "heads"))
                 with open(os.path.join(folder, ".git", "config"), "w") as fh:
                     fh.write('[remote "origin"]\n\turl = https://%s\n' % re.sub(r"^local/", "local.invalid/", c["repo"]))
                 checkout(folder, c["branch"])
-            if main and os.path.isdir(main):
-                for entry in os.listdir(main):
+            tree = c["folder"] if c["repo"] and os.path.isdir(c["folder"]) else main
+            if tree and os.path.isdir(tree):
+                for entry in os.listdir(tree):
                     if entry != ".git":
-                        os.symlink(os.path.join(main, entry), os.path.join(folder, entry))
-                dst = os.path.join(home, ".claude", "projects", slug(folder), "memory")
-                for f in glob.glob(os.path.join(PROJECTS, slug(main), "memory", "*.md")):
-                    if os.path.basename(f) != "MEMORY.md" and born(f) < at:
-                        os.makedirs(dst, exist_ok=True)
-                        shutil.copy2(f, dst)
-                        memories["builtin/%s/%s" % (slug(main), os.path.basename(f)[:-3])] = f
-            for rel, prefix in ((os.path.join("repos", c["repo"] or ""), (c["repo"] or "") + "/"), ("global", "global/")):
-                for f in glob.glob(os.path.join(orhome, rel, "*.md")) if c["repo"] or rel == "global" else []:
-                    d = fact_date(f)
-                    if d and d < at:
-                        os.makedirs(os.path.join(home, ".openrecall", rel), exist_ok=True)
-                        copy = shutil.copy2(f, os.path.join(home, ".openrecall", rel))
-                        unexpired(copy, at)
-                        memories[prefix + os.path.basename(f)[:-3]] = f
+                        os.symlink(os.path.join(tree, entry), os.path.join(folder, entry))
+            if frozen:
+                memories = {a: os.path.join(frozen, "blobs", h) for a, (h, _) in c["memories"].items()}
+                times = {a: mtime for a, (_, mtime) in c["memories"].items()}
+            else:
+                memories = memories_at(c, main, at, orhome)
+                times = {a: os.stat(f).st_mtime for a, f in memories.items()}
+            for address, src in memories.items():
+                dst = os.path.join(home, home_path(address, folder))
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copyfile(src, dst)
+                os.utime(dst, (times[address], times[address]))
+                if not address.startswith("builtin/"):
+                    unexpired(dst, at)
             env = dict(HOME=home, OPENRECALL_HOME=os.path.join(home, ".openrecall"), CLAUDE_CODE_ENTRYPOINT="cli",
                        CLAUDE_PROJECT_DIR=folder, PATH="/usr/bin:/bin")
             ask = dict(session_id=c["session"], cwd=folder, prompt=c["prompt"], hook_event_name="UserPromptSubmit")
+            drift = 0
+            if frozen:
+                os.makedirs(os.path.join(env["OPENRECALL_HOME"], "sessions"))
+                ledger = [re.sub(r"^builtin/[^/]+/", "builtin/%s/" % slug(folder), a) for a in c["state"]["ledger"]]
+                with open(os.path.join(env["OPENRECALL_HOME"], "sessions", c["session"] + ".json"), "w") as fh:
+                    json.dump(dict(c["state"], ledger=ledger), fh)
+                for typed, kind, h in c["docs"]:
+                    if kind == "abs":
+                        drift += not os.path.isfile(typed) or blob_hash(typed) != h
+                    else:
+                        place(home if kind == "home" else folder, typed[2:] if kind == "home" else typed,
+                              os.path.join(frozen, "blobs", h))
             if provider:
                 pick_home(env["OPENRECALL_HOME"], *provider)
                 ask.update(prompt_id=c["id"], transcript_path=os.path.join(tmp, "t%d.jsonl" % i))
-                transcript_before(c, ask["transcript_path"])
+                if frozen:
+                    copy_turns(dict(path=os.path.join(frozen, c["transcript"])), dict(copy=ask["transcript_path"], pos=0, done=0),
+                               c["lines"], [])
+                else:
+                    transcript_before(c, ask["transcript_path"])
             # The first call builds the index; the case's own call is timed the way a live prompt runs, warm.
             subprocess.run([binary, "recall"], env=env, capture_output=True, input=json.dumps(dict(
                 session_id="warm", cwd=folder, prompt="warm the index with a prompt that recalls nothing")).encode())
@@ -796,55 +899,58 @@ def replay_cases(binary, cases, mains, provider=None):
                 skipped=next((e["reason"] for e in events if e.get("event") == "skipped" and e.get("session") == c["session"]), None),
                 candidates=[dict(x, address=fix(x["address"]), rot=rot(fix(x["address"]))) for x in recall.get("candidates", [])],
                 injected=[fix(a) for a in recall.get("injected", [])], dropped=recall.get("dropped", {}),
-                errors=[e.get("error", "")[:60] for e in events if e.get("event") == "error"], memories=memories))
-            if provider and not results[-1]["skipped"]:
+                errors=[e.get("error", "")[:60] for e in events if e.get("event") == "error"], memories=memories,
+                drift=drift))
+            if provider and not results[-1]["skipped"] and c.get("state", {}).get("picks", 0) < PICK_CALLS:
                 line = wait_pick(log, c["session"])
                 try:
                     with open(os.path.join(env["OPENRECALL_HOME"], "picks", c["session"], c["id"] + ".json")) as fh:
                         address = fix(json.load(fh)["address"])
                 except (OSError, ValueError, KeyError):
                     address = None
-                take_pick(results[-1], dict(line, memory=line.get("memory") and fix(line["memory"])), address)
+                take_pick(results[-1], dict(line, memory=line.get("memory") and fix(line["memory"])), address,
+                          c["state"]["ledger"] if frozen else ())
     finally:
         shutil.rmtree(tmp)
     return results
 
 
-def take_pick(r, line, address):
+def take_pick(r, line, address, ledger=()):
     """Spec 5.2: the pick job's log `line` and its result file's `address` (None without one) on a case's result. A
-    pick that `recall` injected is the tool hook's `ledger` drop; any other is one more injection, in `picked`."""
+    pick that `recall` injected or that the session's `ledger` holds is the tool hook's `ledger` drop; any other is one
+    more injection, in `picked`."""
     r["pick"], r["picked"] = dict(line), []
     if address is None:
         return
-    if address in r["injected"]:
+    if address in r["injected"] or address in ledger:
         r["pick"]["reason"] = "ledger"
         return
     hashes = {x["address"]: x["text_hash"] for x in r["candidates"]}
     if address not in hashes and address in r["memories"]:
-        with open(r["memories"][address], encoding="utf-8", errors="replace") as fh:
-            hashes[address] = fnv(fh.read())
+        hashes[address] = blob_hash(r["memories"][address])
     r["picked"].append(dict(address=address, text_hash=hashes.get(address, "")))
 
 
-def load_labels():
-    path = os.path.join(EVAL, "labels.jsonl")
+def load_labels(path):
     return {(r["case"], r["address"], r["text_hash"]): r["label"] for r in (read(path) if os.path.exists(path) else [])}
 
 
-def label_candidates(cases, results, by_sid, label_fn):
-    """Ticket 16: every logged candidate and pick gets a label, reused until the memory's text changes. The judge is
-    called only for memories with no label yet, one call per case."""
-    labels = load_labels()
+def label_candidates(cases, results, by_sid, label_fn, path=None):
+    """Ticket 16: every logged candidate and pick gets a label in `path` (the eval set's labels.jsonl by default),
+    reused until the memory's text changes. The judge is called only for memories with no label yet, one call per
+    case. A frozen case brings its own earlier prompts."""
+    path = path or os.path.join(EVAL, "labels.jsonl")
+    labels = load_labels(path)
     if not label_fn:
         return labels
-    with open(os.path.join(EVAL, "labels.jsonl"), "a") as fh:
+    with open(path, "a") as fh:
         for c, r in zip(cases, results):
             todo = list({x["address"]: x for x in r["candidates"] + r.get("picked", [])
                          if (c["id"], x["address"], x["text_hash"]) not in labels}.values())
             if not todo:
                 continue
             s = by_sid.get(c["session"])
-            earlier = [t["ask"] for t in s["turns"] if t["real"] and t["at"] < c["at"]][-2:] if s else []
+            earlier = c["earlier"] if "earlier" in c else [t["ask"] for t in s["turns"] if t["real"] and t["at"] < c["at"]][-2:] if s else []
             for row in label_fn(c, todo, r["memories"], earlier):
                 labels[(row["case"], row["address"], row["text_hash"])] = row["label"]
                 fh.write(json.dumps(row) + "\n")
@@ -938,6 +1044,11 @@ def fnv(text):
     return "%016x" % h
 
 
+def blob_hash(path):
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        return fnv(fh.read())
+
+
 def turn_of(e, turns, near_ms=15000):
     """The turn a logged prompt came from: the turn with its hash nearest in time, else the turn nearest in time
     within `near_ms`. The transcript rewrites some prompts the hook saw: a skill typed by its short name gets its
@@ -1028,11 +1139,25 @@ def binary_gate():
         return None
 
 
-def pick_lines(cases, results, labels):
-    """Spec 5.2's lines for a `--picks` run: the binary's gate with and without the picks, and the pick jobs."""
+def tool_ms(c, by_sid):
+    """Milliseconds from a case's prompt to the first tool call of its turn, from the freeze or else the transcript;
+    None when the turn calls no tool or the transcript is gone."""
+    if "first_tool_ms" in c:
+        return c["first_tool_ms"]
+    s = by_sid.get(c["session"])
+    t = next((t for t in s["turns"] if t["at"] == c["at"]), None) if s else None
+    return round((t["tool_at"] - t["start"]).total_seconds() * 1000) if t and t.get("tool_at") else None
+
+
+def pick_lines(cases, results, labels, by_sid=None):
+    """Spec 5.2's lines for a `--picks` run: the binary's gate with and without the picks, and the pick jobs, with
+    their mean cost against the 4.4-cent limit and whether a pick is ready before its turn's first tool call."""
     on, off = gate_metrics(cases, results, labels, picks=True), gate_metrics(cases, results, labels)
     picked = [(c, x) for c, r in zip(cases, results) for x in r.get("picked", [])]
+    useful = sum(labels.get((c["id"], x["address"], x["text_hash"])) == "useful" for c, x in picked)
+    waits = [(r["pick"].get("ms"), tool_ms(c, by_sid or {})) for c, r in zip(cases, results) if r.get("picked")]
     jobs = [r["pick"] for r in results if r.get("pick")]
+    ms = [j["ms"] for j in jobs if "ms" in j]
     errors = [j for j in jobs if j.get("skip") == "error"]
     chosen = [j for j in jobs if j.get("memory") and j.get("skip") != "error"]
     dropped = Counter(filter(None, (j.get("skip") or j.get("reason") for j in chosen)))
@@ -1042,9 +1167,7 @@ def pick_lines(cases, results, labels):
         "At the binary's gate with the picks (spec 5.2): injections %d on %d cases (picks %d), useful %d (picks %d), "
         "precision %s, unlabeled %d. Goals: precision 0.67 or more, useful 13 or more. Without the picks: injections %d, "
         "useful %d, precision %s." % (
-            on["injections"], on["cases"], len(picked), on["useful"],
-            sum(labels.get((c["id"], x["address"], x["text_hash"])) == "useful" for c, x in picked),
-            rate(on["useful"], on["injections"]), on["unlabeled"], off["injections"], off["useful"],
+            on["injections"], on["cases"], len(picked), on["useful"], useful, rate(on["useful"], on["injections"]), on["unlabeled"], off["injections"], off["useful"],
             rate(off["useful"], off["injections"])),
         "",
         "- Pick jobs started: %d. Picks with a memory: %d; dropped: %s; injected: %d. No memory picked: %d. Skips: %s. "
@@ -1053,6 +1176,12 @@ def pick_lines(cases, results, labels):
             sum(1 for j in jobs if not j.get("memory") and not j.get("skip")), listed(skips), len(errors),
             " (%s)" % ", ".join("%d × %s" % (n, e) for e, n in Counter(j.get("error", "")[:60] for j in errors).items())
             if errors else "", sum(j.get("cost") or 0 for j in jobs)),
+        "- Picks alone: precision %s. Mean cost per pick job: %.2f cents (limit 4.4). Job time: p50 %d ms, p95 %d ms. "
+        "Injected picks ready before their turn's first tool call: %d of %d; turns with no tool call or no transcript: "
+        "%d." % (
+            rate(useful, len(picked)), 100 * sum(j.get("cost") or 0 for j in jobs) / max(len(jobs), 1), pct(ms, 0.5),
+            pct(ms, 0.95), sum(1 for took, wait in waits if None not in (took, wait) and took < wait), len(waits),
+            sum(1 for _, wait in waits if wait is None)),
     ]
 
 
@@ -1112,7 +1241,7 @@ def level2_lines(cases, results, labels, by_sid, gate, label_fn=None, picks=Fals
            rate(at_gate["useful"], at_gate["injections"]), at_gate["misses"], rate(at_gate["false"], at_gate["injections"]),
            at_gate["unlabeled"]),
         "",
-    ] + (pick_lines(cases, results, labels) + [""] if picks else []) + [
+    ] + (pick_lines(cases, results, labels, by_sid) + [""] if picks else []) + [
         "| Memory type | Injections | Useful | Precision |", "|---|---|---|---|",
     ]
     lines += ["| %s | %d | %d | %s |" % (k, n, at_gate["kinds_useful"][k], rate(at_gate["kinds_useful"][k], n))
@@ -1245,6 +1374,124 @@ def freeze(now=None):
           "%d added, %d wait for their new session to go quiet, %d in all"
           % (len(found), rules["branch"], rules["alias"], rules["both"], len(right), len(fresh), active,
              len(old) + len(fresh)))
+
+
+def freeze_set(out, since, until):
+    """Ticket 06: every searched real prompt of the live recall log from `since` to `until` (ISO times) as a case set
+    in `out`. A case keeps one frozen copy of what its replay reads (replay_cases with `frozen`): its memories
+    (memories_at) and the documents it names as files in `blobs/` by hash, a built-in's mtime beside it; its
+    session's transcript up to the prompt; and the session's ledger and pick calls as they stood. It also keeps what
+    live showed, and its turn's first tool call."""
+    orhome = os.path.dirname(EVAL)
+    if os.path.exists(os.path.join(out, "cases.jsonl")):
+        sys.exit("%s is frozen" % out)
+    lo, hi = ts_of(since).timestamp() * 1000, ts_of(until).timestamp() * 1000
+    events = [e for e in read(os.path.join(orhome, "log", "openrecall.jsonl")) if e.get("at", 0) <= hi]
+    by_session = defaultdict(list)
+    for e in events:
+        by_session[e.get("session")].append(e)
+    paths = {os.path.basename(p)[:-6]: p for p in glob.glob(os.path.join(PROJECTS, "*", "*.jsonl"))}
+    scanned, found, taken, unjoined = {}, [], set(), 0
+    searched = [e for e in events if e.get("event") == "recall" and "terms" in e and e["at"] >= lo]
+    for e in searched:
+        sid = e["session"]
+        if sid not in scanned:
+            scanned[sid] = scan(paths[sid]) if sid in paths else None
+        t = turn_of(e, scanned[sid]["turns"]) if scanned[sid] else None
+        if not (t and t["real"]):
+            unjoined += 1
+        elif (sid, t["line"]) not in taken:
+            taken.add((sid, t["line"]))
+            found.append((e, scanned[sid], t))
+    known = {}
+    for s in scanned.values():
+        repo = s and identity(s["cwd"])[1]
+        if repo:
+            known.setdefault(repo_of(s["cwd"]), repo)
+    cases = [case("C%03d" % i, s, t, known) for i, (_, s, t) in enumerate(found, 1)]
+    mains = mains_of(cases)
+    os.makedirs(os.path.join(out, "blobs"), exist_ok=True)
+    os.makedirs(os.path.join(out, "transcripts"), exist_ok=True)
+
+    def blob(path):
+        h = blob_hash(path)
+        if not os.path.exists(os.path.join(out, "blobs", h)):
+            shutil.copyfile(path, os.path.join(out, "blobs", h))
+        return h
+
+    upto, missing = {}, 0
+    for c, (e, s, t) in zip(cases, found):
+        at, sid = ts_of(c["at"]), c["session"]
+        c["main"] = mains.get(c["id"])
+        c["memories"] = {a: [blob(f), os.stat(f).st_mtime] for a, f in memories_at(c, c["main"], at, orhome).items()}
+        docs = named_docs(c["prompt"], c["folder"])
+        c["docs"] = [[typed, kind, blob(path)] for typed, kind, path in docs
+                     if os.path.isfile(path) and os.path.getsize(path) <= MAX_DOC_BYTES]
+        missing += len(docs) - len(c["docs"])
+        c["transcript"], c["lines"] = "transcripts/%s.jsonl" % sid, t["line"]
+        upto[sid] = max(upto.get(sid, 0), t["line"])
+        c["earlier"] = [x["ask"] for x in s["turns"] if x["real"] and x["at"] < c["at"]][-2:]
+        c["first_tool_ms"] = tool_ms(c, {sid: s})
+        cut = max((x.timestamp() * 1000 for x in s["compacts"] if x < t["start"]), default=0)
+        mine = [x for x in by_session[sid] if x["at"] < e["started_at"]]
+        ledger = []
+        for x in mine:
+            shown = x.get("injected") or [] if x["event"] == "recall" else [x.get("memory")] if x["event"] == "deliver" else []
+            ledger += [a for a in shown if a and a not in ledger and x["at"] >= cut]
+        calls = sum(1 for x in mine if x["event"] == "pick" and x["at"] - x.get("ms", 0) < e["started_at"]
+                    and x.get("skip") not in ("too_big", "cap"))
+        c["state"] = dict(ledger=ledger, picks=calls)
+        pick = next((x for x in by_session[sid] if x["event"] == "pick" and abs(x["at"] - x.get("ms", 0) - e["started_at"]) < 2000), None)
+        deliver = pick and next((x for x in by_session[sid] if x["event"] == "deliver" and x["prompt_id"] == pick["prompt_id"]), None)
+        c["live"] = dict(gate=[a for a in e["injected"] if a in (e.get("via") or {})], pick=pick and pick.get("memory"),
+                         pick_skip=pick and pick.get("skip"), delivered=deliver and deliver.get("memory"))
+    for sid, n in upto.items():
+        copy_turns(dict(path=paths[sid]), dict(copy=os.path.join(out, "transcripts", sid + ".jsonl"), pos=0, done=0), n, [])
+    with open(os.path.join(out, "cases.jsonl"), "w") as fh:
+        fh.writelines(json.dumps(c) + "\n" for c in cases)
+    print("%s: %d cases from %d searched prompts in the recall log (%d join no real turn, %d repeat a turn); %d blobs, "
+          "%d transcripts; named documents not on disk: %d" % (
+              out, len(cases), len(searched), unjoined, len(searched) - unjoined - len(found),
+              len(os.listdir(os.path.join(out, "blobs"))), len(upto), missing))
+
+
+def report_set(folder, binary=BINARY, label_fn=None, picks=False, now=None):
+    """Ticket 06's reference run on a frozen case set (freeze_set): every case replayed from its copies, each
+    candidate and pick labeled once by case, address and text hash in the set's labels.jsonl, and the run's report.md
+    and results.jsonl under the set's runs/."""
+    now = now or datetime.now(timezone.utc)
+    cases = read(os.path.join(folder, "cases.jsonl"))
+    results = replay_cases(binary, cases, {c["id"]: c["main"] for c in cases}, real_provider() if picks else None, folder)
+    labels = label_candidates(cases, results, {}, label_fn, os.path.join(folder, "labels.jsonl"))
+    off = gate_metrics(cases, results, labels)
+    skips = Counter(r["skipped"] for r in results if r["skipped"])
+    jobs = [(c, r) for c, r in zip(cases, results) if r.get("pick")]
+    named = [d for c in cases for d in c["docs"]]
+    lines = [
+        "# Case set report, %s" % now.strftime("%Y-%m-%d %H:%M UTC"),
+        "",
+        "`%s` (%d cases) replayed from its frozen copies through `%s`, picks %s." % (
+            folder, len(cases), binary, "on" if picks else "off"),
+        "",
+        "- Skipped by the binary: %s." % (", ".join("%s %d" % kv for kv in sorted(skips.items())) or "none"),
+        "- Against live: gate injections the same in %d of %d cases (live %d, replay %d); picked memory the same in %d "
+        "of %d jobs. Named documents: %d frozen, %d read from today's file by an absolute path, %d of them changed." % (
+            sum(sorted(r["injected"]) == sorted(c["live"]["gate"]) for c, r in zip(cases, results)), len(cases),
+            sum(len(c["live"]["gate"]) for c in cases), off["injections"],
+            sum(r["pick"].get("memory") == c["live"]["pick"] for c, r in jobs), len(jobs), len(named),
+            sum(1 for d in named if d[1] == "abs"), sum(r.get("drift", 0) for r in results)),
+        "",
+        "At the binary's gate, injections %d on %d cases: useful %d, precision %s, unlabeled %d." % (
+            off["injections"], off["cases"], off["useful"], rate(off["useful"], off["injections"]), off["unlabeled"]),
+        "",
+    ] + (pick_lines(cases, results, labels) if picks else [])
+    out = os.path.join(folder, "runs", now.strftime("%Y-%m-%dT%H%M%SZ"))
+    os.makedirs(out, exist_ok=True)
+    with open(os.path.join(out, "report.md"), "w") as fh:
+        fh.write("\n".join(lines) + "\n")
+    with open(os.path.join(out, "results.jsonl"), "w") as fh:
+        fh.writelines(json.dumps(r) + "\n" for r in results)
+    print("\n".join(lines) + "\n\nwritten to %s/report.md" % out)
 
 
 def wilson(k, n, z=1.96):
@@ -1443,11 +1690,17 @@ def report_args(args):
 if __name__ == "__main__":
     cmd, rest = (sys.argv[1] if len(sys.argv) > 1 else ""), sys.argv[2:]
     args = report_args(rest) if cmd == "report" else None
+    set_args = report_args(rest[1:]) if cmd == "report-set" and rest else None
     if cmd == "freeze" and not rest:
         freeze()
+    elif cmd == "freeze-set" and len(rest) == 3:
+        freeze_set(os.path.join(EVAL, rest[0]), rest[1], rest[2])
     elif args:
         import judge
         binary, picks = args
         report(binary=binary, label_fn=judge.label_case, gate=binary_gate(), dedupe_fn=judge.dedupe_check, picks=picks)
+    elif set_args:
+        import judge
+        report_set(os.path.join(EVAL, rest[0]), set_args[0], judge.label_case, set_args[1])
     else:
         sys.exit(__doc__)
