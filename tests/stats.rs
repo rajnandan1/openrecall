@@ -373,10 +373,10 @@ fn a_push_is_right_wrong_or_unjudged_and_late_after_an_edit_on_its_branch() {
     assert_eq!(row["late_pushes"], json!({"late": 2, "judged": 5}));
 }
 
-/// Spec test 1, against the harness's `daily` on the same made-up home. Spec test 4 is in it: some of the home's
-/// lines lack the 0.10.0 fields, so their checks read the home's memory and record files.
+/// Spec tests 1 and 4, against the harness's `daily` on the same made-up home: some of the home's lines lack the 0.10.0
+/// fields, so their checks take the fallback and read the home's made-up memory and record files.
 #[test]
-fn the_shared_made_up_home_gives_the_expected_rows() {
+fn the_shared_made_up_home_gives_the_expected_rows_and_a_line_without_the_new_fields_reads_the_made_up_files() {
     let root = std::env::temp_dir().join(format!("openrecall-stats-shared-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     let status = Command::new("cp").arg("-R").arg(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/daily")).arg(&root).status().unwrap();
