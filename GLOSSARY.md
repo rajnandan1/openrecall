@@ -250,6 +250,14 @@ _Avoid_: test set, benchmark, fixtures
 One real prompt in the eval set, with the repo, branch and session it came from.
 _Avoid_: test case, example, sample
 
+**Case set**:
+The cases frozen together from one window of real prompts, with the memory text each case can show. The eval set holds one or more case sets.
+_Avoid_: dataset, split, suite
+
+**Held-out set**:
+A case set frozen from prompts later than every case set a change was developed on. It gives the change its verdict, and no change is tuned on it.
+_Avoid_: test set, validation set, holdout
+
 **Floor probe**:
 A made-up direct question about one stored fact, used only to check that the gate opens for it. It is not a case.
 _Avoid_: probe case, test question
@@ -267,7 +275,7 @@ The verdict on one candidate for one case: useful, partly, or noise. Only useful
 _Avoid_: rating, grade, verdict
 
 **Precision**:
-The share of injections labeled useful in the eval set.
+The share of the gate's injections and picks that are labeled useful, in the eval set or in the live log. A handoff record push is judged by the right-push test, not by precision.
 _Avoid_: accuracy, hit rate
 
 **Miss**:
@@ -289,6 +297,10 @@ _Avoid_: labeler, grader, oracle
 **Baseline**:
 What Claude Code's built-in memory alone achieves on the same measure. Every number is reported next to it.
 _Avoid_: control, zero point
+
+**Reference run**:
+The replay of the released binary on a case set. Every variant of a change is compared with it on the same cases and labels.
+_Avoid_: baseline (that is built-in memory alone), control
 
 **Replay**:
 Running a past case or handoff pair through OpenRecall after the fact, seeing only the memories that existed at the time.
