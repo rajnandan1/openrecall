@@ -157,10 +157,7 @@ pub fn recompute() -> crate::Result<()> {
     let mut local_day = db.prepare("SELECT date(?1, 'unixepoch', 'localtime')")?;
     let mut day_end = db.prepare("SELECT unixepoch(?1, '+1 day', 'utc')")?;
     // ken: whole-log read each run; an offset index when the read is measured over 1 s
-    let log = match fs::read(crate::home().join("log").join("openrecall.jsonl")) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => vec![],
-        read => read?,
-    };
+    let log = read_or_none(&crate::home().join("log").join("openrecall.jsonl"))?;
     let mut lines: Vec<(String, Value)> = vec![];
     for raw in log.split(|&b| b == b'\n') {
         let Ok(e) = serde_json::from_slice::<Value>(raw) else {
@@ -175,7 +172,7 @@ pub fn recompute() -> crate::Result<()> {
 
     let mut rows: BTreeMap<String, String> = BTreeMap::new();
     let mut written: HashMap<String, u64> = HashMap::new();
-    for line in fs::read_to_string(rows_file()).unwrap_or_default().lines() {
+    for line in String::from_utf8_lossy(&read_or_none(&rows_file())?).lines() {
         if let Ok(head) = serde_json::from_str::<Head>(line) {
             written.insert(head.day.clone(), head.written_at);
             rows.insert(head.day, line.to_string());
@@ -213,6 +210,14 @@ pub fn recompute() -> crate::Result<()> {
     }
     let text: String = rows.values().map(|l| format!("{l}\n")).collect();
     Ok(crate::write_atomic(&rows_file(), &text)?)
+}
+
+/// A missing file reads as empty; any other read error fails the run, so a final row is never overwritten unread.
+fn read_or_none(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    match fs::read(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(vec![]),
+        read => read,
+    }
 }
 
 /// Each day's versions from its `update` lines (the `from` of a binary line, the `to` of a swap or a plugin line), in

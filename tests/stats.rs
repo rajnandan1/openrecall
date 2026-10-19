@@ -113,7 +113,10 @@ fn at(iso: &str, line: Value) -> Value {
 
 /// A `recall` line of a prompt that started at `iso` and took `took` ms, with `extra` fields.
 fn recall(iso: &str, sid: &str, took: u64, extra: Value) -> Value {
-    let start = ms(iso);
+    recall_at(ms(iso), sid, took, extra)
+}
+
+fn recall_at(start: u64, sid: &str, took: u64, extra: Value) -> Value {
     let line = json!({"event": "recall", "session": sid, "started_at": start, "ended_at": start + took,
                       "prompt_hash": "0", "injected": [], "at": start + took + 1});
     with(line, extra)
@@ -366,4 +369,137 @@ fn a_push_is_right_wrong_or_unjudged_and_late_after_an_edit_on_its_branch() {
     let row = h.row("2026-01-10");
     assert_eq!(row["right_pushes"], json!({"right": 2, "wrong": 1, "unjudged": 1}));
     assert_eq!(row["late_pushes"], json!({"late": 2, "judged": 5}));
+}
+
+/// Spec test 2: the job copies a final row's line as it is, fields it does not know included.
+#[test]
+fn a_final_row_survives_byte_for_byte() {
+    let h = Home::new("final-bytes");
+    h.log(&[recall("2026-01-09T06:00:00Z", "A", 5, json!({})), recall("2026-01-10T06:00:00Z", "A", 5, json!({}))]);
+    let kept = format!(r#"{{"day":"2026-01-09","written_at":{},"versions":[],"a_later_field":{{"x":[1,2]}},"prompts":99}}"#, ms("2026-01-20T00:00:00Z"));
+    h.put(".openrecall/stats/daily.jsonl", &format!("{kept}\n"));
+    h.job();
+    let text = h.text();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines[0], kept);
+    assert_eq!(h.row("2026-01-10")["prompts"], 1);
+}
+
+/// Spec test 6: a row written during its own day is open, so the next run counts the day's later lines.
+#[test]
+fn a_row_written_during_its_day_changes_with_the_days_later_lines() {
+    let h = Home::new("open-today");
+    let start = now_ms() - 60_000;
+    h.log(&[recall_at(start, "A", 5, json!({}))]);
+    h.job();
+    let first = h.rows().pop().unwrap();
+    assert_eq!(first["prompts"], 1);
+    h.log(&[recall_at(start, "A", 7, json!({}))]);
+    h.again();
+    h.job();
+    let second = h.rows().pop().unwrap();
+    assert_eq!((&second["day"], &second["prompts"]), (&first["day"], &json!(2)));
+    assert!(second["written_at"].as_u64() > first["written_at"].as_u64());
+}
+
+/// Spec test 7: a push stays unjudged until its session's second real prompt, while its day's row is open.
+#[test]
+fn an_unjudged_push_becomes_right_after_the_sessions_second_real_prompt() {
+    let h = Home::new("open-push");
+    let start = now_ms() - 600_000;
+    h.log(&[
+        recall_at(start, "R", 50, json!({"prompt_hash": fnv("start")})),
+        json!({"event": "pushed", "session": "R", "how": "settle", "branch": "feat/r", "aliases": [], "at": start + 10}),
+    ]);
+    let on = |line: Value| with(line, json!({"gitBranch": "feat/r"}));
+    h.transcript("R", &[on(user("2026-01-10T06:00:01Z", "start", json!({}))), on(said("2026-01-10T06:00:05Z", "ok"))]);
+    h.job();
+    assert_eq!(h.rows().pop().unwrap()["right_pushes"], json!({"right": 0, "wrong": 0, "unjudged": 1}));
+    h.transcript("R", &[on(user("2026-01-10T06:05:00Z", "more", json!({}))), on(said("2026-01-10T06:05:05Z", "done"))]);
+    h.again();
+    h.job();
+    assert_eq!(h.rows().pop().unwrap()["right_pushes"], json!({"right": 1, "wrong": 0, "unjudged": 0}));
+}
+
+/// Spec test 8: nothing computes a final row again.
+#[test]
+fn a_final_row_stays_when_its_days_transcript_changes() {
+    let h = Home::new("final-transcript");
+    h.log(&[recall("2026-01-10T06:00:00Z", "A", 30, injected("go", "app/m1", json!({"identifiers": {"app/m1": ["KEY-42"]}})))]);
+    h.transcript("A", &[user("2026-01-10T06:00:01Z", "go", json!({})), said("2026-01-10T06:00:05Z", "ok")]);
+    h.job();
+    let before = h.text();
+    assert_eq!(h.row("2026-01-10")["used_signal"], json!({"yes": 0, "judged": 1}));
+    h.transcript("A", &[said("2026-01-10T06:00:09Z", "KEY-42 it is")]);
+    h.again();
+    h.job();
+    assert_eq!(h.text(), before);
+}
+
+/// Spec test 9, the job's half: a second job within 24 hours of `attempted_at` changes nothing.
+#[test]
+fn a_second_job_within_24_hours_changes_nothing() {
+    let h = Home::new("daily");
+    h.log(&[recall("2026-01-10T06:00:00Z", "A", 5, json!({}))]);
+    h.job();
+    let (rows, state) = (h.text(), fs::read_to_string(h.path(".openrecall/stats/state.json")).unwrap());
+    h.log(&[recall("2026-01-12T06:00:00Z", "A", 5, json!({}))]);
+    h.job();
+    assert_eq!(h.text(), rows);
+    assert_eq!(fs::read_to_string(h.path(".openrecall/stats/state.json")).unwrap(), state);
+}
+
+/// Spec test 10, the job's half: the job tries the lock once and exits while another process holds it.
+#[test]
+fn the_job_exits_at_once_while_the_lock_is_held() {
+    let h = Home::new("locked");
+    h.log(&[recall("2026-01-10T06:00:00Z", "A", 5, json!({}))]);
+    h.put(".openrecall/stats/lock", "");
+    let held = fs::File::create(h.path(".openrecall/stats/lock")).unwrap();
+    held.try_lock().unwrap();
+    let started = std::time::Instant::now();
+    h.job();
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert!(!h.path(".openrecall/stats/state.json").exists() && h.text().is_empty());
+    drop(held);
+    h.job();
+    assert_eq!(h.rows().len(), 1);
+}
+
+/// Spec section 7.7: a failed run keeps the old rows and leaves an `error` line with `cmd` `stats`.
+#[test]
+fn a_failed_run_keeps_the_old_rows_and_logs_an_error() {
+    let h = Home::new("failed");
+    h.log(&[recall("2026-01-10T06:00:00Z", "A", 5, json!({}))]);
+    fs::create_dir_all(h.path(".openrecall/stats/daily.jsonl")).unwrap();
+    h.job();
+    assert!(h.path(".openrecall/stats/daily.jsonl").is_dir());
+    let log = fs::read_to_string(h.path(".openrecall/log/openrecall.jsonl")).unwrap();
+    let error: Value = serde_json::from_str(log.lines().last().unwrap()).unwrap();
+    assert_eq!((&error["event"], &error["cmd"]), (&json!("error"), &json!("stats")));
+    let left: Vec<_> = fs::read_dir(h.path(".openrecall/stats")).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert!(!left.iter().any(|n| n.to_string_lossy().contains("tmp")), "{left:?}");
+}
+
+/// Spec section 7.2: SessionStart starts the job detached.
+#[test]
+fn session_start_starts_the_job() {
+    let h = Home::new("session-start");
+    h.log(&[recall("2026-01-10T06:00:00Z", "A", 5, json!({}))]);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_openrecall"))
+        .arg("handoff")
+        .env_clear()
+        .env("HOME", &h.root)
+        .env("OPENRECALL_HOME", h.path(".openrecall"))
+        .env("TZ", TZ)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(br#"{"session_id": "S", "source": "startup", "cwd": "/nowhere"}"#).unwrap();
+    assert!(child.wait().unwrap().success());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while h.text().is_empty() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(h.rows()[0]["day"], "2026-01-10");
 }

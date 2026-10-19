@@ -107,6 +107,7 @@ fn handoff() -> Result<()> {
     }
     detach(&["extract", "--job"], Stdio::null())?;
     detach(&["update", "--job"], Stdio::null())?;
+    detach(&["stats", "--job"], Stdio::null())?;
     Ok(())
 }
 
