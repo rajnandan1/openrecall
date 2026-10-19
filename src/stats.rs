@@ -151,7 +151,7 @@ fn attempt() -> crate::Result<()> {
         return Ok(());
     }
     state.attempted_at = now;
-    crate::write_atomic(&path, serde_json::to_string(&state)?)?;
+    crate::write_atomic(&path, &serde_json::to_string(&state)?)?;
     recompute()
 }
 
@@ -211,8 +211,8 @@ pub fn recompute() -> crate::Result<()> {
     for (day, row) in fresh {
         rows.insert(day.to_string(), serde_json::to_vec(&row)?);
     }
-    let text: Vec<u8> = rows.into_values().flat_map(|l| l.into_iter().chain([b'\n'])).collect();
-    Ok(crate::write_atomic(&rows_file(), text)?)
+    let text: Vec<u8> = rows.into_values().flat_map(|mut l| { l.push(b'\n'); l }).collect();
+    Ok(crate::write_atomic(&rows_file(), &text)?)
 }
 
 /// One value from the SQLite the binary bundles, which knows the machine's local time (spec section 6.1).
