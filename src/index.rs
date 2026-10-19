@@ -34,7 +34,7 @@ const EXPIRES_SECS: u64 = 14 * 86400;
 static URL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"https?://\S+").unwrap());
 static BACKTICK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`([^`\s]{3,})`").unwrap());
 static WORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[\w-]+").unwrap());
-static IDENT: LazyLock<Regex> = LazyLock::new(|| {
+pub(crate) static IDENT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\b[A-Z]{2,5}-\d{2,5}\b|#\d{2,6}\b|/pull/\d+|\b[\w.-]+/[\w./-]+|`[^`\s]{3,}`|\b[0-9a-f]{7,40}\b|https?://\S+").unwrap()
 });
 static SYMBOL: LazyLock<Regex> =
