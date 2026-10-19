@@ -76,7 +76,7 @@ struct Row {
     picks_delivered: u64,
     pick_drops: Counts,
     picks_used: Used,
-    pick_cost: Value,
+    pick_cost: f64,
     pick_ms: i64,
     pushes: Counts,
     right_pushes: Verdicts,
@@ -87,7 +87,7 @@ struct Row {
     strikes: u64,
     failed_sessions: u64,
     stops: u64,
-    extraction_cost: Value,
+    extraction_cost: f64,
     extraction_ms: i64,
     redactions: u64,
     own_tool_calls: Counts,
@@ -221,33 +221,33 @@ fn read_or_none(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
 }
 
 /// Each day's versions from its `update` lines (the `from` of a binary line, the `to` of a swap or a plugin line), in
-/// log order and without repeats; a day without them takes the last version before it.
+/// log order and without repeats; a day without them takes the last version logged before it.
 fn versions_by_day(lines: &[(String, Value)]) -> HashMap<&str, Vec<String>> {
-    let mut seen: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    let mut seen: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for (day, e) in lines {
         let list = seen.entry(day.as_str()).or_default();
-        if e["event"] != "update" {
-            continue;
-        }
-        let from = (e["step"] == "binary").then(|| &e["from"]);
-        let to = (e["step"] == "plugin" || e["result"] == "updated").then(|| &e["to"]);
-        for v in [from, to].into_iter().flatten().filter_map(Value::as_str) {
-            if !v.is_empty() && !list.iter().any(|x| x == v) {
-                list.push(v.to_string());
-            }
+        if e["event"] == "update" {
+            let from = (e["step"] == "binary").then(|| &e["from"]);
+            let to = (e["step"] == "plugin" || e["result"] == "updated").then(|| &e["to"]);
+            list.extend([from, to].into_iter().flatten().filter_map(Value::as_str));
         }
     }
-    let mut last: Vec<String> = vec![];
-    seen.into_iter()
-        .map(|(day, list)| {
-            if let Some(v) = list.last() {
-                last = vec![v.clone()];
-                (day, list)
-            } else {
-                (day, last.clone())
+    let mut last: Option<&str> = None;
+    let mut out = HashMap::new();
+    for (day, list) in seen {
+        let mut versions: Vec<String> = vec![];
+        for v in &list {
+            if !versions.iter().any(|x| x == v) {
+                versions.push(v.to_string());
             }
-        })
-        .collect()
+        }
+        if versions.is_empty() {
+            versions.extend(last.map(str::to_string));
+        }
+        last = list.last().copied().or(last);
+        out.insert(day, versions);
+    }
+    out
 }
 
 /// The harness's `pct`: index ⌊q·n⌋ of the sorted values, capped at n−1; 0 without values.
@@ -255,11 +255,6 @@ fn pct(values: &mut [i64], q: f64) -> i64 {
     values.sort_unstable();
     let n = values.len();
     if n == 0 { 0 } else { values[((q * n as f64) as usize).min(n - 1)] }
-}
-
-/// A raw sum of costs in log order; a day without a cost writes 0, as the harness's integer start does.
-fn money(sum: f64) -> Value {
-    if sum == 0.0 { json!(0) } else { json!(sum) }
 }
 
 fn bump(counts: &mut Counts, key: &Value) {
@@ -272,7 +267,6 @@ fn count(lines: &[&Value]) -> Row {
     let mut r = Row::default();
     let mut sessions = HashSet::new();
     let (mut hook, mut pick_ms, mut extraction_ms) = (vec![], vec![], vec![]);
-    let (mut pick_cost, mut extraction_cost) = (0.0, 0.0);
     let n = |v: &Value| v.as_u64().unwrap_or(0);
     for e in lines {
         if let Some(s) = e["session"].as_str().filter(|s| !s.is_empty()) {
@@ -282,8 +276,7 @@ fn count(lines: &[&Value]) -> Row {
             "recall" => {
                 r.prompts += 1;
                 r.searched += u64::from(e.get("candidates").is_some());
-                let candidates: HashSet<&str> = candidates(e);
-                r.injections += addresses(&e["injected"]).filter(|a| candidates.contains(a)).count() as u64;
+                r.injections += gate_injections(e).len() as u64;
                 if let Some(via) = e["via"].as_object() {
                     r.identifier_rule += via.values().filter(|v| *v == "identifier").count() as u64;
                 }
@@ -295,14 +288,14 @@ fn count(lines: &[&Value]) -> Row {
                     r.index_size = size;
                 }
             }
-            "skipped" => bump(&mut r.prompt_skips, &e["reason"]),
+            "skipped" => bump(&mut r.prompt_skips, &json!(e["reason"].as_str().unwrap_or("").replace('-', "_"))),
             "pick" => {
                 r.pick_jobs += 1;
                 r.picks += u64::from(e["memory"].as_str().is_some_and(|m| !m.is_empty()));
                 if e["skip"].as_str().is_some_and(|s| !s.is_empty()) {
                     bump(&mut r.pick_skips, &e["skip"]);
                 }
-                pick_cost += e["cost"].as_f64().unwrap_or(0.0);
+                r.pick_cost += e["cost"].as_f64().unwrap_or(0.0);
                 pick_ms.extend(e["ms"].as_i64());
             }
             "deliver" => r.picks_delivered += 1,
@@ -320,7 +313,7 @@ fn count(lines: &[&Value]) -> Row {
                     r.facts.dropped += dropped.values().map(n).sum::<u64>();
                 }
                 r.suggestions += n(&e["suggestions"]);
-                extraction_cost += e["cost"].as_f64().unwrap_or(0.0);
+                r.extraction_cost += e["cost"].as_f64().unwrap_or(0.0);
                 extraction_ms.extend(e["ms"].as_i64());
             }
             "redacted" => r.redactions += 1,
@@ -337,8 +330,6 @@ fn count(lines: &[&Value]) -> Row {
     r.hook_ms = Spread { median: pct(&mut hook, 0.5), p95: pct(&mut hook, 0.95) };
     r.pick_ms = pct(&mut pick_ms, 0.5);
     r.extraction_ms = pct(&mut extraction_ms, 0.5);
-    r.pick_cost = money(pick_cost);
-    r.extraction_cost = money(extraction_cost);
     r
 }
 
@@ -377,7 +368,7 @@ fn judge(lines: &[(String, Value)], rows: &mut BTreeMap<&str, Row>) {
             let row = rows.get_mut(day).expect("a check only for an open day");
             match e["event"].as_str().unwrap_or("") {
                 "recall" => {
-                    let Some(t) = s.turn_of(e) else { continue };
+                    let Some(t) = s.turn_of(e).filter(|&t| s.turns[t].answered) else { continue };
                     for address in gate_injections(e) {
                         let ids = match e.get("identifiers") {
                             Some(map) => Some(strings(&map[address])),
@@ -391,7 +382,8 @@ fn judge(lines: &[(String, Value)], rows: &mut BTreeMap<&str, Row>) {
                 }
                 "deliver" => {
                     let id = e["prompt_id"].as_str().unwrap_or("");
-                    let Some(t) = s.turns.iter().find(|t| !id.is_empty() && t.prompt_id == id) else { continue };
+                    let turn = s.turns.iter().find(|t| !id.is_empty() && t.prompt_id == id);
+                    let Some(t) = turn.filter(|t| t.answered) else { continue };
                     let ids = match picks.get(id).and_then(|p| p.get("identifiers")) {
                         Some(list) => Some(strings(list)),
                         None => memory_idents(e["memory"].as_str().unwrap_or("")),

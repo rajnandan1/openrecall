@@ -205,7 +205,7 @@ fn each_local_day_with_log_lines_gets_one_row_of_counts() {
     assert_eq!(
         without_written_at(rows[1].clone()),
         json!({"day": "2026-01-10", "versions": ["0.8.0", "0.9.0"], "sessions": 3, "prompts": 3, "searched": 2,
-               "prompt_skips": {"notification": 2, "short": 1, "empty-args": 1}, "injections": 1,
+               "prompt_skips": {"notification": 2, "short": 1, "empty_args": 1}, "injections": 1,
                "identifier_rule": 1, "echoes": 1, "used_signal": {"yes": 0, "judged": 0},
                "hook_ms": {"median": 40, "p95": 60}, "index_size": 120, "pick_jobs": 3, "picks": 2,
                "pick_skips": {"too_big": 1, "rot": 1}, "picks_delivered": 1, "pick_drops": {"late": 1, "ledger": 1},
@@ -223,10 +223,10 @@ fn each_local_day_with_log_lines_gets_one_row_of_counts() {
                "prompt_skips": {"notification": 1}, "injections": 0, "identifier_rule": 0, "echoes": 0,
                "used_signal": {"yes": 0, "judged": 0}, "hook_ms": {"median": 0, "p95": 0}, "index_size": 0,
                "pick_jobs": 0, "picks": 0, "pick_skips": {}, "picks_delivered": 0, "pick_drops": {},
-               "picks_used": {"yes": 0, "judged": 0}, "pick_cost": 0, "pick_ms": 0, "pushes": {},
+               "picks_used": {"yes": 0, "judged": 0}, "pick_cost": 0.0, "pick_ms": 0, "pushes": {},
                "right_pushes": {"right": 0, "wrong": 0, "unjudged": 0}, "late_pushes": {"late": 0, "judged": 0},
                "extraction_runs": 0, "facts": {"new": 0, "replaced": 0, "skipped": 0, "dropped": 0},
-               "suggestions": 0, "strikes": 0, "failed_sessions": 0, "stops": 0, "extraction_cost": 0,
+               "suggestions": 0, "strikes": 0, "failed_sessions": 0, "stops": 0, "extraction_cost": 0.0,
                "extraction_ms": 0, "redactions": 0, "own_tool_calls": {}, "update_check": {}, "errors": 0}),
         "a day before any update line has no version"
     );
@@ -251,7 +251,9 @@ fn an_injection_is_used_when_its_turn_repeats_an_identifier_the_prompt_lacks() {
         recall("2026-01-10T05:30:00Z", "S4", 30, injected("no transcript", "app/m1", ids("app/m1", json!(["ABC-12"])))),
         recall("2026-01-10T05:40:00Z", "S5", 30, injected("gone file", "app/gone", json!({}))),
         recall("2026-01-10T05:50:00Z", "S6", 30, with(injected("far", "app/m1", ids("app/m1", json!(["ABC-12"]))), json!({"prompt_hash": "0"}))),
+        recall("2026-01-10T06:00:00Z", "S7", 30, injected("no reply", "app/m1", ids("app/m1", json!(["ABC-12"])))),
     ]);
+    h.transcript("S7", &[user("2026-01-10T06:00:01.000Z", "no reply", json!({}))]);
     h.transcript("S1", &[
         user("2026-01-10T05:00:02.000Z", "fix ABC-12 exports", json!({})),
         said("2026-01-10T05:00:09.000Z", "ABC-12 again: looking at src/export.py now."),
@@ -369,6 +371,57 @@ fn a_push_is_right_wrong_or_unjudged_and_late_after_an_edit_on_its_branch() {
     let row = h.row("2026-01-10");
     assert_eq!(row["right_pushes"], json!({"right": 2, "wrong": 1, "unjudged": 1}));
     assert_eq!(row["late_pushes"], json!({"late": 2, "judged": 5}));
+}
+
+/// Spec test 1, against the harness's `daily` on the same made-up home. Spec test 4 is in it: some of the home's
+/// lines lack the 0.10.0 fields, so their checks read the home's memory and record files.
+#[test]
+fn the_shared_made_up_home_gives_the_expected_rows() {
+    let root = std::env::temp_dir().join(format!("openrecall-stats-shared-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let status = Command::new("cp").arg("-R").arg(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/daily")).arg(&root).status().unwrap();
+    assert!(status.success());
+    let home = root.join("home");
+    let status = Command::new(env!("CARGO_BIN_EXE_openrecall"))
+        .args(["stats", "--job"])
+        .env_clear()
+        .env("HOME", &home)
+        .env("OPENRECALL_HOME", home.join(".openrecall"))
+        .env("TZ", "IST-5:30")
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let got = fs::read_to_string(home.join(".openrecall/stats/daily.jsonl")).unwrap();
+    assert_eq!(lines_without_written_at(&got), fs::read_to_string(root.join("expected.jsonl")).unwrap());
+}
+
+/// Each row's `"written_at":<ms>,`, the one field `expected.jsonl` leaves out, taken out.
+fn lines_without_written_at(rows: &str) -> String {
+    rows.lines()
+        .map(|l| {
+            let start = l.find(",\"written_at\":").unwrap();
+            let end = start + 1 + l[start + 1..].find(',').unwrap();
+            format!("{}{}\n", &l[..start], &l[end..])
+        })
+        .collect()
+}
+
+/// A day without `update` lines takes the version its last update line left, a repeat included.
+#[test]
+fn a_day_without_update_lines_takes_the_last_version_logged_before_it() {
+    let h = Home::new("versions");
+    let update = |iso: &str, step: &str, result: &str, from: &str, to: &str| {
+        at(iso, json!({"event": "update", "step": step, "result": result, "from": from, "to": to, "reason": ""}))
+    };
+    h.log(&[
+        update("2026-01-10T06:00:00Z", "binary", "current", "0.9.0", ""),
+        update("2026-01-10T07:00:00Z", "binary", "updated", "0.9.0", "0.10.0"),
+        update("2026-01-10T08:00:00Z", "binary", "current", "0.9.0", ""),
+        recall("2026-01-11T06:00:00Z", "A", 5, json!({})),
+    ]);
+    h.job();
+    assert_eq!(h.row("2026-01-10")["versions"], json!(["0.9.0", "0.10.0"]));
+    assert_eq!(h.row("2026-01-11")["versions"], json!(["0.9.0"]));
 }
 
 /// Spec test 2: the job copies a final row's line as it is, fields it does not know included.
