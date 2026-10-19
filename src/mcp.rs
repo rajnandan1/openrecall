@@ -1,10 +1,11 @@
-use crate::{git, index, record, scan};
+use crate::{git, index, record, scan, stats};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{ServiceExt, schemars, tool, tool_router, transport::stdio};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::time::{Duration, Instant};
 
 const DEFAULT_K: usize = 5;
 const MAX_K: usize = 20;
@@ -36,7 +37,15 @@ struct ForgetParams {
     id: String,
 }
 
-/// The three tools of spec section 4, served over stdio (ticket 18: `openrecall mcp`).
+#[derive(Deserialize, schemars::JsonSchema)]
+struct StatsParams {
+    /// The first local day, YYYY-MM-DD; 6 days before `to` when left out.
+    from: Option<String>,
+    /// The last local day, YYYY-MM-DD; today when left out.
+    to: Option<String>,
+}
+
+/// OpenRecall's four tools, served over stdio (ticket 18: `openrecall mcp`).
 #[derive(Clone)]
 pub struct Server {
     home: PathBuf,
@@ -45,7 +54,7 @@ pub struct Server {
     session: String,
 }
 
-enum Kind {
+pub(crate) enum Kind {
     Fact,
     Builtin,
     Handoff,
@@ -186,6 +195,30 @@ impl Server {
         })
     }
 
+    #[tool(
+        description = "How OpenRecall performed, as counts per day: prompts, injections, picks, pushes, facts, cost and hook time. Use when the user asks how OpenRecall did, helped or cost on a day or over a range of days."
+    )]
+    fn stats(&self, Parameters(p): Parameters<StatsParams>) -> Result<String, String> {
+        let (from, to) = stats::range(p.from.as_deref(), p.to.as_deref())?;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut lock = stats::lock();
+        while matches!(lock, Ok(None)) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+            lock = stats::lock();
+        }
+        let failed = match &lock {
+            Ok(Some(_)) => stats::recompute().err().map(|e| format!("The recompute failed: {e}")),
+            Ok(None) => None,
+            Err(e) => Some(format!("The stats lock failed: {e}")),
+        };
+        let table = stats::table(&from, &to, matches!(lock, Ok(None))).map_err(|e| e.to_string())?;
+        self.log("stats", json!({}));
+        Ok(match failed {
+            Some(e) => format!("{e}\n{table}"),
+            None => table,
+        })
+    }
+
     fn log(&self, tool: &str, detail: Value) {
         let mut event = json!({"event": "mcp", "tool": tool, "session": self.session});
         if let (Some(e), Some(d)) = (event.as_object_mut(), detail.as_object()) {
@@ -221,7 +254,7 @@ pub fn serve() -> crate::Result<()> {
 
 /// Ticket 19: an address is a path under its root, so the file is found by joining strings. `None` for anything
 /// that is not a plain relative path of the known shapes.
-fn file_of(address: &str, home: &Path, user_home: &Path) -> Option<(PathBuf, Kind)> {
+pub(crate) fn file_of(address: &str, home: &Path, user_home: &Path) -> Option<(PathBuf, Kind)> {
     let rel = Path::new(address);
     let plain = !address.is_empty()
         && !address.ends_with('/')

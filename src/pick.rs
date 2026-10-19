@@ -149,11 +149,9 @@ fn pick(input: &Value, sid: &str, line: &mut Value) -> crate::Result<Option<Valu
         line["skip"] = json!(reason);
         return Ok(None);
     }
-    let text = format!(
-        "{}\n{}",
-        index::FRAME,
-        index::line(c, index::MAX_CHARS - index::FRAME.chars().count() - 1)
-    );
+    let picked = index::line(c, index::MAX_CHARS - index::FRAME.chars().count() - 1);
+    line["identifiers"] = json!(index::identifiers(c, &picked));
+    let text = format!("{}\n{picked}", index::FRAME);
     Ok(Some(json!({"address": c.address, "text": text})))
 }
 

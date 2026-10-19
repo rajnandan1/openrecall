@@ -5,6 +5,7 @@ mod mcp;
 mod pick;
 mod record;
 mod scan;
+mod stats;
 mod turn;
 mod update;
 
@@ -58,6 +59,7 @@ fn run(args: &[String], started: u128) {
         ["pick", "--job"] => pick::job(started),
         ["deliver"] => pick::deliver(started),
         ["update", "--job"] => update::job(),
+        ["stats", "--job"] => stats::job(),
         _ => return,
     };
     if let Err(e) = result {
@@ -105,6 +107,7 @@ fn handoff() -> Result<()> {
     }
     detach(&["extract", "--job"], Stdio::null())?;
     detach(&["update", "--job"], Stdio::null())?;
+    detach(&["stats", "--job"], Stdio::null())?;
     Ok(())
 }
 
@@ -249,7 +252,8 @@ fn recall(started: u128) -> Result<()> {
         };
         context.push(format!("{header} {reflects}\n\n{body}"));
         see(&mut s, &address);
-        log(json!({"event": "pushed", "session": sid, "address": address, "how": how}));
+        log(json!({"event": "pushed", "session": sid, "address": address, "how": how,
+                   "branch": rec.branch, "aliases": rec.aliases}));
         injected.push(address);
     }
     let mut searched = json!({});
@@ -345,6 +349,10 @@ fn level2(
         chars = chars - line.chars().count() + whole.chars().count();
         *line = whole;
     }
+    let identifiers: serde_json::Map<String, Value> = lines
+        .iter()
+        .map(|(c, line)| (c.address.clone(), json!(index::identifiers(c, line))))
+        .collect();
     let lines: Vec<(String, String)> = lines
         .into_iter()
         .map(|(c, line)| (c.address.clone(), line))
@@ -358,7 +366,7 @@ fn level2(
     Ok((
         lines,
         json!({"terms": terms.len(), "index_size": size, "candidates": candidates, "dropped": dropped, "via": vias,
-               "echoes": echoes.iter().map(|(c, _)| &c.address).collect::<Vec<_>>()}),
+               "echoes": echoes.iter().map(|(c, _)| &c.address).collect::<Vec<_>>(), "identifiers": identifiers}),
     ))
 }
 
@@ -745,7 +753,7 @@ fn log(mut event: Value) {
 }
 
 /// Temp file, then rename: two detached writers can race on one record.
-pub fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
+pub fn write_atomic(path: &Path, text: &(impl AsRef<[u8]> + ?Sized)) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }

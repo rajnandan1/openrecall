@@ -216,15 +216,16 @@ The hooks inject very little: one handoff record, and at most 3 one-line memorie
 
 A hook cannot help here, because Claude cannot call a hook. Claude can call an MCP tool.
 
-The plugin also starts an MCP server, `openrecall mcp`. The server is the same binary, and it reads the same `~/.openrecall/`. The plugin install configures the server, so you do nothing extra. The server gives Claude three tools:
+The plugin also starts an MCP server, `openrecall mcp`. The server is the same binary, and it reads the same `~/.openrecall/`. The plugin install configures the server, so you do nothing extra. The server gives Claude four tools:
 
 - `recall` takes an address or some words. With an address, it returns the whole memory. An injected line that OpenRecall cut to 200 characters still carries its address. So Claude calls `recall` to read the rest. With other words, `recall` finds the memories that match and skips the gate. It returns 5 memories, or up to 20 if Claude asks for more.
 - `remember` stores a new fact. Claude gives the fact a type and a scope. The type is `decision`, `preference`, `pointer`, `state` or `gotcha`. The scope is `repo` or `global`. `remember` refuses a text that holds a secret. Without [extraction](#extraction-optional), `remember` is the only way that OpenRecall gets new facts.
 - `forget` deletes one fact that OpenRecall wrote. Claude gives the address of the fact.
+- `stats` shows one row of counts per day. Ask Claude how OpenRecall did today or this week, and Claude answers from counts that stay on your machine.
 
 The tools run only when Claude calls them. You do not call them yourself. Instead, you tell Claude, for example, "remember that the Windows runner kills tests after 60 s". Claude then calls `remember`.
 
-Claude sees the tools as `mcp__plugin_openrecall_openrecall__recall`, `__remember` and `__forget`. Claude Code has a "don't ask" permission mode. In that mode, Claude Code denies these tools until you allow them. For example, you can allow them in `~/.claude/settings.json`:
+Claude sees the tools as `mcp__plugin_openrecall_openrecall__recall`, `__remember`, `__forget` and `__stats`. Claude Code has a "don't ask" permission mode. In that mode, Claude Code denies these tools until you allow them. For example, you can allow them in `~/.claude/settings.json`:
 
 ```json
 {
@@ -232,7 +233,8 @@ Claude sees the tools as `mcp__plugin_openrecall_openrecall__recall`, `__remembe
     "allow": [
       "mcp__plugin_openrecall_openrecall__recall",
       "mcp__plugin_openrecall_openrecall__remember",
-      "mcp__plugin_openrecall_openrecall__forget"
+      "mcp__plugin_openrecall_openrecall__forget",
+      "mcp__plugin_openrecall_openrecall__stats"
     ]
   }
 }
@@ -287,7 +289,7 @@ To check extraction:
 
 The worker starts each time a session starts or ends. It takes each session that ended, or that was quiet for 30 minutes. Quiet means that the transcript of the session did not change. The worker reads only the turns that it did not read before. It sends the earlier turns too, but only as context. Only one worker runs at a time.
 
-The worker sends a short form of the session through `/usr/bin/curl`. The short form holds your prompts, Claude's text, and one line per tool call. It holds no tool output, and it leaves out calls to OpenRecall's own tools, `recall`, `remember` and `forget`. OpenRecall replaces each secret in it with `[REDACTED:<rule-id>]` first. The worker gives the key to curl on stdin, never on a command line. If you use OpenRouter, turn on "deny data collection" in its privacy settings.
+The worker sends a short form of the session through `/usr/bin/curl`. The short form holds your prompts, Claude's text, and one line per tool call. It holds no tool output, and it leaves out calls to OpenRecall's own tools, `recall`, `remember`, `forget` and `stats`. OpenRecall replaces each secret in it with `[REDACTED:<rule-id>]` first. The worker gives the key to curl on stdin, never on a command line. If you use OpenRouter, turn on "deny data collection" in its privacy settings.
 
 The second call to the model stops duplicate facts. This step is dedupe. Dedupe compares each new fact with the 10 most similar memories. Then the model picks one of three actions for the fact:
 

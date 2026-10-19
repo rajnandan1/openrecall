@@ -233,7 +233,7 @@ A line that extraction proposes for a repo's CLAUDE.md, kept in a per-repo file 
 _Avoid_: rule (a rule lives in CLAUDE.md), tip, recommendation
 
 **Own tool call**:
-A call Claude makes to one of OpenRecall's three MCP tools: recall, remember or forget. Extraction and picks never see one, since a memory about using memory is noise and a remembered fact is already stored.
+A call Claude makes to one of OpenRecall's four MCP tools: recall, remember, forget or stats. Extraction and picks never see one, since a memory about using memory is noise and a remembered fact is already stored.
 _Avoid_: self call, meta call, memory tool use
 
 **Secret scan**:
@@ -321,6 +321,10 @@ _Avoid_: correct push, hit, good push
 **Late push**:
 A handoff record push that arrives after a turn on its branch already edited a file or made a commit.
 _Avoid_: slow push, missed push
+
+**Daily stats**:
+One row of counts per day that the binary keeps in the home, so Claude can say how OpenRecall performed. The counts come from the log and the transcripts by mechanical checks only, never from a judge.
+_Avoid_: metrics, telemetry, analytics, dashboard
 
 ### Updating
 

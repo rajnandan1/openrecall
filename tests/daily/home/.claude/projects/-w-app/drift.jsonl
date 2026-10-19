@@ -1,0 +1,4 @@
+{"type": "user", "timestamp": "2026-01-08T04:30:00.000Z", "cwd": "/w/app", "gitBranch": "feat/drift", "isSidechain": false, "message": {"role": "user", "content": "continue on PQR-11"}, "promptId": "p-d1"}
+{"type": "assistant", "timestamp": "2026-01-08T04:30:10.000Z", "cwd": "/w/app", "gitBranch": "feat/drift", "isSidechain": false, "message": {"id": "d1", "role": "assistant", "content": [{"type": "text", "text": "Continuing."}]}}
+{"type": "user", "timestamp": "2026-01-08T04:40:00.000Z", "cwd": "/w/app", "gitBranch": "feat/drift", "isSidechain": false, "message": {"role": "user", "content": "now finish the drift work today"}, "promptId": "p-d2"}
+{"type": "assistant", "timestamp": "2026-01-08T04:40:10.000Z", "cwd": "/w/app", "gitBranch": "feat/drift", "isSidechain": false, "message": {"id": "d2", "role": "assistant", "content": [{"type": "text", "text": "Finished."}]}}

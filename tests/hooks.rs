@@ -67,6 +67,7 @@ impl World {
             .env("CLAUDE_PROJECT_DIR", &self.folder)
             .env("CLAUDE_CODE_ENTRYPOINT", self.entrypoint)
             .env("CLAUDE_CODE_SESSION_ID", "M")
+            .env("TZ", "Asia/Kolkata")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped());
         if let Some(plugin) = &self.plugin {
@@ -1182,7 +1183,7 @@ fn mcp_tools_remember_recall_and_forget() {
     let tools = m.call("tools/list", json!({}));
     let mut names: Vec<&str> = tools["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
     names.sort();
-    assert_eq!(names, ["forget", "recall", "remember"]);
+    assert_eq!(names, ["forget", "recall", "remember", "stats"]);
 
     let (text, err) = m.tool("remember", json!({"text": "The asana slug is hard-coded in src/slugs.py (ABC-1234): the vendor API rejects anything else.", "type": "decision", "scope": "repo", "name": "Asana slug"}));
     assert!(!err && text.starts_with("Stored as github.com/someone/app/asana-slug ("), "{text}");
@@ -1248,6 +1249,161 @@ fn mcp_tools_remember_recall_and_forget() {
         assert!(log.contains(event), "{event}\n{log}");
     }
     assert!(!log.contains(&token));
+}
+
+/// A made-up daily stats row with every field, `extra` laid over it.
+fn stats_row(day: &str, written_at: u64, extra: Value) -> Value {
+    let mut row = json!({"day": day, "written_at": written_at, "versions": ["0.9.0"], "sessions": 2, "prompts": 10,
+        "searched": 9, "prompt_skips": {}, "injections": 3, "identifier_rule": 1, "echoes": 0,
+        "used_signal": {"yes": 1, "judged": 3}, "hook_ms": {"median": 40, "p95": 70}, "index_size": 50, "pick_jobs": 4,
+        "picks": 3, "pick_skips": {}, "picks_delivered": 2, "pick_drops": {}, "picks_used": {"yes": 1, "judged": 2},
+        "pick_cost": 0.31, "pick_ms": 3000, "pushes": {"settle": 2, "identifier": 1},
+        "right_pushes": {"right": 2, "wrong": 1, "unjudged": 4}, "late_pushes": {"late": 1, "judged": 3},
+        "extraction_runs": 5, "facts": {"new": 7, "replaced": 1, "skipped": 0, "dropped": 0}, "suggestions": 0,
+        "strikes": 1, "failed_sessions": 0, "stops": 0, "extraction_cost": 1.5, "extraction_ms": 20000, "redactions": 0,
+        "own_tool_calls": {}, "update_check": {}, "errors": 0});
+    row.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+    row
+}
+
+const STATS_HEADER: &str = "day versions sessions prompts injections used_signal picks_delivered picks_used pushes \
+    right_pushes late_pushes extraction_runs facts_new strikes cost_usd hook_ms errors";
+
+/// Spec test 11: the table shows the range's rows, `-` for a field a row lacks, and a totals line.
+#[test]
+fn the_stats_tool_prints_the_ranges_rows_and_their_totals() {
+    let w = World::new("stats-table");
+    let rows = w.home.join(".openrecall/stats/daily.jsonl");
+    let mut older = stats_row("2026-01-09", 1_768_000_000_000, json!({"versions": ["0.8.0", "0.9.0"], "sessions": 3,
+        "prompts": 12, "injections": 4, "used_signal": {"yes": 2, "judged": 4}, "picks_delivered": 1,
+        "pushes": {"settle": 1}, "right_pushes": {"right": 1, "wrong": 0, "unjudged": 0},
+        "late_pushes": {"late": 0, "judged": 1}, "extraction_runs": 2, "facts": {"new": 3, "replaced": 0, "skipped": 0, "dropped": 0},
+        "strikes": 0, "pick_cost": 0.0, "extraction_cost": 0.333, "hook_ms": {"median": 35, "p95": 90}, "errors": 1}));
+    older.as_object_mut().unwrap().remove("picks_used");
+    let file: Vec<String> = [
+        stats_row("2026-01-08", 1_767_900_000_000, json!({})),
+        older,
+        stats_row("2026-01-10", 1_768_100_000_000, json!({})),
+        stats_row("2026-01-11", 1_768_521_600_000, json!({})),
+    ]
+    .iter()
+    .map(|r| format!("{r}\n"))
+    .collect();
+    put(&rows, &file.concat());
+
+    let mut m = Mcp::start(&w);
+    let range = json!({"from": "2026-01-09", "to": "2026-01-10"});
+    let (text, err) = m.tool("stats", range.clone());
+    let table = format!(
+        "{}: the newest row was written at 2026-01-16 05:30:00 local time.\n{STATS_HEADER}\n\
+         2026-01-09 0.8.0,0.9.0 3 12 4 2/4 1 - 1 1/1 0/1 2 3 0 0.33 35/90 1\n\
+         2026-01-10 0.9.0 2 10 3 1/3 2 1/2 3 2/3 1/3 5 7 1 1.81 40/70 0\n\
+         total - - 22 7 3/7 3 - 4 3/4 1/4 7 10 1 2.14 - 1",
+        rows.display()
+    );
+    assert!(!err);
+    assert_eq!(text, table);
+
+    for bad in ["2026-02-30", "2026-1-5", "today", ""] {
+        let (text, err) = m.tool("stats", json!({"to": bad}));
+        assert!(err && text.contains(&format!("\"{bad}\" is not a date")) && !text.contains("total"), "{text}");
+    }
+
+    use std::os::unix::fs::PermissionsExt;
+    let log = w.home.join(".openrecall/log/openrecall.jsonl");
+    fs::set_permissions(&log, fs::Permissions::from_mode(0o000)).unwrap();
+    let (text, err) = m.tool("stats", range);
+    fs::set_permissions(&log, fs::Permissions::from_mode(0o644)).unwrap();
+    let (first, rest) = text.split_once('\n').unwrap();
+    assert!(!err && first.starts_with("The recompute failed: ") && rest == table, "{text}");
+    m.close();
+}
+
+/// A world whose stats job ran on a log of one prompt now and one on each day `back` days ago, with one more prompt now
+/// logged after the job.
+fn stats_world(name: &str, back: &[u64]) -> World {
+    let w = World::new(name);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    let start = now - 60_000;
+    let recall = |start: u64, took: u64| {
+        format!("{}\n", json!({"event": "recall", "session": "A", "started_at": start, "ended_at": start + took, "at": start + took + 1}))
+    };
+    let log = w.home.join(".openrecall/log/openrecall.jsonl");
+    let mut lines: Vec<String> = back.iter().map(|days| recall(start - days * 86_400_000, 5)).collect();
+    lines.push(recall(start, 5));
+    put(&log, &lines.concat());
+    assert_eq!(w.run(&["stats", "--job"], "").1, 0);
+    put(&log, &(lines.concat() + &recall(start, 7)));
+    w
+}
+
+fn stats_lock(w: &World) -> fs::File {
+    let lock = fs::File::create(w.home.join(".openrecall/stats/lock")).unwrap();
+    lock.try_lock().unwrap();
+    lock
+}
+
+/// The prompts column of a table line.
+fn prompts(line: &str) -> &str {
+    line.split(' ').nth(3).unwrap()
+}
+
+/// Spec tests 9 and 10, the tool's half: inside the job's 24 hours, the tool waits for the lock, then recomputes the
+/// open days. Without `from` and `to` it shows the 7 days up to today.
+#[test]
+fn the_stats_tool_waits_for_the_lock_then_recomputes_the_open_days() {
+    let w = stats_world("stats-wait", &[7, 6]);
+    let mut m = Mcp::start(&w);
+    let lock = stats_lock(&w);
+    let started = Instant::now();
+    let freed = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(1));
+        drop(lock);
+    });
+    let (text, err) = m.tool("stats", json!({}));
+    let waited = started.elapsed();
+    freed.join().unwrap();
+    assert!(waited >= Duration::from_millis(900) && waited < Duration::from_secs(10), "{waited:?}");
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(!err && !lines[0].contains("lock"), "{text}");
+    assert_eq!(lines.len(), 5, "6 days back is in the range, 7 days back is not: {text}");
+    assert_eq!((prompts(lines[3]), prompts(lines[4])), ("2", "3"), "{text}");
+    m.close();
+}
+
+/// Spec test 10, the tool's half: while the job keeps the lock, the tool shows the old rows after 10 s and says so.
+#[test]
+fn the_stats_tool_shows_the_old_rows_when_the_lock_stays_held() {
+    let w = stats_world("stats-locked", &[]);
+    let mut m = Mcp::start(&w);
+    let lock = stats_lock(&w);
+    let started = Instant::now();
+    let (text, err) = m.tool("stats", json!({}));
+    let waited = started.elapsed();
+    drop(lock);
+    assert!(waited >= Duration::from_secs(10) && waited < Duration::from_secs(12), "{waited:?}");
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(!err && lines[0].ends_with(" local time. The stats job held the lock for 10 s, so today and the other open days were not recomputed."), "{text}");
+    assert_eq!(prompts(lines[2]), "1", "the old row: {text}");
+    m.close();
+}
+
+/// Spec sections 7.7 and 8.5: a lock file the tool cannot make is an error, returned at once before the old rows.
+#[test]
+fn the_stats_tool_returns_a_lock_file_error_at_once_then_the_old_rows() {
+    let w = stats_world("stats-lock-failed", &[]);
+    let lock = w.home.join(".openrecall/stats/lock");
+    fs::remove_file(&lock).unwrap();
+    fs::create_dir(&lock).unwrap();
+    let mut m = Mcp::start(&w);
+    let started = Instant::now();
+    let (text, err) = m.tool("stats", json!({}));
+    let waited = started.elapsed();
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(waited < Duration::from_secs(2), "{waited:?}");
+    assert!(!err && lines[0].starts_with("The stats lock failed: ") && lines[1].ends_with(" local time."), "{text}");
+    assert_eq!(prompts(lines[3]), "1", "the old row: {text}");
+    m.close();
 }
 
 /// A stand-in for an OpenAI-compatible provider on localhost: answers each request with the next canned reply and
@@ -2038,4 +2194,38 @@ fn the_stop_hook_drops_what_the_turn_left_and_session_end_deletes_the_folder() {
     w.hook(&["extract"], "S", json!({}));
     assert!(!pick_file(&w, "S", "").exists(), "SessionEnd deletes the session's folder");
     assert!(pick_file(&w, "T", "p1.json").exists());
+}
+
+#[test]
+fn the_log_keeps_the_identifiers_given_to_claude_and_the_pushed_records_branch_and_aliases() {
+    let w = World::new("log-fields");
+    w.branch("feat/x");
+    start(&w, "E");
+    turn(&w, "E", "Build ABC-12 in the docs", "Started.");
+    start(&w, "A");
+    assert!(w.pushed("A", "where is ABC-12 now?").is_some());
+    let pushed = log_of(&w, "pushed");
+    assert_eq!((&pushed[0]["branch"], &pushed[0]["aliases"]), (&json!("feat/x"), &json!(["ABC-12"])), "{pushed:?}");
+
+    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    w.fillers(&repo);
+    w.memory(&repo, "export-null-rows", "gotcha", "source: E 2026-01-02T03:04:05Z\n", "Null rows", "Exports fail on empty rows: ABC-12 needs a null check in src/export.py before PR #345 lands.");
+    let ctx = w.pushed("S", "exports fail on empty rows").expect("level 2 injects");
+    assert!(ctx.contains("export-null-rows"), "{ctx}");
+    let recall = log_of(&w, "recall").into_iter().find(|e| e["session"] == "S").unwrap();
+    assert_eq!(
+        recall["identifiers"],
+        json!({"github.com/someone/app/export-null-rows": ["ABC-12", "src/export.py", "#345"]}),
+        "the line's identifiers after its address: {recall}"
+    );
+
+    let w = World::new("log-fields-pick");
+    w.branch("feat/x");
+    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    w.memory(&repo, "walrus-header", "decision", "source: E 2026-01-02T03:04:05Z\n", "The walrus header", "The walrus export in src/walrus.rs puts the header row first (WAL-42).");
+    let p = Provider::start(vec![answer(json!({"ids": ["m1"]}))]);
+    picks_on(&w, &p);
+    transcript(&w, "S", &[]);
+    prompt(&w, "S", "p1", "why does the walrus export drop the header row today");
+    assert_eq!(pick_line(&w, "p1")["identifiers"], json!(["src/walrus.rs", "WAL-42"]));
 }
