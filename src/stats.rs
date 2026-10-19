@@ -103,7 +103,7 @@ struct State {
 
 /// What the job reads of a row it keeps: a final row's line is copied byte for byte, never parsed whole.
 #[derive(Deserialize)]
-struct Head {
+struct Kept {
     day: String,
     written_at: u64,
 }
@@ -117,17 +117,28 @@ pub fn rows_file() -> PathBuf {
 }
 
 /// The stats lock of the job and the `stats` tool, held until the file drops; None while another process holds it.
-pub fn lock() -> Option<fs::File> {
-    fs::create_dir_all(dir()).ok()?;
-    let file = fs::File::create(dir().join("lock")).ok()?;
-    file.try_lock().ok()?;
-    Some(file)
+/// A lock file that cannot be made is an error.
+pub fn lock() -> std::io::Result<Option<fs::File>> {
+    fs::create_dir_all(dir())?;
+    let file = fs::File::create(dir().join("lock"))?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(fs::TryLockError::WouldBlock) => Ok(None),
+        Err(fs::TryLockError::Error(e)) => Err(e),
+    }
 }
 
 /// `openrecall stats --job`: at most once in 24 hours, and not while another process holds the lock. A failure keeps
 /// the old rows file and leaves an `error` line, which the next row counts.
 pub fn job() -> crate::Result<()> {
-    let Some(_lock) = lock() else {
+    if let Err(e) = attempt() {
+        crate::log(json!({"event": "error", "cmd": "stats", "error": e.to_string()}));
+    }
+    Ok(())
+}
+
+fn attempt() -> crate::Result<()> {
+    let Some(_lock) = lock()? else {
         return Ok(());
     };
     let path = dir().join("state.json");
@@ -140,24 +151,16 @@ pub fn job() -> crate::Result<()> {
         return Ok(());
     }
     state.attempted_at = now;
-    let done = crate::write_atomic(&path, &serde_json::to_string(&state)?)
-        .map_err(Into::into)
-        .and_then(|()| recompute());
-    if let Err(e) = done {
-        crate::log(json!({"event": "error", "cmd": "stats", "error": e.to_string()}));
-    }
-    Ok(())
+    crate::write_atomic(&path, &serde_json::to_string(&state)?)?;
+    recompute()
 }
 
 /// Computes every open day's row and replaces the rows file in one write; the caller holds `lock()`. An open day has
 /// log lines and either no row or a row written less than 72 hours after the day ended.
 pub fn recompute() -> crate::Result<()> {
     let now = crate::now_ms() as u64;
-    let db = rusqlite::Connection::open_in_memory()?;
-    let mut local_day = db.prepare("SELECT date(?1, 'unixepoch', 'localtime')")?;
-    let mut day_end = db.prepare("SELECT unixepoch(?1, '+1 day', 'utc')")?;
     // ken: whole-log read each run; an offset index when the read is measured over 1 s
-    let log = read_or_none(&crate::home().join("log").join("openrecall.jsonl"))?;
+    let log = read_or_empty(&crate::home().join("log").join("openrecall.jsonl"))?;
     let mut lines: Vec<(String, Value)> = vec![];
     for raw in log.split(|&b| b == b'\n') {
         let Ok(e) = serde_json::from_slice::<Value>(raw) else {
@@ -166,16 +169,16 @@ pub fn recompute() -> crate::Result<()> {
         let Some(at) = e["at"].as_u64() else {
             continue;
         };
-        let day: String = local_day.query_row([(at / 1000) as i64], |r| r.get(0))?;
+        let day: String = sql("SELECT date(?1, 'unixepoch', 'localtime')", (at / 1000) as i64)?;
         lines.push((day, e));
     }
 
-    let mut rows: BTreeMap<String, String> = BTreeMap::new();
+    let mut rows: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     let mut written: HashMap<String, u64> = HashMap::new();
-    for line in String::from_utf8_lossy(&read_or_none(&rows_file())?).lines() {
-        if let Ok(head) = serde_json::from_str::<Head>(line) {
-            written.insert(head.day.clone(), head.written_at);
-            rows.insert(head.day, line.to_string());
+    for line in read_or_empty(&rows_file())?.split(|&b| b == b'\n') {
+        if let Ok(kept) = serde_json::from_str::<Kept>(&String::from_utf8_lossy(line)) {
+            written.insert(kept.day.clone(), kept.written_at);
+            rows.insert(kept.day, line.to_vec());
         }
     }
     let mut open: BTreeMap<&str, Vec<&Value>> = BTreeMap::new();
@@ -185,7 +188,7 @@ pub fn recompute() -> crate::Result<()> {
     let mut finals = HashSet::new();
     for day in open.keys() {
         if let Some(w) = written.get(*day) {
-            let end: i64 = day_end.query_row([*day], |r| r.get(0))?;
+            let end: i64 = sql("SELECT unixepoch(?1, '+1 day', 'utc')", *day)?;
             if *w >= end as u64 * 1000 + FINAL_MS {
                 finals.insert(*day);
             }
@@ -204,16 +207,25 @@ pub fn recompute() -> crate::Result<()> {
             (*day, row)
         })
         .collect();
-    judge(&lines, &mut fresh);
+    check_transcripts(&lines, &mut fresh);
     for (day, row) in fresh {
-        rows.insert(day.to_string(), serde_json::to_string(&row)?);
+        rows.insert(day.to_string(), serde_json::to_vec(&row)?);
     }
-    let text: String = rows.values().map(|l| format!("{l}\n")).collect();
+    let text: Vec<u8> = rows.into_values().flat_map(|mut l| { l.push(b'\n'); l }).collect();
     Ok(crate::write_atomic(&rows_file(), &text)?)
 }
 
+/// One value from the SQLite the binary bundles, which knows the machine's local time (spec section 6.1).
+fn sql<T: rusqlite::types::FromSql>(query: &str, v: impl rusqlite::ToSql) -> crate::Result<T> {
+    thread_local!(static DB: rusqlite::Result<rusqlite::Connection> = rusqlite::Connection::open_in_memory());
+    DB.with(|db| {
+        let db = db.as_ref().map_err(|e| e.to_string())?;
+        Ok(db.prepare_cached(query)?.query_row([v], |r| r.get(0))?)
+    })
+}
+
 /// A missing file reads as empty; any other read error fails the run, so a final row is never overwritten unread.
-fn read_or_none(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+fn read_or_empty(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
     match fs::read(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(vec![]),
         read => read,
@@ -335,7 +347,7 @@ fn count(lines: &[&Value]) -> Row {
 
 /// The transcript numbers of the open days (spec section 5), the harness's checks over one session's transcript at
 /// a time.
-fn judge(lines: &[(String, Value)], rows: &mut BTreeMap<&str, Row>) {
+fn check_transcripts(lines: &[(String, Value)], rows: &mut BTreeMap<&str, Row>) {
     let mut recalls: HashMap<&str, Vec<&Value>> = HashMap::new();
     let mut picks: HashMap<&str, &Value> = HashMap::new();
     let mut checks: BTreeMap<&str, Vec<(&str, &Value)>> = BTreeMap::new();
@@ -550,14 +562,13 @@ fn used(t: &Turn, ids: &[String]) -> bool {
 /// `line_idents`. None when the file is gone.
 fn memory_idents(address: &str) -> Option<Vec<String>> {
     let (path, _) = crate::mcp::file_of(address, &crate::home(), &crate::user_home())?;
-    let text = String::from_utf8_lossy(&fs::read(path).ok()?).into_owned();
+    let memory = crate::index::parse(&String::from_utf8_lossy(&fs::read(path).ok()?));
     let all = |s: &str| IDENT.find_iter(s).map(|m| m.as_str().to_string()).collect::<Vec<_>>();
-    let body = text.strip_prefix("---\n").and_then(|t| t.split_once("\n---")).map_or(text.as_str(), |(_, b)| b);
-    let body = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    let body = memory.body.split_whitespace().collect::<Vec<_>>().join(" ");
     if body.chars().count() <= LINE_CHARS {
         return Some(all(&body));
     }
-    let desc = front(&text, "description");
+    let desc = memory.description;
     let mut ids = all(&desc);
     let mut room = LINE_CHARS as i64 - desc.chars().count().min(LINE_CHARS) as i64 - 3;
     for i in all(&body) {
@@ -587,18 +598,8 @@ fn record_of(address: &str) -> Option<(String, Vec<String>)> {
             .max()
             .map(|n| retired.join(n))?
     };
-    let text = String::from_utf8_lossy(&fs::read(path).ok()?).into_owned();
-    let aliases = front(&text, "aliases").split(", ").filter(|a| !a.is_empty()).map(str::to_string).collect();
-    Some((front(&text, "branch"), aliases))
-}
-
-/// The harness's `front`: one flat front-matter value from the first 4,000 characters.
-fn front(text: &str, key: &str) -> String {
-    let head: String = text.chars().take(4000).collect();
-    Regex::new(&format!(r"(?m)^\s*{key}:\s*(.*)$"))
-        .ok()
-        .and_then(|re| re.captures(&head).map(|c| c[1].trim().trim_matches(['"', '\'']).to_string()))
-        .unwrap_or_default()
+    let record = crate::record::Record::parse(&String::from_utf8_lossy(&fs::read(path).ok()?));
+    Some((record.branch, record.aliases))
 }
 
 fn addresses(list: &Value) -> impl Iterator<Item = &str> {
@@ -622,18 +623,17 @@ const HEADER: &str = "day versions sessions prompts injections used_signal picks
 
 /// The `stats` tool's local days, both inclusive: `to` is today and `from` is 6 days before `to` when left out.
 pub fn range(from: Option<&str>, to: Option<&str>) -> Result<(String, String), String> {
-    let db = rusqlite::Connection::open_in_memory().map_err(|e| e.to_string())?;
-    let date = |sql: &str, v: &str| db.query_row(sql, [v], |r| r.get::<_, Option<String>>(0)).ok().flatten();
+    let date = |query: &str, v: &str| sql::<Option<String>>(query, v).map_err(|e| e.to_string());
     let check = |v: &str| {
-        date("SELECT date(?1)", v).filter(|d| d == v).ok_or_else(|| format!("\"{v}\" is not a date; use YYYY-MM-DD"))
+        date("SELECT date(?1)", v)?.filter(|d| d == v).ok_or_else(|| format!("\"{v}\" is not a date; use YYYY-MM-DD"))
     };
     let to = match to {
         Some(v) => check(v)?,
-        None => date("SELECT date(?1, 'localtime')", "now").unwrap_or_default(),
+        None => date("SELECT date(?1, 'localtime')", "now")?.unwrap_or_default(),
     };
     let from = match from {
         Some(v) => check(v)?,
-        None => date("SELECT date(?1, '-6 days')", &to).unwrap_or_default(),
+        None => date("SELECT date(?1, '-6 days')", &to)?.unwrap_or_default(),
     };
     Ok((from, to))
 }
@@ -648,13 +648,11 @@ enum Cell {
 /// The `stats` tool's text (spec section 8.6): the file's line, the header, one line per row from `from` to `to`, and
 /// the totals line.
 pub fn table(from: &str, to: &str, locked_out: bool) -> crate::Result<String> {
-    let text = read_or_none(&rows_file())?;
+    let text = read_or_empty(&rows_file())?;
     let rows: Vec<Value> = String::from_utf8_lossy(&text).lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
     let mut first = match rows.iter().filter_map(|r| r["written_at"].as_u64()).max() {
         Some(ms) => {
-            let db = rusqlite::Connection::open_in_memory()?;
-            let local: String =
-                db.query_row("SELECT datetime(?1, 'unixepoch', 'localtime')", [(ms / 1000) as i64], |r| r.get(0))?;
+            let local: String = sql("SELECT datetime(?1, 'unixepoch', 'localtime')", (ms / 1000) as i64)?;
             format!("{}: the newest row was written at {local} local time.", rows_file().display())
         }
         None => format!("{} has no rows yet.", rows_file().display()),

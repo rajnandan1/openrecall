@@ -1388,6 +1388,24 @@ fn the_stats_tool_shows_the_old_rows_when_the_lock_stays_held() {
     m.close();
 }
 
+/// Spec sections 7.7 and 8.5: a lock file the tool cannot make is an error, returned at once before the old rows.
+#[test]
+fn the_stats_tool_returns_a_lock_file_error_at_once_then_the_old_rows() {
+    let w = stats_world("stats-lock-failed", &[]);
+    let lock = w.home.join(".openrecall/stats/lock");
+    fs::remove_file(&lock).unwrap();
+    fs::create_dir(&lock).unwrap();
+    let mut m = Mcp::start(&w);
+    let started = Instant::now();
+    let (text, err) = m.tool("stats", json!({}));
+    let waited = started.elapsed();
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(waited < Duration::from_secs(2), "{waited:?}");
+    assert!(!err && lines[0].starts_with("The stats lock failed: ") && lines[1].ends_with(" local time."), "{text}");
+    assert_eq!(prompts(lines[3]), "1", "the old row: {text}");
+    m.close();
+}
+
 /// A stand-in for an OpenAI-compatible provider on localhost: answers each request with the next canned reply and
 /// keeps each request's headers and body.
 struct Provider {

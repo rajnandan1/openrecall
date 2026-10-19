@@ -49,7 +49,7 @@ impl Home {
         self.append(&format!(".claude/projects/-w-app/{sid}.jsonl"), lines);
     }
 
-    fn put(&self, rel: &str, text: &str) {
+    fn put(&self, rel: &str, text: impl AsRef<[u8]>) {
         let path = self.path(rel);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, text).unwrap();
@@ -373,10 +373,10 @@ fn a_push_is_right_wrong_or_unjudged_and_late_after_an_edit_on_its_branch() {
     assert_eq!(row["late_pushes"], json!({"late": 2, "judged": 5}));
 }
 
-/// Spec test 1, against the harness's `daily` on the same made-up home. Spec test 4 is in it: some of the home's
-/// lines lack the 0.10.0 fields, so their checks read the home's memory and record files.
+/// Spec tests 1 and 4, against the harness's `daily` on the same made-up home: some of the home's lines lack the 0.10.0
+/// fields, so their checks take the fallback and read the home's made-up memory and record files.
 #[test]
-fn the_shared_made_up_home_gives_the_expected_rows() {
+fn the_shared_made_up_home_gives_the_expected_rows_and_a_line_without_the_new_fields_reads_the_made_up_files() {
     let root = std::env::temp_dir().join(format!("openrecall-stats-shared-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     let status = Command::new("cp").arg("-R").arg(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/daily")).arg(&root).status().unwrap();
@@ -424,18 +424,20 @@ fn a_day_without_update_lines_takes_the_last_version_logged_before_it() {
     assert_eq!(h.row("2026-01-11")["versions"], json!(["0.9.0"]));
 }
 
-/// Spec test 2: the job copies a final row's line as it is, fields it does not know included.
+/// Spec test 2: the job copies a final row's line as it is, fields it does not know, a `\r` and bytes that are not
+/// UTF-8 included.
 #[test]
 fn a_final_row_survives_byte_for_byte() {
     let h = Home::new("final-bytes");
     h.log(&[recall("2026-01-09T06:00:00Z", "A", 5, json!({})), recall("2026-01-10T06:00:00Z", "A", 5, json!({}))]);
-    let kept = format!(r#"{{"day":"2026-01-09","written_at":{},"versions":[],"a_later_field":{{"x":[1,2]}},"prompts":99}}"#, ms("2026-01-20T00:00:00Z"));
-    h.put(".openrecall/stats/daily.jsonl", &format!("{kept}\n"));
+    let head = format!(r#"{{"day":"2026-01-09","written_at":{},"versions":[],"a_later_field":{{"x":[1,2]}},"#, ms("2026-01-20T00:00:00Z"));
+    let kept = [head.as_bytes(), b"\"note\":\"\xff\xfe\",\"prompts\":99}\r\n"].concat();
+    h.put(".openrecall/stats/daily.jsonl", &kept);
     h.job();
-    let text = h.text();
-    let lines: Vec<&str> = text.lines().collect();
-    assert_eq!(lines[0], kept);
-    assert_eq!(h.row("2026-01-10")["prompts"], 1);
+    let bytes = fs::read(h.path(".openrecall/stats/daily.jsonl")).unwrap();
+    assert_eq!(&bytes[..kept.len()], kept);
+    let next: Value = serde_json::from_slice(&bytes[kept.len()..]).unwrap();
+    assert_eq!((&next["day"], &next["prompts"]), (&json!("2026-01-10"), &json!(1)));
 }
 
 /// Spec test 6: a row written during its own day is open, so the next run counts the day's later lines.
@@ -532,6 +534,19 @@ fn a_failed_run_keeps_the_old_rows_and_logs_an_error() {
     assert_eq!((&error["event"], &error["cmd"]), (&json!("error"), &json!("stats")));
     let left: Vec<_> = fs::read_dir(h.path(".openrecall/stats")).unwrap().map(|e| e.unwrap().file_name()).collect();
     assert!(!left.iter().any(|n| n.to_string_lossy().contains("tmp")), "{left:?}");
+}
+
+/// Spec section 7.7: a lock file the job cannot make is a failure, not a lock another process holds.
+#[test]
+fn a_lock_file_the_job_cannot_make_logs_an_error() {
+    let h = Home::new("lock-failed");
+    h.log(&[recall("2026-01-10T06:00:00Z", "A", 5, json!({}))]);
+    fs::create_dir_all(h.path(".openrecall/stats/lock")).unwrap();
+    h.job();
+    let log = fs::read_to_string(h.path(".openrecall/log/openrecall.jsonl")).unwrap();
+    let error: Value = serde_json::from_str(log.lines().last().unwrap()).unwrap();
+    assert_eq!((&error["event"], &error["cmd"]), (&json!("error"), &json!("stats")));
+    assert!(h.text().is_empty());
 }
 
 /// Spec section 7.2: SessionStart starts the job detached.

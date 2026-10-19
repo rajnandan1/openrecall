@@ -753,7 +753,7 @@ fn log(mut event: Value) {
 }
 
 /// Temp file, then rename: two detached writers can race on one record.
-pub fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
+pub fn write_atomic(path: &Path, text: &(impl AsRef<[u8]> + ?Sized)) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }

@@ -18,7 +18,7 @@ const STRIKES: u32 = 3;
 /// repeated built-in file ranked 8th (build step 7).
 const CANDIDATES: usize = 10;
 const TOOL_CHARS: usize = 200;
-/// An own tool call: `recall`, `remember` and `forget` are OpenRecall's doing, so the short form leaves them out.
+/// An own tool call: `recall`, `remember`, `forget` and `stats` are OpenRecall's doing, so the short form leaves them out.
 const OWN_TOOL: &str = "mcp__plugin_openrecall_openrecall__";
 const TOOL_KEYS: [&str; 8] = [
     "command",
