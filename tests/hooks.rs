@@ -2039,3 +2039,37 @@ fn the_stop_hook_drops_what_the_turn_left_and_session_end_deletes_the_folder() {
     assert!(!pick_file(&w, "S", "").exists(), "SessionEnd deletes the session's folder");
     assert!(pick_file(&w, "T", "p1.json").exists());
 }
+
+#[test]
+fn the_log_keeps_the_identifiers_given_to_claude_and_the_pushed_records_branch_and_aliases() {
+    let w = World::new("log-fields");
+    w.branch("feat/x");
+    start(&w, "E");
+    turn(&w, "E", "Build ABC-12 in the docs", "Started.");
+    start(&w, "A");
+    assert!(w.pushed("A", "where is ABC-12 now?").is_some());
+    let pushed = log_of(&w, "pushed");
+    assert_eq!((&pushed[0]["branch"], &pushed[0]["aliases"]), (&json!("feat/x"), &json!(["ABC-12"])), "{pushed:?}");
+
+    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    w.fillers(&repo);
+    w.memory(&repo, "export-null-rows", "gotcha", "source: E 2026-01-02T03:04:05Z\n", "Null rows", "Exports fail on empty rows: ABC-12 needs a null check in src/export.py before PR #345 lands.");
+    let ctx = w.pushed("S", "exports fail on empty rows").expect("level 2 injects");
+    assert!(ctx.contains("export-null-rows"), "{ctx}");
+    let recall = log_of(&w, "recall").into_iter().find(|e| e["session"] == "S").unwrap();
+    assert_eq!(
+        recall["identifiers"],
+        json!({"github.com/someone/app/export-null-rows": ["ABC-12", "src/export.py", "#345"]}),
+        "the line's identifiers after its address: {recall}"
+    );
+
+    let w = World::new("log-fields-pick");
+    w.branch("feat/x");
+    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    w.memory(&repo, "walrus-header", "decision", "source: E 2026-01-02T03:04:05Z\n", "The walrus header", "The walrus export in src/walrus.rs puts the header row first (WAL-42).");
+    let p = Provider::start(vec![answer(json!({"ids": ["m1"]}))]);
+    picks_on(&w, &p);
+    transcript(&w, "S", &[]);
+    prompt(&w, "S", "p1", "why does the walrus export drop the header row today");
+    assert_eq!(pick_line(&w, "p1")["identifiers"], json!(["src/walrus.rs", "WAL-42"]));
+}
