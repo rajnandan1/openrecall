@@ -1,0 +1,2 @@
+{"type": "user", "timestamp": "2026-01-06T05:30:00.000Z", "cwd": "/w/app", "gitBranch": "main", "isSidechain": false, "message": {"role": "user", "content": "pick up the billing work"}, "promptId": "p-u1"}
+{"type": "assistant", "timestamp": "2026-01-06T05:30:10.000Z", "cwd": "/w/app", "gitBranch": "main", "isSidechain": false, "message": {"id": "u1", "role": "assistant", "content": [{"type": "text", "text": "Picked up."}]}}
