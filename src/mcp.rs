@@ -1,10 +1,11 @@
-use crate::{git, index, record, scan};
+use crate::{git, index, record, scan, stats};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{ServiceExt, schemars, tool, tool_router, transport::stdio};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::time::{Duration, Instant};
 
 const DEFAULT_K: usize = 5;
 const MAX_K: usize = 20;
@@ -36,7 +37,15 @@ struct ForgetParams {
     id: String,
 }
 
-/// The three tools of spec section 4, served over stdio (ticket 18: `openrecall mcp`).
+#[derive(Deserialize, schemars::JsonSchema)]
+struct StatsParams {
+    /// The first local day, YYYY-MM-DD; 6 days before `to` when left out.
+    from: Option<String>,
+    /// The last local day, YYYY-MM-DD; today when left out.
+    to: Option<String>,
+}
+
+/// OpenRecall's four tools, served over stdio (ticket 18: `openrecall mcp`).
 #[derive(Clone)]
 pub struct Server {
     home: PathBuf,
@@ -183,6 +192,26 @@ impl Server {
                 "Forgot {address} ({}) and {n} replaced copies",
                 path.display()
             ),
+        })
+    }
+
+    #[tool(
+        description = "How OpenRecall performed, as counts per day: prompts, injections, picks, pushes, facts, cost and hook time. Use when the user asks how OpenRecall did, helped or cost on a day or over a range of days."
+    )]
+    fn stats(&self, Parameters(p): Parameters<StatsParams>) -> Result<String, String> {
+        let (from, to) = stats::range(p.from.as_deref(), p.to.as_deref())?;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut lock = stats::lock();
+        while lock.is_none() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+            lock = stats::lock();
+        }
+        let failed = lock.as_ref().and_then(|_| stats::recompute().err());
+        let table = stats::table(&from, &to, lock.is_none()).map_err(|e| e.to_string())?;
+        self.log("stats", json!({}));
+        Ok(match failed {
+            Some(e) => format!("The recompute failed: {e}\n{table}"),
+            None => table,
         })
     }
 
