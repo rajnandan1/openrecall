@@ -5,6 +5,7 @@ mod mcp;
 mod pick;
 mod record;
 mod scan;
+mod stats;
 mod turn;
 mod update;
 
@@ -58,6 +59,7 @@ fn run(args: &[String], started: u128) {
         ["pick", "--job"] => pick::job(started),
         ["deliver"] => pick::deliver(started),
         ["update", "--job"] => update::job(),
+        ["stats", "--job"] => stats::job(),
         _ => return,
     };
     if let Err(e) = result {
@@ -105,6 +107,7 @@ fn handoff() -> Result<()> {
     }
     detach(&["extract", "--job"], Stdio::null())?;
     detach(&["update", "--job"], Stdio::null())?;
+    detach(&["stats", "--job"], Stdio::null())?;
     Ok(())
 }
 

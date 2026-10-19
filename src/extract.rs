@@ -1086,6 +1086,7 @@ mod tests {
                 tool("Bash", json!({"command": "cargo test"})),
                 tool("mcp__plugin_openrecall_openrecall__forget", json!({"address": "a/b"})),
             ],
+            ..Default::default()
         };
         assert_eq!(
             short_form(&t),

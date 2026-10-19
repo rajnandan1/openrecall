@@ -45,7 +45,7 @@ pub struct Server {
     session: String,
 }
 
-enum Kind {
+pub(crate) enum Kind {
     Fact,
     Builtin,
     Handoff,
@@ -221,7 +221,7 @@ pub fn serve() -> crate::Result<()> {
 
 /// Ticket 19: an address is a path under its root, so the file is found by joining strings. `None` for anything
 /// that is not a plain relative path of the known shapes.
-fn file_of(address: &str, home: &Path, user_home: &Path) -> Option<(PathBuf, Kind)> {
+pub(crate) fn file_of(address: &str, home: &Path, user_home: &Path) -> Option<(PathBuf, Kind)> {
     let rel = Path::new(address);
     let plain = !address.is_empty()
         && !address.ends_with('/')

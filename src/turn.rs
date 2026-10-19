@@ -5,12 +5,20 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::LazyLock;
 
 /// One turn of a transcript: the prompt that opened it and what the assistant did after it.
+#[derive(Default)]
 pub struct Turn {
     /// The prompt as the UserPromptSubmit hook sees it; a slash command is its name plus arguments.
     pub ask: String,
     /// False for a task notification, which is not a prompt.
     pub real: bool,
     pub events: Vec<Event>,
+    /// The `timestamp` of the prompt line in ms since 1970, 0 when it has none.
+    pub at: i64,
+    /// The `gitBranch` as the turn's last user or assistant line left it.
+    pub branch: String,
+    pub prompt_id: String,
+    /// An assistant line follows the prompt; a built-in command such as `/model` gets none.
+    pub answered: bool,
 }
 
 pub enum Event {
@@ -45,7 +53,7 @@ const CMD_VERBS: [&str; 25] = [
 ];
 
 pub(crate) static TICKET: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b[A-Z]{2,5}-\d{2,5}\b").unwrap());
-static LOWER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b[a-z]{2,5}-\d{2,5}\b").unwrap());
+pub(crate) static LOWER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b[a-z]{2,5}-\d{2,5}\b").unwrap());
 static PR: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(\bPR\s*#?|pull/|#)(\d{2,6})\b").unwrap());
 static GH_PR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bgh pr \w+ (\d{2,6})\b").unwrap());
@@ -151,7 +159,7 @@ pub fn last_turn(transcript: &[u8], last_message: &str) -> Option<Turn> {
             continue;
         };
         tail.reverse();
-        let mut turn = Turn::new(ask, &tail);
+        let mut turn = Turn::new(&line, ask, &tail);
         let last = last_message.trim();
         if !last.is_empty()
             && !turn
@@ -169,7 +177,7 @@ pub fn last_turn(transcript: &[u8], last_message: &str) -> Option<Turn> {
 /// Every turn of a transcript, oldest first, each with the byte offset just past its last line (ticket 17's cursor).
 pub fn turns(transcript: &[u8]) -> Vec<(Turn, usize)> {
     let mut out: Vec<(Turn, usize)> = vec![];
-    let mut open: Option<(String, usize)> = None;
+    let mut open: Option<(Value, String, usize)> = None;
     let mut lines = vec![];
     let mut at = 0;
     for raw in transcript.split_inclusive(|&b| b == b'\n') {
@@ -182,35 +190,53 @@ pub fn turns(transcript: &[u8]) -> Vec<(Turn, usize)> {
         }
         match prompt_of(&line) {
             Some(ask) => {
-                if let Some((ask, end)) = open.replace((ask, at)) {
-                    out.push((Turn::new(ask, &lines), end));
+                if let Some((prompt, ask, end)) = open.replace((line, ask, at)) {
+                    out.push((Turn::new(&prompt, ask, &lines), end));
                 }
                 lines.clear();
             }
             None => {
-                if let Some((_, end)) = open.as_mut() {
+                if let Some((_, _, end)) = open.as_mut() {
                     *end = at;
                     lines.push(line);
                 }
             }
         }
     }
-    if let Some((ask, end)) = open {
-        out.push((Turn::new(ask, &lines), end));
+    if let Some((prompt, ask, end)) = open {
+        out.push((Turn::new(&prompt, ask, &lines), end));
     }
     out
 }
 
+/// An ISO 8601 UTC time such as `2026-01-10T08:00:01.250Z` in ms since 1970.
+fn ms_of(time: &str) -> Option<i64> {
+    let secs = crate::record::parse_iso(time)? as i64;
+    let frac = time.get(19..).and_then(|f| f.strip_prefix('.')).unwrap_or("");
+    let digits: String = frac.chars().take_while(char::is_ascii_digit).chain("000".chars()).take(3).collect();
+    Some(secs * 1000 + digits.parse::<i64>().ok()?)
+}
+
 impl Turn {
-    /// A turn from its prompt and the transcript lines after it, in order.
-    fn new(ask: String, lines: &[Value]) -> Turn {
+    /// A turn from its prompt line, the prompt it carries and the transcript lines after it, in order.
+    fn new(prompt: &Value, ask: String, lines: &[Value]) -> Turn {
+        let text = |v: &Value| v.as_str().unwrap_or("").to_string();
         let mut turn = Turn {
             real: !is_notification(&ask),
             ask,
             events: vec![],
+            at: prompt["timestamp"].as_str().and_then(ms_of).unwrap_or(0),
+            branch: text(&prompt["gitBranch"]),
+            prompt_id: text(&prompt["promptId"]),
+            answered: false,
         };
         let mut tools: HashMap<String, (String, Value)> = HashMap::new();
         for line in lines {
+            let spoken = (line["type"] == "user" || line["type"] == "assistant") && line["isApiErrorMessage"] != true;
+            if spoken && let Some(b) = line["gitBranch"].as_str().filter(|b| !b.is_empty()) {
+                turn.branch = b.to_string();
+            }
+            turn.answered |= spoken && line["type"] == "assistant";
             let Some(blocks) = line["message"]["content"].as_array() else {
                 continue;
             };
@@ -656,6 +682,23 @@ mod tests {
         assert_eq!(all[0].1, first_turn_end);
         assert_eq!(all[1].1, data.len() - lines(&[data_last_sidechain()]).len(), "a sidechain line ends no turn");
         assert_eq!(all[1].0.events.len(), 4);
+    }
+
+    #[test]
+    fn a_turn_keeps_its_time_last_branch_and_prompt_id() {
+        let data = lines(&[
+            json!({"type": "user", "timestamp": "2026-01-10T08:00:01.250Z", "gitBranch": "main", "promptId": "p1",
+                   "message": {"content": "start ABC-12"}}),
+            json!({"type": "assistant", "gitBranch": "feat/abc-12", "message": {"content": [{"type": "text", "text": "ok"}]}}),
+            json!({"type": "assistant", "gitBranch": "", "message": {"content": [{"type": "text", "text": "still"}]}}),
+            json!({"type": "assistant", "isApiErrorMessage": true, "gitBranch": "other", "message": {"content": []}}),
+            json!({"type": "user", "timestamp": "2026-01-10T08:05:00Z", "promptId": "p2", "message": {"content": "/model"}}),
+        ]);
+        let all = turns(&data);
+        let t = &all[0].0;
+        assert_eq!((t.at, t.branch.as_str(), t.prompt_id.as_str(), t.answered), (1_768_032_001_250, "feat/abc-12", "p1", true));
+        let t = &all[1].0;
+        assert_eq!((t.at, t.branch.as_str(), t.prompt_id.as_str(), t.answered), (1_768_032_300_000, "", "p2", false));
     }
 
     fn data_last_sidechain() -> Value {
