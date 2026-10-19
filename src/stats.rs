@@ -613,3 +613,118 @@ fn candidates(e: &Value) -> HashSet<&str> {
         .filter_map(|c| c["address"].as_str())
         .collect()
 }
+
+/// The `stats` tool's first line says this when the job held the lock for the whole wait.
+const LOCKED_OUT: &str = "The stats job held the lock for 10 s, so today and the other open days were not recomputed.";
+
+const HEADER: &str = "day versions sessions prompts injections used_signal picks_delivered picks_used pushes right_pushes \
+    late_pushes extraction_runs facts_new strikes cost_usd hook_ms errors";
+
+/// The `stats` tool's local days, both inclusive: `to` is today and `from` is 6 days before `to` when left out.
+pub fn range(from: Option<&str>, to: Option<&str>) -> Result<(String, String), String> {
+    let db = rusqlite::Connection::open_in_memory().map_err(|e| e.to_string())?;
+    let date = |sql: &str, v: &str| db.query_row(sql, [v], |r| r.get::<_, Option<String>>(0)).ok().flatten();
+    let check = |v: &str| {
+        date("SELECT date(?1)", v).filter(|d| d == v).ok_or_else(|| format!("\"{v}\" is not a date; use YYYY-MM-DD"))
+    };
+    let to = match to {
+        Some(v) => check(v)?,
+        None => date("SELECT date(?1, 'localtime')", "now").unwrap_or_default(),
+    };
+    let from = match from {
+        Some(v) => check(v)?,
+        None => date("SELECT date(?1, '-6 days')", &to).unwrap_or_default(),
+    };
+    Ok((from, to))
+}
+
+enum Cell {
+    Count(u64),
+    Share(u64, u64),
+    Cost(f64),
+    Text(String),
+}
+
+/// The `stats` tool's text (spec section 8.6): the file's line, the header, one line per row from `from` to `to`, and
+/// the totals line.
+pub fn table(from: &str, to: &str, locked_out: bool) -> crate::Result<String> {
+    let text = read_or_none(&rows_file())?;
+    let rows: Vec<Value> = String::from_utf8_lossy(&text).lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+    let mut first = match rows.iter().filter_map(|r| r["written_at"].as_u64()).max() {
+        Some(ms) => {
+            let db = rusqlite::Connection::open_in_memory()?;
+            let local: String =
+                db.query_row("SELECT datetime(?1, 'unixepoch', 'localtime')", [(ms / 1000) as i64], |r| r.get(0))?;
+            format!("{}: the newest row was written at {local} local time.", rows_file().display())
+        }
+        None => format!("{} has no rows yet.", rows_file().display()),
+    };
+    if locked_out {
+        first = format!("{first} {LOCKED_OUT}");
+    }
+    let mut lines = vec![first, HEADER.to_string()];
+    let mut total: Option<Vec<Option<Cell>>> = None;
+    for row in rows.iter().filter(|r| r["day"].as_str().is_some_and(|d| (from..=to).contains(&d))) {
+        let cells = cells(row);
+        lines.push(render(&cells));
+        total = Some(match total {
+            None => cells,
+            Some(sum) => sum.into_iter().zip(cells).map(|(a, b)| add(a, b)).collect(),
+        });
+    }
+    let Some(total) = total else {
+        return Ok(format!("{}\nNo row from {from} to {to}.", lines[0]));
+    };
+    let mut total: Vec<Option<Cell>> = total.into_iter().map(|c| c.filter(|c| !matches!(c, Cell::Text(_)))).collect();
+    total[0] = Some(Cell::Text("total".into()));
+    lines.push(render(&total));
+    Ok(lines.join("\n"))
+}
+
+/// One row's 17 columns, None where the row lacks the field.
+fn cells(r: &Value) -> Vec<Option<Cell>> {
+    let n = |p: &str| r.pointer(p).and_then(Value::as_u64);
+    let f = |p: &str| r.pointer(p).and_then(Value::as_f64);
+    let share = |a: &str, b: &str| Some(Cell::Share(n(a)?, n(b)?));
+    let versions = r["versions"].as_array().filter(|v| !v.is_empty());
+    vec![
+        r["day"].as_str().map(|d| Cell::Text(d.into())),
+        versions.map(|v| Cell::Text(v.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(","))),
+        n("/sessions").map(|s| Cell::Text(s.to_string())),
+        n("/prompts").map(Cell::Count),
+        n("/injections").map(Cell::Count),
+        share("/used_signal/yes", "/used_signal/judged"),
+        n("/picks_delivered").map(Cell::Count),
+        share("/picks_used/yes", "/picks_used/judged"),
+        r["pushes"].as_object().map(|p| Cell::Count(p.values().filter_map(Value::as_u64).sum())),
+        n("/right_pushes/right").zip(n("/right_pushes/wrong")).map(|(r, w)| Cell::Share(r, r + w)),
+        share("/late_pushes/late", "/late_pushes/judged"),
+        n("/extraction_runs").map(Cell::Count),
+        n("/facts/new").map(Cell::Count),
+        n("/strikes").map(Cell::Count),
+        f("/pick_cost").zip(f("/extraction_cost")).map(|(p, e)| Cell::Cost(p + e)),
+        n("/hook_ms/median").zip(n("/hook_ms/p95")).map(|(m, p)| Cell::Text(format!("{m}/{p}"))),
+        n("/errors").map(Cell::Count),
+    ]
+}
+
+/// The totals line sums counts and shares; a text column, or a column a row lacks, has no total.
+fn add(a: Option<Cell>, b: Option<Cell>) -> Option<Cell> {
+    Some(match (a?, b?) {
+        (Cell::Count(x), Cell::Count(y)) => Cell::Count(x + y),
+        (Cell::Share(a, b), Cell::Share(c, d)) => Cell::Share(a + c, b + d),
+        (Cell::Cost(x), Cell::Cost(y)) => Cell::Cost(x + y),
+        _ => return None,
+    })
+}
+
+fn render(cells: &[Option<Cell>]) -> String {
+    let cell = |c: &Option<Cell>| match c {
+        None => "-".to_string(),
+        Some(Cell::Count(n)) => n.to_string(),
+        Some(Cell::Share(a, b)) => format!("{a}/{b}"),
+        Some(Cell::Cost(x)) => format!("{x:.2}"),
+        Some(Cell::Text(s)) => s.clone(),
+    };
+    cells.iter().map(cell).collect::<Vec<_>>().join(" ")
+}
