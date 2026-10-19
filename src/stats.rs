@@ -117,17 +117,28 @@ pub fn rows_file() -> PathBuf {
 }
 
 /// The stats lock of the job and the `stats` tool, held until the file drops; None while another process holds it.
-pub fn lock() -> Option<fs::File> {
-    fs::create_dir_all(dir()).ok()?;
-    let file = fs::File::create(dir().join("lock")).ok()?;
-    file.try_lock().ok()?;
-    Some(file)
+/// A lock file that cannot be made is an error.
+pub fn lock() -> std::io::Result<Option<fs::File>> {
+    fs::create_dir_all(dir())?;
+    let file = fs::File::create(dir().join("lock"))?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(fs::TryLockError::WouldBlock) => Ok(None),
+        Err(fs::TryLockError::Error(e)) => Err(e),
+    }
 }
 
 /// `openrecall stats --job`: at most once in 24 hours, and not while another process holds the lock. A failure keeps
 /// the old rows file and leaves an `error` line, which the next row counts.
 pub fn job() -> crate::Result<()> {
-    let Some(_lock) = lock() else {
+    if let Err(e) = attempt() {
+        crate::log(json!({"event": "error", "cmd": "stats", "error": e.to_string()}));
+    }
+    Ok(())
+}
+
+fn attempt() -> crate::Result<()> {
+    let Some(_lock) = lock()? else {
         return Ok(());
     };
     let path = dir().join("state.json");
@@ -140,13 +151,8 @@ pub fn job() -> crate::Result<()> {
         return Ok(());
     }
     state.attempted_at = now;
-    let done = crate::write_atomic(&path, &serde_json::to_string(&state)?)
-        .map_err(Into::into)
-        .and_then(|()| recompute());
-    if let Err(e) = done {
-        crate::log(json!({"event": "error", "cmd": "stats", "error": e.to_string()}));
-    }
-    Ok(())
+    crate::write_atomic(&path, serde_json::to_string(&state)?)?;
+    recompute()
 }
 
 /// Computes every open day's row and replaces the rows file in one write; the caller holds `lock()`. An open day has

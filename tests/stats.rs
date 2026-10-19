@@ -536,6 +536,19 @@ fn a_failed_run_keeps_the_old_rows_and_logs_an_error() {
     assert!(!left.iter().any(|n| n.to_string_lossy().contains("tmp")), "{left:?}");
 }
 
+/// Spec section 7.7: a lock file the job cannot make is a failure, not a lock another process holds.
+#[test]
+fn a_lock_file_the_job_cannot_make_logs_an_error() {
+    let h = Home::new("lock-failed");
+    h.log(&[recall("2026-01-10T06:00:00Z", "A", 5, json!({}))]);
+    fs::create_dir_all(h.path(".openrecall/stats/lock")).unwrap();
+    h.job();
+    let log = fs::read_to_string(h.path(".openrecall/log/openrecall.jsonl")).unwrap();
+    let error: Value = serde_json::from_str(log.lines().last().unwrap()).unwrap();
+    assert_eq!((&error["event"], &error["cmd"]), (&json!("error"), &json!("stats")));
+    assert!(h.text().is_empty());
+}
+
 /// Spec section 7.2: SessionStart starts the job detached.
 #[test]
 fn session_start_starts_the_job() {

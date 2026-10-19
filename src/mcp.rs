@@ -202,15 +202,19 @@ impl Server {
         let (from, to) = stats::range(p.from.as_deref(), p.to.as_deref())?;
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut lock = stats::lock();
-        while lock.is_none() && Instant::now() < deadline {
+        while matches!(lock, Ok(None)) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(100));
             lock = stats::lock();
         }
-        let failed = lock.as_ref().and_then(|_| stats::recompute().err());
-        let table = stats::table(&from, &to, lock.is_none()).map_err(|e| e.to_string())?;
+        let failed = match &lock {
+            Ok(Some(_)) => stats::recompute().err().map(|e| format!("The recompute failed: {e}")),
+            Ok(None) => None,
+            Err(e) => Some(format!("The stats lock failed: {e}")),
+        };
+        let table = stats::table(&from, &to, matches!(lock, Ok(None))).map_err(|e| e.to_string())?;
         self.log("stats", json!({}));
         Ok(match failed {
-            Some(e) => format!("The recompute failed: {e}\n{table}"),
+            Some(e) => format!("{e}\n{table}"),
             None => table,
         })
     }
