@@ -170,12 +170,12 @@ pub fn recompute() -> crate::Result<()> {
         lines.push((day, e));
     }
 
-    let mut rows: BTreeMap<String, String> = BTreeMap::new();
+    let mut rows: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     let mut written: HashMap<String, u64> = HashMap::new();
-    for line in String::from_utf8_lossy(&read_or_none(&rows_file())?).lines() {
-        if let Ok(head) = serde_json::from_str::<Head>(line) {
+    for line in read_or_none(&rows_file())?.split(|&b| b == b'\n') {
+        if let Ok(head) = serde_json::from_str::<Head>(&String::from_utf8_lossy(line)) {
             written.insert(head.day.clone(), head.written_at);
-            rows.insert(head.day, line.to_string());
+            rows.insert(head.day, line.to_vec());
         }
     }
     let mut open: BTreeMap<&str, Vec<&Value>> = BTreeMap::new();
@@ -206,10 +206,10 @@ pub fn recompute() -> crate::Result<()> {
         .collect();
     judge(&lines, &mut fresh);
     for (day, row) in fresh {
-        rows.insert(day.to_string(), serde_json::to_string(&row)?);
+        rows.insert(day.to_string(), serde_json::to_vec(&row)?);
     }
-    let text: String = rows.values().map(|l| format!("{l}\n")).collect();
-    Ok(crate::write_atomic(&rows_file(), &text)?)
+    let text: Vec<u8> = rows.into_values().flat_map(|l| l.into_iter().chain([b'\n'])).collect();
+    Ok(crate::write_atomic(&rows_file(), text)?)
 }
 
 /// A missing file reads as empty; any other read error fails the run, so a final row is never overwritten unread.

@@ -49,7 +49,7 @@ impl Home {
         self.append(&format!(".claude/projects/-w-app/{sid}.jsonl"), lines);
     }
 
-    fn put(&self, rel: &str, text: &str) {
+    fn put(&self, rel: &str, text: impl AsRef<[u8]>) {
         let path = self.path(rel);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, text).unwrap();
@@ -424,18 +424,20 @@ fn a_day_without_update_lines_takes_the_last_version_logged_before_it() {
     assert_eq!(h.row("2026-01-11")["versions"], json!(["0.9.0"]));
 }
 
-/// Spec test 2: the job copies a final row's line as it is, fields it does not know included.
+/// Spec test 2: the job copies a final row's line as it is, fields it does not know, a `\r` and bytes that are not
+/// UTF-8 included.
 #[test]
 fn a_final_row_survives_byte_for_byte() {
     let h = Home::new("final-bytes");
     h.log(&[recall("2026-01-09T06:00:00Z", "A", 5, json!({})), recall("2026-01-10T06:00:00Z", "A", 5, json!({}))]);
-    let kept = format!(r#"{{"day":"2026-01-09","written_at":{},"versions":[],"a_later_field":{{"x":[1,2]}},"prompts":99}}"#, ms("2026-01-20T00:00:00Z"));
-    h.put(".openrecall/stats/daily.jsonl", &format!("{kept}\n"));
+    let head = format!(r#"{{"day":"2026-01-09","written_at":{},"versions":[],"a_later_field":{{"x":[1,2]}},"#, ms("2026-01-20T00:00:00Z"));
+    let kept = [head.as_bytes(), b"\"note\":\"\xff\xfe\",\"prompts\":99}\r\n"].concat();
+    h.put(".openrecall/stats/daily.jsonl", &kept);
     h.job();
-    let text = h.text();
-    let lines: Vec<&str> = text.lines().collect();
-    assert_eq!(lines[0], kept);
-    assert_eq!(h.row("2026-01-10")["prompts"], 1);
+    let bytes = fs::read(h.path(".openrecall/stats/daily.jsonl")).unwrap();
+    assert_eq!(&bytes[..kept.len()], kept);
+    let next: Value = serde_json::from_slice(&bytes[kept.len()..]).unwrap();
+    assert_eq!((&next["day"], &next["prompts"]), (&json!("2026-01-10"), &json!(1)));
 }
 
 /// Spec test 6: a row written during its own day is open, so the next run counts the day's later lines.
