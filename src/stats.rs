@@ -562,14 +562,13 @@ fn used(t: &Turn, ids: &[String]) -> bool {
 /// `line_idents`. None when the file is gone.
 fn memory_idents(address: &str) -> Option<Vec<String>> {
     let (path, _) = crate::mcp::file_of(address, &crate::home(), &crate::user_home())?;
-    let text = String::from_utf8_lossy(&fs::read(path).ok()?).into_owned();
+    let memory = crate::index::parse(&String::from_utf8_lossy(&fs::read(path).ok()?));
     let all = |s: &str| IDENT.find_iter(s).map(|m| m.as_str().to_string()).collect::<Vec<_>>();
-    let body = text.strip_prefix("---\n").and_then(|t| t.split_once("\n---")).map_or(text.as_str(), |(_, b)| b);
-    let body = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    let body = memory.body.split_whitespace().collect::<Vec<_>>().join(" ");
     if body.chars().count() <= LINE_CHARS {
         return Some(all(&body));
     }
-    let desc = front(&text, "description");
+    let desc = memory.description;
     let mut ids = all(&desc);
     let mut room = LINE_CHARS as i64 - desc.chars().count().min(LINE_CHARS) as i64 - 3;
     for i in all(&body) {
@@ -599,18 +598,8 @@ fn record_of(address: &str) -> Option<(String, Vec<String>)> {
             .max()
             .map(|n| retired.join(n))?
     };
-    let text = String::from_utf8_lossy(&fs::read(path).ok()?).into_owned();
-    let aliases = front(&text, "aliases").split(", ").filter(|a| !a.is_empty()).map(str::to_string).collect();
-    Some((front(&text, "branch"), aliases))
-}
-
-/// The harness's `front`: one flat front-matter value from the first 4,000 characters.
-fn front(text: &str, key: &str) -> String {
-    let head: String = text.chars().take(4000).collect();
-    Regex::new(&format!(r"(?m)^\s*{key}:\s*(.*)$"))
-        .ok()
-        .and_then(|re| re.captures(&head).map(|c| c[1].trim().trim_matches(['"', '\'']).to_string()))
-        .unwrap_or_default()
+    let record = crate::record::Record::parse(&String::from_utf8_lossy(&fs::read(path).ok()?));
+    Some((record.branch, record.aliases))
 }
 
 fn addresses(list: &Value) -> impl Iterator<Item = &str> {
