@@ -1,0 +1,2 @@
+{"type": "user", "timestamp": "2026-01-05T07:30:00.000Z", "cwd": "/w/app", "gitBranch": "main", "isSidechain": false, "message": {"role": "user", "content": "carry on with MNO-90 please"}, "promptId": "p-s1"}
+{"type": "assistant", "timestamp": "2026-01-05T07:30:10.000Z", "cwd": "/w/app", "gitBranch": "main", "isSidechain": false, "message": {"id": "s1", "role": "assistant", "content": [{"type": "text", "text": "On it."}]}}

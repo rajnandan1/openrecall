@@ -1,0 +1,5 @@
+{"type": "user", "timestamp": "2026-01-08T03:30:00.000Z", "cwd": "/w/app", "gitBranch": "main", "isSidechain": false, "message": {"role": "user", "content": "explain the export retry rules again"}, "promptId": "p-c1"}
+{"type": "assistant", "timestamp": "2026-01-08T03:30:20.000Z", "cwd": "/w/app", "gitBranch": "main", "isSidechain": false, "message": {"id": "c1", "role": "assistant", "content": [{"type": "text", "text": "Rows retry 3 times."}]}}
+{"type": "user", "timestamp": "2026-01-08T03:50:00.000Z", "cwd": "/w/app", "gitBranch": "main", "isSidechain": false, "message": {"role": "user", "content": "<command-name>/implement</command-name>\n<command-args></command-args>"}, "promptId": "p-ce"}
+{"type": "assistant", "timestamp": "2026-01-08T03:50:05.000Z", "cwd": "/w/app", "gitBranch": "main", "isSidechain": false, "message": {"id": "ce", "role": "assistant", "content": [{"type": "text", "text": "Which step?"}]}}
+{"type": "user", "timestamp": "2026-01-08T04:00:00.000Z", "cwd": "/w/app", "gitBranch": "main", "isSidechain": false, "message": {"role": "user", "content": "and the deploy order for the release"}, "promptId": "p-c2"}

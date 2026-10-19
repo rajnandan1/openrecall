@@ -5,6 +5,7 @@
     python3 eval/harness.py report [--binary PATH] [--picks]   # write runs/<UTC time>/report.md
     python3 eval/harness.py freeze-set FOLDER SINCE UNTIL     # a case set of the live prompts in a window
     python3 eval/harness.py report-set FOLDER [--binary PATH] [--picks]   # FOLDER/runs/<UTC time>/report.md
+    python3 eval/harness.py daily [--home PATH]      # Daily stats: one row per local day of the home's log
 
 Reads Claude Code transcripts under ~/.claude/projects and writes only under ~/.openrecall/eval/
 (OPENRECALL_HOME replaces ~/.openrecall). The first freeze needs appendix-a.jsonl there: one
@@ -124,7 +125,8 @@ def scan(path, until=None):
                 text = prompt_of(o)
                 if text is not None:
                     cur = dict(line=n, at=o["timestamp"], start=t, end=t, ask=text, real="<task-notification>" not in text,
-                               branch_start=branch, branch_end=branch, tools=[], groups=[], results=[])
+                               branch_start=branch, branch_end=branch, tools=[], groups=[], results=[],
+                               prompt_id=o.get("promptId"))
                     s["turns"].append(cur)
                     groups = {}
                     continue
@@ -1032,14 +1034,14 @@ def line_idents(path):
     return ids
 
 
-def used_signal(case, s, path):
+def used_signal(case, s, path, idents=None):
     """Ticket 19 item 5 on a replayed case: the next assistant turn repeats an identifier from the injected line that
-    the prompt did not contain. None when the transcript is gone."""
+    the prompt did not contain. None when the transcript is gone. `idents`, when given, are the line's identifiers."""
     t = next((t for t in s["turns"] if t["at"] == case["at"]), None) if s else None
     if not t:
         return None
     after = "\n".join(x for g in t["groups"] for x in g["text"]) + "\n" + "\n".join(json.dumps(i) for _, i in t["tools"])
-    ids = set(line_idents(path)) - set(IDENT.findall(case["prompt"]))
+    ids = set(line_idents(path) if idents is None else idents) - set(IDENT.findall(case["prompt"]))
     return any(i in after for i in ids)
 
 
@@ -1318,7 +1320,7 @@ def found_in(text, roots, folders):
 
 def pct(values, q):
     v = sorted(values)
-    return v[min(len(v) - 1, int(q * len(v)))] if v else 0.0
+    return v[min(len(v) - 1, int(q * len(v)))] if v else 0
 
 
 def case(cid, s, t, known):
@@ -1339,6 +1341,102 @@ def seed_case(seed, known):
 def read(path):
     with open(path) as fh:
         return [json.loads(line) for line in fh if line.strip()]
+
+
+def record_of(address, orhome):
+    """A pushed handoff record's branch and aliases as its file stands: the live record, else its newest retired copy."""
+    path = address_path(address, orhome)
+    if not os.path.exists(path):
+        d, stem = os.path.split(path[:-3])
+        copies = sorted(glob.glob(os.path.join(d, "retired", stem + ".*.md")))
+        path = copies[-1] if copies else None
+    return path and dict(branch=front(path, "branch"), aliases=set(front(path, "aliases").split(", ")) - {""})
+
+
+def daily(orhome):
+    """Daily stats (spec sections 4 and 5): one row per local day of the recall log, without `written_at`. A line from
+    before 0.10.0 lacks `identifiers` or `branch`, so its check reads the memory or record file as it stands now."""
+    events = read(os.path.join(orhome, "log", "openrecall.jsonl"))
+    paths = {os.path.basename(p)[:-6]: p for p in sorted(glob.glob(os.path.join(PROJECTS, "*", "*.jsonl")))}
+    by_sid, recalls, days = {}, defaultdict(list), defaultdict(lambda: defaultdict(list))
+    for sid in {e.get("session") for e in events} & set(paths):
+        s = by_sid[sid] = scan(paths[sid])
+        s["real"] = [t for t in s["turns"] if t["real"]]
+        s["tickets"] = {tk for t in s["real"] for tk in tickets_in(t["ask"])}
+    for e in events:
+        if e.get("event") == "recall":
+            recalls[e.get("session")].append(e)
+        days[datetime.fromtimestamp(e["at"] / 1000).date().isoformat()][e.get("event")].append(e)
+    picks = {e.get("prompt_id"): e for e in events if e.get("event") == "pick"}
+
+    def signal(s, t, idents, address):
+        """The used signal of one memory given in turn t, or None when it is not judged."""
+        path = address_path(address, orhome)
+        if not (t and t["groups"]) or idents is None and not os.path.exists(path):
+            return None
+        return used_signal(dict(at=t["at"], prompt=t["ask"]), s, path, idents)
+
+    count = lambda values: dict(sorted(Counter(values).items()))
+    total = lambda lines, key: sum(e.get(key) or 0 for e in lines)
+    cost = lambda lines: sum((e.get("cost") or 0.0 for e in lines), 0.0)
+    last = None
+    for day, by in sorted(days.items()):
+        seen = []
+        for e in by["update"]:
+            seen += [e.get("from")] if e.get("step") == "binary" else []
+            seen += [e.get("to")] if e.get("step") == "plugin" or e.get("result") == "updated" else []
+        versions = list(dict.fromkeys(seen)) or ([last] if last else [])
+        last = seen[-1] if seen else last
+        rec, ex = by["recall"], by["extract"]
+        used, picked, verdicts, late = Counter(), Counter(), Counter(), Counter()
+        gate = [(e, a) for e in rec for a in e.get("injected") or [] if a in {c["address"] for c in e.get("candidates") or []}]
+        for e, a in gate:
+            s = by_sid.get(e.get("session"))
+            v = signal(s, turn_of(e, s["turns"]) if s else None, e["identifiers"].get(a, []) if "identifiers" in e else None, a)
+            used["judged"] += v is not None
+            used["yes"] += bool(v)
+        for e in by["deliver"]:
+            s = by_sid.get(e.get("session"))
+            t = next((t for t in s["turns"] if t["prompt_id"] == e.get("prompt_id")), None) if s else None
+            v = signal(s, t, picks.get(e.get("prompt_id"), {}).get("identifiers"), e.get("memory") or "")
+            picked["judged"] += v is not None
+            picked["yes"] += bool(v)
+        for e in by["pushed"]:
+            s = by_sid.get(e.get("session"))
+            r = next((r for r in recalls[e.get("session")] if r.get("started_at", 0) <= e["at"] <= r.get("ended_at", 0)), None)
+            t = turn_of(r, s["turns"]) if s and r else None
+            push = dict(branch=e["branch"], aliases=set(e["aliases"])) if "branch" in e else record_of(e.get("address") or "", orhome)
+            if not (t and push):
+                continue
+            if e.get("how") not in ("sibling", "file"):
+                verdicts[verdict(s, push)] += 1
+            push["turn"] = s["turns"].index(t)
+            late["judged"] += 1
+            late["late"] += is_late(s, push)
+        hooks = [e["ended_at"] - e["started_at"] for e in rec if "started_at" in e and "ended_at" in e]
+        print(json.dumps(dict(
+            day=day, versions=versions, sessions=len({e["session"] for lines in by.values() for e in lines if e.get("session")}),
+            prompts=len(rec), searched=sum("candidates" in e for e in rec),
+            prompt_skips=count(e.get("reason", "").replace("-", "_") for e in by["skipped"]), injections=len(gate),
+            identifier_rule=sum(v == "identifier" for e in rec for v in (e.get("via") or {}).values()),
+            echoes=sum(len(e.get("echoes") or []) for e in rec), used_signal=dict(yes=used["yes"], judged=used["judged"]),
+            hook_ms=dict(median=pct(hooks, 0.5), p95=pct(hooks, 0.95)),
+            index_size=next((e["index_size"] for e in reversed(rec) if "index_size" in e), 0),
+            pick_jobs=len(by["pick"]), picks=sum(bool(e.get("memory")) for e in by["pick"]),
+            pick_skips=count(e["skip"] for e in by["pick"] if e.get("skip")), picks_delivered=len(by["deliver"]),
+            pick_drops=count(e.get("reason") for e in by["pick_drop"]), picks_used=dict(yes=picked["yes"], judged=picked["judged"]),
+            pick_cost=cost(by["pick"]), pick_ms=pct([e["ms"] for e in by["pick"] if "ms" in e], 0.5),
+            pushes=count(e.get("how") for e in by["pushed"]),
+            right_pushes=dict(right=verdicts["right"], wrong=verdicts["wrong"], unjudged=verdicts["unjudged"]),
+            late_pushes=dict(late=late["late"], judged=late["judged"]), extraction_runs=sum("to" in e for e in ex),
+            facts=dict(new=total(ex, "new"), replaced=total(ex, "replaced"), skipped=total(ex, "skipped"),
+                       dropped=sum(sum((e.get("dropped") or {}).values()) for e in ex)),
+            suggestions=total(ex, "suggestions"), strikes=sum("strike" in e for e in ex),
+            failed_sessions=sum(bool(e.get("failed")) for e in ex), stops=sum("stop" in e for e in ex),
+            extraction_cost=cost(ex), extraction_ms=pct([e["ms"] for e in ex if "ms" in e], 0.5),
+            redactions=len(by["redacted"]), own_tool_calls=count(e.get("tool") for e in by["mcp"]),
+            update_check=count("%s_%s" % (e.get("step"), e.get("result")) for e in by["update"]), errors=len(by["error"])),
+            separators=(",", ":")))
 
 
 def freeze(now=None):
@@ -1703,6 +1801,8 @@ if __name__ == "__main__":
         freeze()
     elif cmd == "freeze-set" and len(rest) == 3:
         freeze_set(os.path.join(EVAL, rest[0]), rest[1], rest[2])
+    elif cmd == "daily" and (not rest or len(rest) == 2 and rest[0] == "--home"):
+        daily(rest[1] if rest else os.path.dirname(EVAL))
     elif args:
         import judge
         binary, picks = args

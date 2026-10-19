@@ -5,6 +5,9 @@ import json
 import os
 import random
 import re
+import shutil
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -12,6 +15,8 @@ import unittest.mock
 from datetime import datetime, timezone
 
 import harness
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def user(ts, text, branch, cwd="/w/app", entry="cli"):
@@ -639,6 +644,16 @@ class HarnessTest(unittest.TestCase):
                      "Picks alone: precision 50% (1/2,", "Mean cost per pick job: 2.00 cents (limit 4.4).",
                      "ready before their turn's first tool call: 0 of 2; turns with no tool call or no transcript: 2."):
             self.assertIn(part, text)
+
+    def test_daily_rows_of_the_made_up_home(self):
+        copy = os.path.join(tempfile.mkdtemp(), "daily")
+        shutil.copytree(os.path.join(REPO, "tests", "daily"), copy)
+        home = os.path.join(copy, "home")
+        out = subprocess.run([sys.executable, os.path.join(REPO, "eval", "harness.py"), "daily", "--home",
+                              os.path.join(home, ".openrecall")], env=dict(os.environ, HOME=home, TZ="IST-5:30"),
+                             capture_output=True, text=True, check=True).stdout
+        with open(os.path.join(copy, "expected.jsonl")) as fh:
+            self.assertEqual(out.splitlines(), fh.read().splitlines())
 
     def test_report_args(self):
         self.assertEqual(harness.report_args([]), (harness.BINARY, False), "picks are off by default")
