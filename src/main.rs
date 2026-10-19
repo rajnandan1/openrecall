@@ -249,7 +249,8 @@ fn recall(started: u128) -> Result<()> {
         };
         context.push(format!("{header} {reflects}\n\n{body}"));
         see(&mut s, &address);
-        log(json!({"event": "pushed", "session": sid, "address": address, "how": how}));
+        log(json!({"event": "pushed", "session": sid, "address": address, "how": how,
+                   "branch": rec.branch, "aliases": rec.aliases}));
         injected.push(address);
     }
     let mut searched = json!({});
@@ -345,6 +346,10 @@ fn level2(
         chars = chars - line.chars().count() + whole.chars().count();
         *line = whole;
     }
+    let identifiers: serde_json::Map<String, Value> = lines
+        .iter()
+        .map(|(c, line)| (c.address.clone(), json!(index::identifiers(c, line))))
+        .collect();
     let lines: Vec<(String, String)> = lines
         .into_iter()
         .map(|(c, line)| (c.address.clone(), line))
@@ -358,7 +363,7 @@ fn level2(
     Ok((
         lines,
         json!({"terms": terms.len(), "index_size": size, "candidates": candidates, "dropped": dropped, "via": vias,
-               "echoes": echoes.iter().map(|(c, _)| &c.address).collect::<Vec<_>>()}),
+               "echoes": echoes.iter().map(|(c, _)| &c.address).collect::<Vec<_>>(), "identifiers": identifiers}),
     ))
 }
 

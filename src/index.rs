@@ -663,18 +663,23 @@ fn prefix(c: &Candidate) -> String {
     format!("- {} {} {}: ", c.kind, c.date, c.address)
 }
 
-/// Issue 19: the line names a path that the query names, and at most 2 identifiers that it lacks. The identifiers are
-/// `IDENT` of `eval/harness.py` over the text after the prefix, since every address holds a `/`.
-pub fn echo(c: &Candidate, query: &str) -> bool {
-    let line = line(c, 0);
-    let mut ids: Vec<&str> = vec![];
+/// The identifiers of a line of `c`: `IDENT` of `eval/harness.py` over the text after the prefix, since every address
+/// holds a `/`, without repeats.
+pub fn identifiers(c: &Candidate, line: &str) -> Vec<String> {
+    let mut ids: Vec<String> = vec![];
     for m in IDENT.find_iter(&line[prefix(c).len()..]) {
-        if !ids.contains(&m.as_str()) {
-            ids.push(m.as_str());
+        if !ids.iter().any(|i| i == m.as_str()) {
+            ids.push(m.as_str().to_string());
         }
     }
-    ids.iter().any(|i| i.contains('/') && !i.starts_with("http") && query.contains(i))
-        && ids.iter().filter(|i| !query.contains(**i)).count() <= 2
+    ids
+}
+
+/// Issue 19: the line names a path that the query names, and at most 2 identifiers that it lacks.
+pub fn echo(c: &Candidate, query: &str) -> bool {
+    let ids = identifiers(c, &line(c, 0));
+    ids.iter().any(|i| i.contains('/') && !i.starts_with("http") && query.contains(i.as_str()))
+        && ids.iter().filter(|i| !query.contains(i.as_str())).count() <= 2
 }
 
 fn head(s: &str, bytes: usize) -> &str {
