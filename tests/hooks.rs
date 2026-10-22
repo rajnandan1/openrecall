@@ -2018,8 +2018,15 @@ fn a_prompt_makes_at_most_one_call_and_a_session_ten() {
     prompt(&w, "S", "p11", "what changed in the walrus export header since yesterday");
     w.run(&["pick", "--job"], &json!({"session_id": "S", "prompt_id": "p12", "cwd": w.folder, "prompt": "walrus export header"}).to_string());
     assert_eq!(pick_line(&w, "p12")["skip"], "cap", "the job keeps the cap too");
-    assert!(log_of(&w, "pick").iter().all(|l| l["prompt_id"] != "p11"), "the 11th prompt starts no job");
+    let capped = pick_line(&w, "p11");
+    assert_eq!((&capped["skip"], &capped["memory"]), (&json!("cap"), &Value::Null), "the 11th prompt starts no job and logs the cap: {capped}");
     assert_eq!(p.requests().len(), 10);
+
+    w.hook(&["handoff"], "S", json!({"source": "compact"}));
+    assert_eq!(session_of(&w, "S")["picks"], 0, "a compaction starts a new count");
+    prompt(&w, "S", "p13", "what changed in the walrus export header since yesterday");
+    assert_eq!(pick_line(&w, "p13")["skip"], Value::Null);
+    assert_eq!(p.requests().len(), 11);
 }
 
 #[test]

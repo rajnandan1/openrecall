@@ -97,6 +97,7 @@ fn handoff() -> Result<()> {
     match source {
         "compact" => {
             s["ledger"] = json!([]);
+            s["picks"] = json!(0);
             log(json!({"event": "ledger_cleared", "session": sid}));
         }
         "resume" | "fork" => {}

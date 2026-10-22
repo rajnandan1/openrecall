@@ -36,10 +36,12 @@ const FILE_LED_WORDS: usize = 10;
 /// The prompt hook starts the job for a prompt that passed every skip rule, when picks are on, the prompt has a plain
 /// `prompt_id` and the session has calls left (spec 3.2). The hook never waits for the job.
 pub fn start(input: &Value, s: &Value) -> crate::Result<()> {
-    if prompt_id(input).is_none()
-        || s["picks"].as_u64().unwrap_or(0) >= MAX_CALLS
-        || !extract::picks_on(&crate::home())
-    {
+    let Some(id) = prompt_id(input).filter(|_| extract::picks_on(&crate::home())) else {
+        return Ok(());
+    };
+    if s["picks"].as_u64().unwrap_or(0) >= MAX_CALLS {
+        crate::log(json!({"event": "pick", "session": crate::session_id(input)?, "prompt_id": id, "memory": null,
+                          "skip": "cap"}));
         return Ok(());
     }
     crate::detach(&["pick", "--job"], Stdio::piped())?
