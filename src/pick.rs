@@ -90,13 +90,23 @@ fn pick(input: &Value, sid: &str, line: &mut Value) -> crate::Result<Option<Valu
         |r| r.folder.clone(),
     );
     let named = named_text(prompt, &folder, &scanner, line);
+    let s = crate::load_session(sid)?.1;
+    let unseen = |c: &index::Candidate| !crate::seen(&s, &c.address);
     let memories = ix.all(&scopes)?;
     line["memories"] = json!(memories.len());
+    let memories: Vec<_> = memories.into_iter().filter(unseen).collect();
     let memories = if memories.len() <= MAX_LISTED {
         memories
     } else {
         let newest = turns.last().map(extract::short_form).unwrap_or_default();
-        let mut best = ix.search(&index::terms(&format!("{prompt}\n{newest}")), &scopes, MAX_LISTED)?;
+        let held = s["ledger"].as_array().map_or(0, Vec::len);
+        let terms = index::terms(&format!("{prompt}\n{newest}"));
+        let mut best: Vec<_> = ix
+            .search(&terms, &scopes, MAX_LISTED + held)?
+            .into_iter()
+            .filter(unseen)
+            .take(MAX_LISTED)
+            .collect();
         best.sort_by(|a, b| a.address.cmp(&b.address));
         best
     };
