@@ -36,10 +36,12 @@ const FILE_LED_WORDS: usize = 10;
 /// The prompt hook starts the job for a prompt that passed every skip rule, when picks are on, the prompt has a plain
 /// `prompt_id` and the session has calls left (spec 3.2). The hook never waits for the job.
 pub fn start(input: &Value, s: &Value) -> crate::Result<()> {
-    if prompt_id(input).is_none()
-        || s["picks"].as_u64().unwrap_or(0) >= MAX_CALLS
-        || !extract::picks_on(&crate::home())
-    {
+    let Some(id) = prompt_id(input).filter(|_| extract::picks_on(&crate::home())) else {
+        return Ok(());
+    };
+    if s["picks"].as_u64().unwrap_or(0) >= MAX_CALLS {
+        crate::log(json!({"event": "pick", "session": crate::session_id(input)?, "prompt_id": id, "memory": null,
+                          "skip": "cap"}));
         return Ok(());
     }
     crate::detach(&["pick", "--job"], Stdio::piped())?
@@ -90,13 +92,23 @@ fn pick(input: &Value, sid: &str, line: &mut Value) -> crate::Result<Option<Valu
         |r| r.folder.clone(),
     );
     let named = named_text(prompt, &folder, &scanner, line);
+    let s = crate::load_session(sid)?.1;
+    let unseen = |c: &index::Candidate| !crate::seen(&s, &c.address);
     let memories = ix.all(&scopes)?;
     line["memories"] = json!(memories.len());
+    let memories: Vec<_> = memories.into_iter().filter(unseen).collect();
     let memories = if memories.len() <= MAX_LISTED {
         memories
     } else {
         let newest = turns.last().map(extract::short_form).unwrap_or_default();
-        let mut best = ix.search(&index::terms(&format!("{prompt}\n{newest}")), &scopes, MAX_LISTED)?;
+        let held = s["ledger"].as_array().map_or(0, Vec::len);
+        let terms = index::terms(&format!("{prompt}\n{newest}"));
+        let mut best: Vec<_> = ix
+            .search(&terms, &scopes, MAX_LISTED + held)?
+            .into_iter()
+            .filter(unseen)
+            .take(MAX_LISTED)
+            .collect();
         best.sort_by(|a, b| a.address.cmp(&b.address));
         best
     };

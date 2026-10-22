@@ -95,7 +95,11 @@ fn handoff() -> Result<()> {
         .unwrap_or_default();
     let (_lock, mut s) = load_session(&sid)?;
     match source {
-        "compact" => s["ledger"] = json!([]),
+        "compact" => {
+            s["ledger"] = json!([]);
+            s["picks"] = json!(0);
+            log(json!({"event": "ledger_cleared", "session": sid}));
+        }
         "resume" | "fork" => {}
         _ => s = json!({"branch": branch, "turns": 0, "ledger": []}),
     }

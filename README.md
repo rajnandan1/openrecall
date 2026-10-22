@@ -307,7 +307,7 @@ A pick is the one memory, or none, that an LLM chooses for your prompt. The LLM 
 
 The prompt hook is the hook that Claude Code runs when you send a prompt. On each prompt that recall does not skip, the prompt hook starts a background job. The job sends one request to the provider. The request holds four parts:
 
-- The memories that recall searches for this repo, one line each, with its name and its description. When there are 50 memories or fewer, the request holds all of them. When there are more, it holds the 50 that best match the words of your prompt and of the newest turn.
+- The memories that recall searches for this repo, one line each, with its name and its description. The list leaves out each memory that this context window already got. When there are 50 memories or fewer, the request holds all of them. When there are more, it holds the 50 that best match the words of your prompt and of the newest turn.
 - The text of each document that your prompt names, when the prompt has 10 words or fewer besides the paths: a `.md`, `.txt`, `.rst`, `.org` or `.adoc` file of 256 KB or less. OpenRecall replaces each secret in it with `[REDACTED:<rule-id>]` first. Then it cuts the texts to 8,000 characters in total.
 - The short form of the session, newest turn first. It is the same short form that extraction sends: your prompts, Claude's text, and one line per tool call, with no tool output. OpenRecall replaces each secret in it with `[REDACTED:<rule-id>]` first.
 - Your prompt.
@@ -320,7 +320,7 @@ The plugin also has a tool hook. Claude Code runs it after each tool call that C
 
 A picked memory skips the gate. OpenRecall still drops a pick in each case where it does not inject a memory, as listed in [Recalled memories](#recalled-memories). It also drops a pick that is an echo of the prompt.
 
-Each pick makes at most one call to the model. With Claude Sonnet 5.5 through OpenRouter, a call costs about $0.02. The largest call that we measured cost $0.034. A session makes at most 10 calls. A day of 57 to 72 prompts costs about $1.50 to $1.90. This cost comes on top of the cost of extraction.
+Each pick makes at most one call to the model. With Claude Sonnet 5.5 through OpenRouter, a call costs about $0.02. The largest call that we measured cost $0.034. A context window makes at most 10 calls, and a compaction starts a new count. A day of 57 to 72 prompts costs about $1.50 to $1.90. This cost comes on top of the cost of extraction.
 
 Picks need Claude Code 2.1.196 or later. On an older version, the prompt hook starts no job, so nothing is sent and nothing is spent.
 

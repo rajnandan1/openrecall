@@ -285,6 +285,8 @@ fn a_new_session_gets_the_earlier_sessions_state() {
             .contains("fix the flaky test"),
         "compact re-pushes at once"
     );
+    let cleared: Vec<Value> = log_of(&w, "ledger_cleared").into_iter().map(|e| e["session"].clone()).collect();
+    assert_eq!(cleared, [json!("S")], "a compaction logs the cleared ledger");
 
     w.branch("main");
     w.hook(&["handoff"], "T", json!({"source": "startup"}));
@@ -1912,7 +1914,7 @@ fn past_50_memories_a_pick_lists_the_50_that_best_match_the_prompt_and_the_newes
         }
     };
     fillers(0..47);
-    let p = Provider::start(vec![answer(json!({"ids": []})), answer(json!({"ids": ["m1"]}))]);
+    let p = Provider::start(vec![answer(json!({"ids": []})), answer(json!({"ids": ["m1"]})), answer(json!({"ids": []}))]);
     picks_on(&w, &p);
     let ask = "why does the walrus export drop the header row today";
     transcript(&w, "S", &[
@@ -1926,8 +1928,12 @@ fn past_50_memories_a_pick_lists_the_50_that_best_match_the_prompt_and_the_newes
         let sent = p.requests()[n].1["messages"][1]["content"].as_str().unwrap().to_string();
         sent.lines().filter(|l| l.starts_with("- m")).map(String::from).collect()
     };
+    let job = |id: &str| {
+        let input = json!({"session_id": "S", "prompt_id": id, "cwd": w.folder, "prompt": ask, "transcript_path": w.root.join("S.jsonl")});
+        w.run(&["pick", "--job"], &input.to_string());
+    };
 
-    prompt(&w, "S", "p1", ask);
+    job("p1");
     let line = pick_line(&w, "p1");
     assert_eq!((&line["memories"], &line["listed"]), (&json!(50), &json!(50)), "{line}");
     let lines = listed(0);
@@ -1935,7 +1941,7 @@ fn past_50_memories_a_pick_lists_the_50_that_best_match_the_prompt_and_the_newes
     assert_eq!(lines[49], "- m50: zebra-lamp: Zebra lamps glow green", "50 memories all go in");
 
     fillers(47..57);
-    prompt(&w, "S", "p2", ask);
+    job("p2");
     let line = pick_line(&w, "p2");
     let lines = listed(1);
     assert_eq!((&line["memories"], &line["listed"]), (&json!(60), &json!(lines.len())), "{line}");
@@ -1947,6 +1953,35 @@ fn past_50_memories_a_pick_lists_the_50_that_best_match_the_prompt_and_the_newes
     assert!(names.windows(2).all(|n| n[0] < n[1]), "by address: {names:?}");
     assert!(lines.iter().enumerate().all(|(k, l)| l.starts_with(&format!("- m{}: ", k + 1))), "numbered in that order");
     assert_eq!(line["memory"], "github.com/someone/app/kiwi-checksum", "the ids number the short list");
+
+    fs::write(w.home.join(".openrecall/sessions/S.json"), json!({"ledger": ["github.com/someone/app/kiwi-checksum"]}).to_string()).unwrap();
+    job("p3");
+    let line = pick_line(&w, "p3");
+    let lines = listed(2);
+    assert_eq!((&line["memories"], &line["listed"]), (&json!(60), &json!(50)), "{line}");
+    assert!(lines.iter().all(|l| !l.contains("kiwi")), "the ledger's memory leaves the 50 and the next match fills its place");
+}
+
+#[test]
+fn a_pick_lists_no_memory_that_the_session_ledger_holds() {
+    let w = World::new("pick-ledger");
+    w.branch("feat/x");
+    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    let source = "source: E 2026-01-02T03:04:05Z\n";
+    w.memory(&repo, "kiwi-checksum", "gotcha", source, "The kiwi importer drops rows without a checksum", "The kiwi importer drops every row that has no checksum.");
+    w.memory(&repo, "walrus-header", "decision", source, "The walrus export puts the header row first", "The walrus export puts the header row first, before any data row.");
+    let p = Provider::start(vec![answer(json!({"ids": []}))]);
+    picks_on(&w, &p);
+    transcript(&w, "S", &[]);
+    fs::create_dir_all(w.home.join(".openrecall/sessions")).unwrap();
+    fs::write(w.home.join(".openrecall/sessions/S.json"), json!({"ledger": [WALRUS]}).to_string()).unwrap();
+
+    prompt(&w, "S", "p1", "why does the walrus export drop the header row today");
+    let line = pick_line(&w, "p1");
+    assert_eq!((&line["memories"], &line["listed"]), (&json!(2), &json!(1)), "{line}");
+    let sent = p.requests()[0].1["messages"][1]["content"].as_str().unwrap().to_string();
+    let lines: Vec<&str> = sent.lines().filter(|l| l.starts_with("- m")).collect();
+    assert_eq!(lines, ["- m1: kiwi-checksum: The kiwi importer drops rows without a checksum"], "{sent}");
 }
 
 #[test]
@@ -1983,8 +2018,15 @@ fn a_prompt_makes_at_most_one_call_and_a_session_ten() {
     prompt(&w, "S", "p11", "what changed in the walrus export header since yesterday");
     w.run(&["pick", "--job"], &json!({"session_id": "S", "prompt_id": "p12", "cwd": w.folder, "prompt": "walrus export header"}).to_string());
     assert_eq!(pick_line(&w, "p12")["skip"], "cap", "the job keeps the cap too");
-    assert!(log_of(&w, "pick").iter().all(|l| l["prompt_id"] != "p11"), "the 11th prompt starts no job");
+    let capped = pick_line(&w, "p11");
+    assert_eq!((&capped["skip"], &capped["memory"]), (&json!("cap"), &Value::Null), "the 11th prompt starts no job and logs the cap: {capped}");
     assert_eq!(p.requests().len(), 10);
+
+    w.hook(&["handoff"], "S", json!({"source": "compact"}));
+    assert_eq!(session_of(&w, "S")["picks"], 0, "a compaction starts a new count");
+    prompt(&w, "S", "p13", "what changed in the walrus export header since yesterday");
+    assert_eq!(pick_line(&w, "p13")["skip"], Value::Null);
+    assert_eq!(p.requests().len(), 11);
 }
 
 #[test]
