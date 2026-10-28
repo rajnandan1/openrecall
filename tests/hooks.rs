@@ -932,7 +932,7 @@ fn a_memory_goes_in_whole_only_in_the_room_the_other_lines_leave() {
     let ctx = w.pushed("S", "ledger rounding ABC-77 cents").expect("level 2 injects");
     let lines: Vec<&str> = ctx.lines().skip(1).collect();
     assert_eq!(lines.len(), 3, "a whole memory never pushes a line out: {ctx}");
-    let short = format!("{head}Ledger totals round half-even since ABC-77 (ledger::round_total)");
+    let short = format!("{head}Ledger totals round half-even since ABC-77 (also names: ledger::round_total)");
     assert!(lines.contains(&short.as_str()), "{ctx}");
 
     fs::remove_file(repo.join("ledger-rounding-test.md")).unwrap();
