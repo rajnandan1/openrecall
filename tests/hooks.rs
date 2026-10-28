@@ -596,6 +596,63 @@ fn keys_are_redacted_and_renames_move_the_record() {
 }
 
 #[test]
+fn a_notification_turn_changes_the_last_answer_and_keeps_the_last_ask() {
+    let w = World::new("notification");
+    w.branch("feat/x");
+    start(&w, "E");
+    turn(&w, "E", "merge ABC-12 and release it", "Merged. The release run is going.");
+    let answered_at = |w: &World| {
+        let rec = w.record("feat--x").unwrap();
+        rec.lines().find_map(|l| l.strip_prefix("answered_at: ")).unwrap().to_string()
+    };
+    let merged_at = answered_at(&w);
+    let note = "<task-notification><task-id>t1</task-id><status>completed</status></task-notification>";
+    turn(&w, "E", note, "The release run finished: ABC-12 is live in prod.");
+    let rec = w.record("feat--x").unwrap();
+    assert!(
+        rec.contains("## Last ask\nmerge ABC-12 and release it\n## Last answer\nThe release run finished: ABC-12 is live in prod.\n"),
+        "{rec}"
+    );
+    assert_ne!(answered_at(&w), merged_at);
+
+    w.turn("E", &[user(note)], "");
+    assert!(
+        w.record("feat--x").unwrap().contains("## Last answer\nThe release run finished: ABC-12 is live in prod.\n"),
+        "a notification with no text keeps the answer"
+    );
+}
+
+#[test]
+fn a_turn_that_ends_on_trunk_writes_the_record_of_the_branch_it_started_on() {
+    let w = World::new("trunk");
+    w.branch("feat/x");
+    start(&w, "E");
+    turn(&w, "E", "Build ABC-12 so exports stop failing on empty rows", "Built it.");
+    w.branch("main");
+    turn(&w, "E", "merge it into main", "Merged into main.");
+    assert!(w.record("feat--x").unwrap().contains("## Last ask\nmerge it into main\n## Last answer\nMerged into main.\n"));
+    turn(&w, "E", "release it", "Released from main.");
+    assert!(w.record("feat--x").unwrap().contains("## Last ask\nrelease it\n## Last answer\nReleased from main.\n"));
+    fs::write(w.folder.join(".git/HEAD"), "0123456789abcdef0123456789abcdef01234567\n").unwrap();
+    turn(&w, "E", "check out the tag", "Checked out the release tag.");
+    assert!(w.record("feat--x").unwrap().contains("## Last answer\nChecked out the release tag.\n"));
+    assert!(w.record("main").is_none());
+
+    w.branch("feat/x");
+    turn(&w, "E", "back to the branch", "Back.");
+    assert!(log_of(&w, "hop").is_empty(), "a turn on trunk is not a hop");
+    assert_eq!(log_of(&w, "settled").len(), 1, "the trunk turns keep the branch and its turns");
+    let trunk: Vec<Value> = log_of(&w, "trunk").into_iter().map(|e| json!([e["session"], e["branch"]])).collect();
+    assert_eq!(trunk, vec![json!(["E", "feat/x"]); 3]);
+
+    w.branch("main");
+    start(&w, "M");
+    turn(&w, "M", "a question on main", "An answer.");
+    turn(&w, "M", "another one", "Another answer.");
+    assert!(w.record("main").is_none() && log_of(&w, "trunk").len() == 3, "a session on trunk writes nothing");
+}
+
+#[test]
 fn idle_records_retire_at_session_start() {
     let w = World::new("retire");
     w.branch("feat/old");
