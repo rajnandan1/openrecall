@@ -377,9 +377,11 @@ class HarnessTest(unittest.TestCase):
         home = os.path.dirname(harness.EVAL)
         repo = os.path.join(home, "repos", "github.com", "x", "app")
         os.makedirs(os.path.join(repo, "replaced"))
-        for rel, text in (("c.md", "---\ndescription: C\n---\n\nown c"), ("d.md", "---\ndescription: D\n---\n\nABC-12 is done"),
+        for rel, text in (("c.md", "---\ndescription: C\n---\n\nown c, changed later"),
+                          ("replaced/c.2026-01-01T000009Z.md", "---\ndescription: C\n---\n\nown c"),
+                          ("d.md", "---\ndescription: D\n---\n\nABC-12 is done"),
                           ("e.md", "---\ndescription: E\n---\n\nPR #345 merged"), ("r.md", "---\ndescription: R\n---\n\nremembered r"),
-                          ("replaced/d.2026-01-02T000001Z.md", "ABC-12 is open"), ("replaced/e.2026-01-02T000002Z.md", "PR #345 waits")):
+                          ("replaced/d.2026-01-01T000000Z.md", "ABC-12 is open"), ("replaced/e.2026-01-01T000000Z.md", "PR #345 waits")):
             with open(os.path.join(repo, rel), "w") as fh:
                 fh.write(text)
         os.makedirs(os.path.join(home, "log"))
@@ -388,11 +390,11 @@ class HarnessTest(unittest.TestCase):
             fh.writelines(json.dumps(e) + "\n" for e in (
                 dict(event="dedupe", session="S1", name="z", action="new", address="github.com/x/app/c", at=ms, candidates=[]),
                 dict(event="dedupe", session="S1", name="z", action="reconcile", address="github.com/x/app/d",
-                     copy="d.2026-01-02T000001Z.md", at=ms),
+                     copy="d.2026-01-01T000000Z.md", at=ms),
                 dict(event="dedupe", session="S1", name="z", action="reconcile", address="github.com/x/app/c", why="replaced twice",
                      at=ms),
                 dict(event="dedupe", session="S1", name="m", action="reconcile", address="github.com/x/app/e",
-                     remembered="github.com/x/app/r", copy="e.2026-01-02T000002Z.md", at=ms + 1)))
+                     remembered="github.com/x/app/r", copy="e.2026-01-01T000000Z.md", at=ms + 1)))
         asked = []
 
         def check(fact, candidates, old):
@@ -401,10 +403,11 @@ class HarnessTest(unittest.TestCase):
                         kept=None if old is None else 0.8 if "ABC-12" in old else 0.2)
 
         text = "\n".join(harness.extraction_lines(None, check))
-        self.assertEqual(asked, [("C\n\nown c", [], None),
+        self.assertEqual(asked, [("C\n\nown c, changed later", [], None),
                                  ("C\n\nown c", ["ABC-12 is open"], None), ("D\n\nABC-12 is done", [], "ABC-12 is open"),
                                  ("R\n\nremembered r", ["PR #345 waits"], None), ("E\n\nPR #345 merged", [], "PR #345 waits")],
-                         "the fact's stand-in against the old copy, then the rewrite against it; a dropped reconcile is not asked")
+                         "the fact's stand-in as it stood at the reconcile against the old copy, then the rewrite against it; "
+                         "a dropped reconcile is not asked")
         self.assertIn("Reconciles checked: 2 of 2 applied. Not out of date before the rewrite: 1: github.com/x/app/e. "
                       "Rewrites that lost old detail: 1: github.com/x/app/e.", text)
         harness.extraction_lines(None, check)
@@ -706,8 +709,8 @@ class HarnessTest(unittest.TestCase):
         os.makedirs(os.path.join(repo, "replaced"))
         os.makedirs(os.path.join(folder, "home", ".claude", "projects", "PROJECT"))
         for rel, text in (("abc-12-shipped.md", "ABC-12 is shipped."), ("abc-12-status.md", "ABC-12 is done."),
-                          ("pr-345.md", "PR #345 is merged."), ("replaced/abc-12-status.2026-01-02T000001Z.md", "ABC-12 is open."),
-                          ("replaced/pr-345.2026-01-02T000002Z.md", "PR #345 waits on review.")):
+                          ("pr-345.md", "PR #345 is merged."), ("replaced/abc-12-status.2026-01-01T000000Z.md", "ABC-12 is open."),
+                          ("replaced/pr-345.2026-01-01T000000Z.md", "PR #345 waits on review.")):
             with open(os.path.join(repo, rel), "w") as fh:
                 fh.write(text)
         os.makedirs(os.path.join(folder, "home", ".openrecall", "log"))
@@ -716,9 +719,9 @@ class HarnessTest(unittest.TestCase):
             fh.writelines(json.dumps(e) + "\n" for e in (
                 dict(event="dedupe", session="S1", name="shipped", action="new", address=app + "abc-12-shipped", at=ms),
                 dict(event="dedupe", session="S1", name="shipped", action="reconcile", address=app + "abc-12-status",
-                     copy="abc-12-status.2026-01-02T000001Z.md", at=ms),
+                     copy="abc-12-status.2026-01-01T000000Z.md", at=ms),
                 dict(event="dedupe", session="S1", name="shipped", action="reconcile", address=app + "pr-345",
-                     copy="pr-345.2026-01-02T000002Z.md", at=ms),
+                     copy="pr-345.2026-01-01T000000Z.md", at=ms),
                 dict(event="dedupe", session="S1", name="shipped", action="reconcile", address=app + "abc-12-shipped",
                      why="replaced twice", at=ms)))
         with open(os.path.join(folder, "case.json"), "w") as fh:
@@ -739,7 +742,7 @@ class HarnessTest(unittest.TestCase):
         self.assertEqual(lines[2:], ["Provider cost: $0.00.", "Reconciles: 4 applied over 2 runs, 4 checked; supersede 0.7 or "
                                      "more: 50% (2/4, 15–85%); kept 0.5 or more: 50% (2/4, 15–85%)."])
         with open(os.path.join(lines[0].split(" kept in ")[1], "2", "rewrites.json")) as fh:
-            self.assertEqual(json.load(fh)[1], dict(address=app + "pr-345", copy="pr-345.2026-01-02T000002Z.md",
+            self.assertEqual(json.load(fh)[1], dict(address=app + "pr-345", copy="pr-345.2026-01-01T000000Z.md",
                                                     fact=app + "abc-12-shipped", supersede=0.3, kept=0.2))
 
     def test_a_replay_case_and_its_pass_shares(self):

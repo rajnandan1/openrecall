@@ -683,15 +683,18 @@ def reconciles(events):
 
 def rewrite_check(e, fact, path_of, dedupe_fn):
     """judge.dedupe_check on one reconcile: whether the fact's stand-in makes the `replaced/` copy out of date
-    (`supersede`), and whether the rewrite keeps every still-true detail of that copy (`kept`). None when a file is
-    gone."""
+    (`supersede`), and whether the rewrite keeps every still-true detail of that copy (`kept`). The stand-in and the
+    rewrite are read as they stood when the reconcile was logged (fact_at), since a later run may change them. None
+    when a file is gone."""
+    when = datetime.fromtimestamp(e["at"] / 1000, timezone.utc)
     path = path_of(e["address"])
     copy = os.path.join(os.path.dirname(path), "replaced", e["copy"])
-    if not (fact and os.path.isfile(path_of(fact)) and os.path.isfile(path) and os.path.isfile(copy)):
+    stand_in, rewrite = fact and fact_at(path_of(fact), when), fact_at(path, when)
+    if not (stand_in and os.path.isfile(stand_in) and os.path.isfile(rewrite) and os.path.isfile(copy)):
         return None
     old = memory_text(copy)
-    return dict(supersede=dedupe_fn(memory_text(path_of(fact)), [old], None)["supersede"][0],
-                kept=dedupe_fn(memory_text(path), [], old)["kept"])
+    return dict(supersede=dedupe_fn(memory_text(stand_in), [old], None)["supersede"][0],
+                kept=dedupe_fn(memory_text(rewrite), [], old)["kept"])
 
 
 def extraction_lines(since, dedupe_fn=None, yes=0.7):
