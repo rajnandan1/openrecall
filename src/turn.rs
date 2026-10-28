@@ -218,7 +218,7 @@ pub(crate) fn ms_of(time: &str) -> Option<i64> {
 }
 
 /// When a transcript's last turn ended: the `timestamp` of its last user or assistant line that has one, in ms since
-/// 1970, as `research/03-timing.py` reads it. A cut first or last line does not parse and is passed over.
+/// 1970. A cut first or last line does not parse and is passed over.
 pub fn last_time(transcript: &[u8]) -> Option<i64> {
     transcript
         .split(|&b| b == b'\n')

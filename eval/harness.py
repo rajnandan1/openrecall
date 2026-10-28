@@ -669,9 +669,8 @@ def unranked(e, orhome, n=10):
 
 
 def reconciles(events):
-    """Spec 4.3: each applied reconcile of a log with the address of its fact's stand-in, as the log holds no fact
-    text: the remembered memory, else the address of the fact's own decision (the new file, the replacement, or the
-    memory a skip names)."""
+    """Spec 4.3: each applied reconcile of a log, with its fact's stand-in, since the log holds no fact text: the
+    remembered memory, else the address that the fact's own new, replace or skip decision logged."""
     own, out = {}, []
     for e in events:
         if e.get("event") == "dedupe" and e.get("action") != "reconcile":
@@ -682,10 +681,8 @@ def reconciles(events):
 
 
 def rewrite_check(e, fact, path_of, dedupe_fn):
-    """judge.dedupe_check on one reconcile: whether the fact's stand-in makes the `replaced/` copy out of date
-    (`supersede`), and whether the rewrite keeps every still-true detail of that copy (`kept`). The stand-in and the
-    rewrite are read as they stood when the reconcile was logged (fact_at), since a later run may change them. None
-    when a file is gone."""
+    """judge.dedupe_check of one reconcile, its stand-in and rewrite as they stood when logged (fact_at): `supersede`
+    (the stand-in makes the `replaced/` copy out of date) and `kept` (the rewrite keeps its true detail), or None."""
     when = datetime.fromtimestamp(e["at"] / 1000, timezone.utc)
     path = path_of(e["address"])
     copy = os.path.join(os.path.dirname(path), "replaced", e["copy"])
@@ -698,11 +695,8 @@ def rewrite_check(e, fact, path_of, dedupe_fn):
 
 
 def extraction_lines(since, dedupe_fn=None, yes=0.7):
-    """Tickets 17, 21 and 26 from the live log: extraction health, the facts written, Jev's check of each written fact
-    against its logged candidates and the unranked memories most like it, and of each applied reconcile against its
-    fact's stand-in (rewrite_check; each asked once, cached in dedupe.jsonl), store size and the CLAUDE.md suggestions
-    added since the last report. `dedupe_fn(fact, candidates, old)` returns judge.dedupe_check's answer; None asks
-    nothing."""
+    """Tickets 17, 21 and 26 from the live log: health, facts, Jev's check (cached in dedupe.jsonl) of each written fact
+    and applied reconcile, store size, new CLAUDE.md suggestions. `dedupe_fn` is judge.dedupe_check; None asks nothing."""
     orhome = os.path.dirname(EVAL)
     log = os.path.join(orhome, "log", "openrecall.jsonl")
     events = read(log) if os.path.exists(log) else []
@@ -750,7 +744,7 @@ def extraction_lines(since, dedupe_fn=None, yes=0.7):
         cache.update({key(r): r for r in fresh})
     checked = [cache[key(e)] for e in written if key(e) in cache]
     rechecked = [cache[key(e)] for e, _ in rewritten if key(e) in cache]
-    stale = [r["address"] for r in rechecked if r["supersede"] < yes]
+    still_true = [r["address"] for r in rechecked if r["supersede"] < yes]
     thinned = [r["address"] for r in rechecked if r["kept"] < 0.5]
     flag = lambda kind, own: ["%s (%s)" % (r["address"], a) for r in checked if r["action"] == "new"
                               for a, p in zip(r["candidates"], r[kind]) if p >= yes and own(a)]
@@ -796,8 +790,8 @@ def extraction_lines(since, dedupe_fn=None, yes=0.7):
         "proposed text is never stored. Reconciles checked: %d of %d applied. Not out of date before the rewrite: %d%s. "
         "Rewrites that lost old detail: %d%s." % (
             yes, len(checked), len(written), len(repeats), listed(repeats), len(missed), listed(missed), len(builtin),
-            listed(builtin), len(lost), len(merges), listed(lost), len(rechecked), len(rewritten), len(stale),
-            listed(stale), len(thinned), listed(thinned)),
+            listed(builtin), len(lost), len(merges), listed(lost), len(rechecked), len(rewritten), len(still_true),
+            listed(still_true), len(thinned), listed(thinned)),
         "- Store size: %s." % (", ".join("%s %d" % kv for kv in sorted(sizes.items())) or "no OpenRecall facts yet"),
         "- CLAUDE.md suggestions added since the last report%s: %d%s." % (
             " (%s)" % since.strftime("%Y-%m-%d") if since else "", len(added), listed(added)),
@@ -1893,9 +1887,8 @@ def live_memories(home, repo):
 
 
 def judge_check(check, c, home, binary, env, says, yes=0.7):
-    """One check of a pass question on a run's scratch home: whether it holds, and what it saw. A memories check
-    takes the live memories (or the files of `glob`), keeps those that match `grep`, and counts each as a yes, or as
-    a yes of `says` (judge.says) to `jev` at `yes` or more; it holds when `want` some, none or all of them say yes."""
+    """One check of a pass question on a run's scratch home: whether it holds, and what it saw. A memories check holds
+    when `want` some, none or all files that match `grep` say yes: by `says` to `jev` at `yes` or more, else always."""
     orhome = env["OPENRECALL_HOME"]
     kind = check.get("kind", "memories")
     if kind == "record":
@@ -1980,16 +1973,12 @@ def recalled(binary, env, queries):
 
 
 def replay_case(folder, runs=None, binary=BINARY, says=None, dedupe_fn=None):
-    """Spec 3.12: a frozen case (load_case) `runs` times, each from a fresh copy in a scratch home, then its pass
-    questions. The case's `home/` becomes the scratch home, its `.claude/projects/PROJECT` the project folder of a
-    stand-in repo folder whose origin gives the case's `repo`; run files point `transcript` and `main` at the copies.
-    Each run's `.openrecall` (without the index) is kept in the case's `runs/<UTC time>/<n>/`, with `rewrites.json`:
-    rewrite_check of each applied reconcile (spec 4.3), whose rates over all runs it prints last. Returns the lines it
-    prints."""
+    """Spec 3.12: a replay case (load_case) `runs` times, each from a fresh copy in a scratch home, then its pass
+    questions and rewrite_check rates; each run's home goes in `runs/<UTC time>/<n>/`. Returns the lines it prints."""
     c = load_case(folder)
     runs = runs or c["runs"]
     provider = real_provider() if c.get("provider") else None
-    kept = os.path.join(folder, "runs", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%SZ"))
+    saved = os.path.join(folder, "runs", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%SZ"))
     outcomes, cost, rewrites = [], 0.0, []
     for n in range(1, runs + 1):
         tmp = scratch()
@@ -2036,15 +2025,15 @@ def replay_case(folder, runs=None, binary=BINARY, says=None, dedupe_fn=None):
                 got = dedupe_fn and rewrite_check(e, fact, lambda a: scratch_path(a, home), dedupe_fn)
                 rows.append(dict(address=e["address"], copy=e["copy"], fact=fact, **(got or {})))
             rewrites += rows
-            shutil.copytree(orhome, os.path.join(kept, str(n)), ignore=shutil.ignore_patterns("index.db*"))
-            with open(os.path.join(kept, str(n), "rewrites.json"), "w") as fh:
+            shutil.copytree(orhome, os.path.join(saved, str(n)), ignore=shutil.ignore_patterns("index.db*"))
+            with open(os.path.join(saved, str(n), "rewrites.json"), "w") as fh:
                 json.dump(rows, fh, indent=1)
-            with open(os.path.join(kept, str(n), "checks.json"), "w") as fh:
+            with open(os.path.join(saved, str(n), "checks.json"), "w") as fh:
                 json.dump([dict(question=q["name"], checks=[dict(ok=ok, saw=saw) for ok, saw in checks])
                            for q, checks in zip(c["questions"], seen)], fh, indent=1)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
-    lines = ["%s: %d run%s with %s, kept in %s" % (os.path.basename(folder), runs, "" if runs == 1 else "s", binary, kept)]
+    lines = ["%s: %d run%s with %s, kept in %s" % (os.path.basename(folder), runs, "" if runs == 1 else "s", binary, saved)]
     checked = [r for r in rewrites if "kept" in r]
     lines += shares([q["name"] for q in c["questions"]], outcomes) + ["Provider cost: $%.2f." % cost]
     lines.append("Reconciles: %d applied over %d run%s, %d checked; supersede 0.7 or more: %s; kept 0.5 or more: %s." % (

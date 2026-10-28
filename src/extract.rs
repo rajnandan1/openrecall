@@ -161,7 +161,7 @@ pub fn mark_ended(sid: &str, ended: bool) -> crate::Result<()> {
 }
 
 /// `openrecall extract --job`: one worker at a time takes every due session, oldest quiet clock first, and polls while
-/// a session can still become due (ticket 04). `OPENRECALL_POLL=0` exits after one pass.
+/// a session can still become due (issue #37). `OPENRECALL_POLL=0` exits after one pass.
 pub fn work() -> crate::Result<()> {
     let dir = crate::home().join("extract");
     fs::create_dir_all(&dir)?;
@@ -401,11 +401,15 @@ fn extract(sid: &str, e: &Entry, s: &Settings, scanner: &scan::Scanner) -> Resul
     let scopes = index::scopes(&home, &crate::user_home(), Some(&e.identity), main);
     let mut ix = index::Index::open(&home)?;
     ix.sync(&scopes)?;
+    let remembers = turns[split..]
+        .iter()
+        .flat_map(|(t, _)| &t.events)
+        .any(|ev| matches!(ev, Event::Tool(name, _) if name.strip_prefix(OWN_TOOL) == Some("remember")));
     let since = match e.cursor {
         0 => Some(0),
         cursor => data.get(..cursor as usize).and_then(turn::last_time),
     };
-    if let Some(since) = since {
+    if remembers && let Some(since) = since {
         facts.extend(remembered(&ix, &scopes, &own, sid, since)?);
     }
     let today = &record::iso(crate::now_secs())[..10];
@@ -663,7 +667,7 @@ fn lines(t: &Turn, head: String, prose: bool) -> String {
     out.join("\n")
 }
 
-/// With `prose`, an MCP call shows up to `PROSE_CHARS` of its first prose key: the extraction input only (ticket 08).
+/// With `prose`, an MCP call shows up to `PROSE_CHARS` of its first prose key: the extraction input only (issue #37).
 fn tool_line(name: &str, input: &Value, prose: bool) -> String {
     let body = PROSE_KEYS
         .iter()
@@ -692,9 +696,8 @@ fn session_date(transcript: &str) -> String {
     record::iso(secs)[..10].to_string()
 }
 
-/// The dedupe call's input: when the run's last new turn ended, every candidate once with its last change, as much of
-/// it as the index holds, then each new fact with the addresses it looks like (ticket 26). A built-in file goes in
-/// whole too: what a fact repeats is often past its start.
+/// The dedupe call's input: when the run's last new turn ended, each candidate once with its last change and indexed
+/// text, then each fact with its look-alikes. A built-in file goes in whole too: a repeat is often past its start.
 fn merge_input(identity: &str, ended: &str, facts: &[Fact], found: &[Vec<Candidate>]) -> String {
     let mut seen = HashSet::new();
     let memories: Vec<String> = found

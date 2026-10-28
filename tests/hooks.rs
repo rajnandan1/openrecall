@@ -659,6 +659,27 @@ fn a_turn_that_ends_on_trunk_writes_the_record_of_the_branch_it_started_on() {
 }
 
 #[test]
+fn a_turn_that_ends_on_trunk_in_another_repo_writes_nothing_there() {
+    let w = World::new("trunk-repos");
+    w.branch("feat/x");
+    start(&w, "E");
+    turn(&w, "E", "Build ABC-12 so exports stop failing on empty rows", "Built it.");
+    let api = w.repo("api", Some("git@github.com:someone/api.git"));
+    api.branch("main");
+    turn(&api, "E", "merge the api fix into main", "Merged into main.");
+    let handoffs = w.home.join(".openrecall/repos/github.com/someone/api/handoffs");
+    assert!(fs::read_dir(&handoffs).map_or(true, |mut d| d.next().is_none()), "nothing in {}", handoffs.display());
+    assert!(w.record("feat--x").unwrap().contains("## Last ask\nBuild ABC-12"));
+    assert!(log_of(&w, "trunk").is_empty());
+
+    put(&w.home.join(".openrecall/sessions/O.json"), &json!({"branch": "feat/x", "turns": 1, "ledger": []}).to_string());
+    w.branch("main");
+    turn(&w, "O", "merge it into main", "Merged into main.");
+    assert!(w.record("feat--x").unwrap().contains("## Last ask\nBuild ABC-12"), "a state from 0.10.1 keeps no branch");
+    assert!(log_of(&w, "trunk").is_empty());
+}
+
+#[test]
 fn idle_records_retire_at_session_start() {
     let w = World::new("retire");
     w.branch("feat/old");
@@ -1928,13 +1949,15 @@ fn a_memory_remembered_in_the_new_turns_reconciles_others_at_the_next_run() {
     extracted_to_end(&w, "M");
     assert!(fs::read_to_string(repo.join("queue-batches.md")).unwrap().contains("\nsource: M 2026-10-26T16:05:00.250Z\n"));
 
+    let args = json!({"text": "The retry queue moved from src/queue.py to src/worker.py.", "type": "decision", "scope": "repo", "name": "queue-moved"});
     let mut m = Mcp::start(&w);
-    let (text, err) = m.tool("remember", json!({"text": "The retry queue moved from src/queue.py to src/worker.py.", "type": "decision", "scope": "repo", "name": "queue-moved"}));
+    let (text, err) = m.tool("remember", args.clone());
     assert!(!err, "{text}");
     m.close();
     let moved = fs::read_to_string(repo.join("queue-moved.md")).unwrap();
+    let call = json!({"type": "tool_use", "id": "r1", "name": "mcp__plugin_openrecall_openrecall__remember", "input": args});
     w.turn("M", &[at(user("Move the retry queue to src/worker.py"), "2026-10-26T16:40:00.000Z"),
-                  at(said("Moved.", None), "2026-10-26T16:45:00.000Z")], "");
+                  at(said("Moved.", Some(call)), "2026-10-26T16:45:00.000Z")], "");
     let run = extracted_to_end(&w, "M");
 
     let reqs = p.requests();
@@ -1951,6 +1974,36 @@ fn a_memory_remembered_in_the_new_turns_reconciles_others_at_the_next_run() {
     let r = &dedupe_lines(&w, "reconcile")[0];
     assert!(r["name"] == "queue-moved" && r["remembered"] == format!("{APP}/queue-moved") && r["why"].is_null(), "{r}");
     assert_eq!(log_of(&w, "dedupe").len(), 2, "a remembered fact gets no line of its own");
+}
+
+#[test]
+fn a_memory_an_earlier_run_wrote_at_its_wall_clock_time_is_not_remembered_without_a_remember_call() {
+    let w = World::new("remembered-upgrade");
+    w.branch("feat/x");
+    let repo = w.home.join(".openrecall/repos").join(APP);
+    let p = Provider::start(vec![
+        answer(json!({"facts": [], "claude_md_rules": []})),
+        answer(json!({"facts": [{"type": "gotcha", "name": "queue-batch-size", "description": "src/queue.py sends retries in batches of 50",
+            "body": "src/queue.py sends retries in batches of 50."}], "claude_md_rules": []})),
+        answer(json!({"decisions": [{"fact": 0, "action": "replace", "address": format!("{APP}/queue-batches"),
+            "description": "src/queue.py sends retries in batches of 50", "body": "src/queue.py sends retries in batches of 50."}]})),
+    ]);
+    extraction_on(&w, &p);
+    w.turn("M", &[at(user("Batch the retries in src/queue.py"), "2026-10-26T16:00:00.000Z"),
+                  at(said("Batched.", None), "2026-10-26T16:05:00.250Z")], "");
+    extracted_to_end(&w, "M");
+    w.memory(&repo, "queue-batches", "gotcha", "source: M 2026-10-26T16:41:07.000Z\n", "src/queue.py sends retries in batches",
+             "src/queue.py sends retries in batches.");
+    w.turn("M", &[at(user("Set the retry batch size to 50"), "2026-10-26T17:20:00.000Z"),
+                  at(said("Set.", None), "2026-10-26T17:22:00.000Z")], "");
+    extracted_to_end(&w, "M");
+
+    let reqs = p.requests();
+    assert_eq!(reqs.len(), 3);
+    let input = reqs[2].1["messages"][1]["content"].as_str().unwrap();
+    assert!(!input.contains("remembered") && !input.contains("Fact 1 "), "{input}");
+    let batches = fs::read_to_string(repo.join("queue-batches.md")).unwrap();
+    assert!(batches.ends_with("\n\nsrc/queue.py sends retries in batches of 50.\n"), "the replace applies: {batches}");
 }
 
 /// Extraction on through the provider stand-in.
@@ -2079,11 +2132,7 @@ fn a_run_of_only_task_notification_turns_with_text_still_runs() {
     w.branch("feat/x");
     let home = w.home.join(".openrecall");
     let p = Provider::start(vec![answer(json!({"facts": [], "claude_md_rules": []}))]);
-    fs::create_dir_all(&home).unwrap();
-    fs::write(home.join("extract.toml"), format!("base_url = \"http://127.0.0.1:{}/v1\"\nmodel = \"test/model\"\n", p.port)).unwrap();
-    fs::write(home.join("api-key"), "sk-test-123\n").unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(home.join("api-key"), fs::Permissions::from_mode(0o600)).unwrap();
+    extraction_on(&w, &p);
     w.turn("S1", &[user("<task-notification><status>completed</status><summary>exit code 0</summary></task-notification>"),
                    said("The deploy check for ABC-12 ended with 1 failed.", None)], "");
     w.hook(&["extract"], "S1", json!({"hook_event_name": "SessionEnd"}));
