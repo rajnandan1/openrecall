@@ -25,8 +25,8 @@ const TERMS: usize = 40;
 const BODY_BYTES: usize = 4096;
 /// bm25 weights for name, description, body and identifiers (ticket 06).
 const WEIGHTS: &str = "2.0, 2.0, 1.0, 4.0";
-/// Bumped when the cache's tables change; an older `index.db` is rebuilt.
-const SCHEMA: i64 = 2;
+/// Bumped when the cache's tables or what its rows hold change; an older `index.db` is rebuilt.
+const SCHEMA: i64 = 3;
 pub const KINDS: [&str; 5] = ["decision", "preference", "pointer", "state", "gotcha"];
 const NAME_CHARS: usize = 64;
 const EXPIRES_SECS: u64 = 14 * 86400;
@@ -133,7 +133,8 @@ pub struct Memory {
     pub body: String,
 }
 
-/// Flat frontmatter by hand: `key: value` lines, with `type` also read from under `metadata:`.
+/// Flat frontmatter by hand: `key: value` lines, with `type` also read from under `metadata:`. Claude Code's
+/// `metadata.originSessionId` is the `source` of a built-in memory: the session that wrote it (issue 37).
 pub fn parse(text: &str) -> Memory {
     let mut m = Memory::default();
     let Some((front, body)) = text
@@ -153,7 +154,7 @@ pub fn parse(text: &str) -> Memory {
             "description" => m.description = value,
             "type" => m.kind = value,
             "scope" => m.scope = value,
-            "source" => m.source = value,
+            "source" | "originSessionId" => m.source = value,
             "updated" => m.updated = value,
             "expires" => m.expires = value,
             _ => {}

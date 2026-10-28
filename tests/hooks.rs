@@ -2593,6 +2593,22 @@ fn own_expired_rot_and_echo_drop_a_pick() {
     }
 }
 
+/// Spec 6.2 check 4 (issue #37): a built-in memory whose `metadata.originSessionId` is the session is its own, so
+/// recall drops it there. Another session still gets it.
+#[test]
+fn a_built_in_memory_the_session_wrote_is_dropped_as_own() {
+    let w = World::new("own-builtin");
+    w.branch("feat/x");
+    let builtin = w.builtin_dir();
+    w.fillers(&builtin);
+    w.memory(&builtin, "walrus-header-first", "project", "  originSessionId: S\n", "The walrus export puts the header row first", "The walrus export writes its header row before the totals.");
+    let ask = "why does the walrus export write the header row first";
+    assert_eq!(w.pushed("S", ask), None);
+    assert_eq!(log_of(&w, "recall").last().unwrap()["dropped"]["own"], 1);
+    let ctx = w.pushed("T", ask).expect("another session gets it");
+    assert!(ctx.contains("/walrus-header-first: "), "{ctx}");
+}
+
 #[test]
 fn nothing_starts_with_picks_off_or_without_a_plain_prompt_id() {
     let w = World::new("pick-off");
