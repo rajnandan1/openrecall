@@ -581,7 +581,9 @@ fn capture_job() -> Result<()> {
             log(json!({"event": "trunk", "session": sid, "branch": branch}));
         }
     }
-    save_session(&sid, &s)
+    save_session(&sid, &s)?;
+    detach(&["extract", "--job"], Stdio::null())?;
+    Ok(())
 }
 
 /// A context window that has not seen an existing record (neither pushed nor created it) merges partially,
