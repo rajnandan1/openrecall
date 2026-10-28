@@ -528,9 +528,8 @@ fn detach(args: &[&str], stdin: Stdio) -> Result<std::process::Child> {
         .spawn()?)
 }
 
-/// The detached writer: settle bookkeeping for the session, then the turn into its task's record. The secret scan
-/// compiles before the session lock, so a prompt that waits for the lock does not wait for the compile, except after a
-/// turn that ends on trunk: only the session state knows the task branch it keeps.
+/// The detached writer: settle bookkeeping for the session, then the turn into its task's record. The secret scan compiles
+/// before the session lock, so a prompt that waits for the lock does not wait for it, except after a turn on trunk.
 fn capture_job() -> Result<()> {
     let job = read_input()?;
     let sid = session_id(&job)?;
