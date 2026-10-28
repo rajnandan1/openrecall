@@ -602,6 +602,63 @@ fn keys_are_redacted_and_renames_move_the_record() {
 }
 
 #[test]
+fn a_notification_turn_changes_the_last_answer_and_keeps_the_last_ask() {
+    let w = World::new("notification");
+    w.branch("feat/x");
+    start(&w, "E");
+    turn(&w, "E", "merge ABC-12 and release it", "Merged. The release run is going.");
+    let answered_at = |w: &World| {
+        let rec = w.record("feat--x").unwrap();
+        rec.lines().find_map(|l| l.strip_prefix("answered_at: ")).unwrap().to_string()
+    };
+    let merged_at = answered_at(&w);
+    let note = "<task-notification><task-id>t1</task-id><status>completed</status></task-notification>";
+    turn(&w, "E", note, "The release run finished: ABC-12 is live in prod.");
+    let rec = w.record("feat--x").unwrap();
+    assert!(
+        rec.contains("## Last ask\nmerge ABC-12 and release it\n## Last answer\nThe release run finished: ABC-12 is live in prod.\n"),
+        "{rec}"
+    );
+    assert_ne!(answered_at(&w), merged_at);
+
+    w.turn("E", &[user(note)], "");
+    assert!(
+        w.record("feat--x").unwrap().contains("## Last answer\nThe release run finished: ABC-12 is live in prod.\n"),
+        "a notification with no text keeps the answer"
+    );
+}
+
+#[test]
+fn a_turn_that_ends_on_trunk_writes_the_record_of_the_branch_it_started_on() {
+    let w = World::new("trunk");
+    w.branch("feat/x");
+    start(&w, "E");
+    turn(&w, "E", "Build ABC-12 so exports stop failing on empty rows", "Built it.");
+    w.branch("main");
+    turn(&w, "E", "merge it into main", "Merged into main.");
+    assert!(w.record("feat--x").unwrap().contains("## Last ask\nmerge it into main\n## Last answer\nMerged into main.\n"));
+    turn(&w, "E", "release it", "Released from main.");
+    assert!(w.record("feat--x").unwrap().contains("## Last ask\nrelease it\n## Last answer\nReleased from main.\n"));
+    fs::write(w.folder.join(".git/HEAD"), "0123456789abcdef0123456789abcdef01234567\n").unwrap();
+    turn(&w, "E", "check out the tag", "Checked out the release tag.");
+    assert!(w.record("feat--x").unwrap().contains("## Last answer\nChecked out the release tag.\n"));
+    assert!(w.record("main").is_none());
+
+    w.branch("feat/x");
+    turn(&w, "E", "back to the branch", "Back.");
+    assert!(log_of(&w, "hop").is_empty(), "a turn on trunk is not a hop");
+    assert_eq!(log_of(&w, "settled").len(), 1, "the trunk turns keep the branch and its turns");
+    let trunk: Vec<Value> = log_of(&w, "trunk").into_iter().map(|e| json!([e["session"], e["branch"]])).collect();
+    assert_eq!(trunk, vec![json!(["E", "feat/x"]); 3]);
+
+    w.branch("main");
+    start(&w, "M");
+    turn(&w, "M", "a question on main", "An answer.");
+    turn(&w, "M", "another one", "Another answer.");
+    assert!(w.record("main").is_none() && log_of(&w, "trunk").len() == 3, "a session on trunk writes nothing");
+}
+
+#[test]
 fn idle_records_retire_at_session_start() {
     let w = World::new("retire");
     w.branch("feat/old");
@@ -1267,7 +1324,7 @@ fn stats_row(day: &str, written_at: u64, extra: Value) -> Value {
         "picks": 3, "pick_skips": {}, "picks_delivered": 2, "pick_drops": {}, "picks_used": {"yes": 1, "judged": 2},
         "pick_cost": 0.31, "pick_ms": 3000, "pushes": {"settle": 2, "identifier": 1},
         "right_pushes": {"right": 2, "wrong": 1, "unjudged": 4}, "late_pushes": {"late": 1, "judged": 3},
-        "extraction_runs": 5, "facts": {"new": 7, "replaced": 1, "skipped": 0, "dropped": 0}, "suggestions": 0,
+        "extraction_runs": 5, "facts": {"new": 7, "replaced": 1, "reconciled": 2, "skipped": 0, "dropped": 0}, "suggestions": 0,
         "strikes": 1, "failed_sessions": 0, "stops": 0, "extraction_cost": 1.5, "extraction_ms": 20000, "redactions": 0,
         "own_tool_calls": {}, "update_check": {}, "errors": 0});
     row.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
@@ -1275,7 +1332,7 @@ fn stats_row(day: &str, written_at: u64, extra: Value) -> Value {
 }
 
 const STATS_HEADER: &str = "day versions sessions prompts injections used_signal picks_delivered picks_used pushes \
-    right_pushes late_pushes extraction_runs facts_new strikes cost_usd hook_ms errors";
+    right_pushes late_pushes extraction_runs facts_new facts_replaced facts_reconciled strikes cost_usd hook_ms errors";
 
 /// Spec test 11: the table shows the range's rows, `-` for a field a row lacks, and a totals line.
 #[test]
@@ -1304,9 +1361,9 @@ fn the_stats_tool_prints_the_ranges_rows_and_their_totals() {
     let (text, err) = m.tool("stats", range.clone());
     let table = format!(
         "{}: the newest row was written at 2026-01-16 05:30:00 local time.\n{STATS_HEADER}\n\
-         2026-01-09 0.8.0,0.9.0 3 12 4 2/4 1 - 1 1/1 0/1 2 3 0 0.33 35/90 1\n\
-         2026-01-10 0.9.0 2 10 3 1/3 2 1/2 3 2/3 1/3 5 7 1 1.81 40/70 0\n\
-         total - - 22 7 3/7 3 - 4 3/4 1/4 7 10 1 2.14 - 1",
+         2026-01-09 0.8.0,0.9.0 3 12 4 2/4 1 - 1 1/1 0/1 2 3 0 - 0 0.33 35/90 1\n\
+         2026-01-10 0.9.0 2 10 3 1/3 2 1/2 3 2/3 1/3 5 7 1 2 1 1.81 40/70 0\n\
+         total - - 22 7 3/7 3 - 4 3/4 1/4 7 10 1 - 1 2.14 - 1",
         rows.display()
     );
     assert!(!err);
@@ -1757,6 +1814,27 @@ fn the_worker_polls_only_while_a_session_can_still_become_due() {
     let taken: Vec<(u64, u64)> = runs(&w, "G", 0).iter().map(|e| (e["from"].as_u64().unwrap(), e["to"].as_u64().unwrap())).collect();
     let end = fs::metadata(&grows).unwrap().len();
     assert_eq!(taken, [(0, first), (first, end)], "a session that grew and went quiet again is taken again");
+}
+
+#[test]
+fn a_run_of_only_task_notification_turns_with_text_still_runs() {
+    let w = World::new("extract-notification");
+    w.branch("feat/x");
+    let home = w.home.join(".openrecall");
+    let p = Provider::start(vec![answer(json!({"facts": [], "claude_md_rules": []}))]);
+    fs::create_dir_all(&home).unwrap();
+    fs::write(home.join("extract.toml"), format!("base_url = \"http://127.0.0.1:{}/v1\"\nmodel = \"test/model\"\n", p.port)).unwrap();
+    fs::write(home.join("api-key"), "sk-test-123\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(home.join("api-key"), fs::Permissions::from_mode(0o600)).unwrap();
+    w.turn("S1", &[user("<task-notification><status>completed</status><summary>exit code 0</summary></task-notification>"),
+                   said("The deploy check for ABC-12 ended with 1 failed.", None)], "");
+    w.hook(&["extract"], "S1", json!({"hook_event_name": "SessionEnd"}));
+    wait_for(&home.join("log/openrecall.jsonl"), "\"event\":\"extract\",\"from\":0");
+    let reqs = p.requests();
+    assert_eq!(reqs.len(), 1, "the run calls the model");
+    let input = reqs[0].1["messages"][1]["content"].as_str().unwrap();
+    assert!(input.ends_with("Transcript:\n[task notification]\n[assistant] The deploy check for ABC-12 ended with 1 failed."), "{input}");
 }
 
 const PICK_SYSTEM: &str = "You pick memories for a coding assistant (Claude Code) that is about to act on the user's prompt. You get the list of memories (id, name and description), the session so far, newest turn first, and the prompt. Pick at most one memory, and only one that states a fact, decision, pointer or gotcha that the assistant needs to act on this prompt and that neither the prompt nor the session already contains. A memory about the same project but another task, or one that only repeats what the prompt or the session says, is a wrong pick. Most prompts need no memory: pick none unless you are sure. Return its id, or no id.";

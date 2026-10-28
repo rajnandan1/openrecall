@@ -528,9 +528,8 @@ fn detach(args: &[&str], stdin: Stdio) -> Result<std::process::Child> {
         .spawn()?)
 }
 
-/// The detached writer: settle bookkeeping for the session, then the turn into its task's record, then start the
-/// extraction worker, so a session that never ends is still taken once quiet (ticket 04). The secret scan
-/// compiles before the session lock, so a prompt that waits for the lock does not wait for the compile.
+/// The detached writer: settle bookkeeping for the session, then the turn into its task's record. The secret scan compiles
+/// before the session lock, so a prompt that waits for the lock does not wait for it, except after a turn on trunk.
 fn capture_job() -> Result<()> {
     let job = read_input()?;
     let sid = session_id(&job)?;
@@ -549,10 +548,15 @@ fn capture_job() -> Result<()> {
     if let Some(repo) = &repo {
         extract::enqueue(&sid, job["transcript_path"].as_str().unwrap_or(""), repo)?;
     }
-    let branch = repo.as_ref().and_then(|r| r.branch()).unwrap_or_default();
-    let scanner = git::is_task(&branch).then(scan::Scanner::new);
+    let head = repo.as_ref().and_then(|r| r.branch()).unwrap_or_default();
+    let scanner = git::is_task(&head).then(scan::Scanner::new);
     let (_lock, mut s) = load_session(&sid)?;
     let last = s["branch"].as_str().map(str::to_string);
+    let branch = match &last {
+        Some(kept) if !git::is_task(&head) => kept.clone(),
+        _ => head.clone(),
+    };
+    let scanner = scanner.or_else(|| git::is_task(&branch).then(scan::Scanner::new));
     if last.as_deref() != Some(branch.as_str()) {
         s["turns"] = json!(0);
     }
@@ -573,6 +577,9 @@ fn capture_job() -> Result<()> {
     }
     if let (Some(repo), Some(scanner)) = (&repo, &scanner) {
         write_record(repo, &branch, &sid, &turn, scanner, &mut s)?;
+        if branch != head {
+            log(json!({"event": "trunk", "session": sid, "branch": branch}));
+        }
     }
     save_session(&sid, &s)?;
     detach(&["extract", "--job"], Stdio::null())?;
@@ -621,14 +628,8 @@ fn write_record(
         }
     }
     found.commands = found.commands.iter().map(|c| clean(c, "command")).collect();
-    let (ask, answer) = if full && turn.real {
-        (
-            clean(&turn.ask, "last_ask"),
-            clean(&turn.answer(), "last_answer"),
-        )
-    } else {
-        (String::new(), String::new())
-    };
+    let ask = if full && turn.real { clean(&turn.ask, "last_ask") } else { String::new() };
+    let answer = if full { clean(&turn.answer(), "last_answer") } else { String::new() };
     rec.merge(&found, &ask, &answer, full, sid, &record::iso_ms(now_ms()));
     write_atomic(&path, &rec.render())?;
     if existing.is_none() {

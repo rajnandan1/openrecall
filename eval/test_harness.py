@@ -325,7 +325,7 @@ class HarnessTest(unittest.TestCase):
         with open(os.path.join(home, "log", "openrecall.jsonl"), "w") as fh:
             fh.writelines(json.dumps(e) + "\n" for e in (
                 dict(event="extract", off="no extract.toml", at=ms),
-                dict(event="extract", session="S1", **{"from": 0}, to=10, proposed=3, new=1, replaced=1, skipped=0,
+                dict(event="extract", session="S1", **{"from": 0}, to=10, proposed=3, new=1, replaced=1, reconciled=2, skipped=0,
                      dropped={"secret": 1}, normalized=1, suggestions=1, tokens_in=100, tokens_out=20, cost=0.05, at=ms + 1),
                 dict(event="dedupe", session="S1", name="a", action="new", address="github.com/x/app/a", at=ms + 2,
                      candidates=[dict(address="github.com/x/app/c", score=9), dict(address="builtin/-w-app/note", score=5)]),
@@ -348,7 +348,8 @@ class HarnessTest(unittest.TestCase):
                          "a memory that shares words with the fact is checked though the binary never ranked it")
         for part in ("1 runs over 1 sessions, last success 2026-01-01 00:00 UTC; strikes 1; sessions marked failed 1: S2;",
                      "last stop: http 401 at", "last start with extraction off: no extract.toml at",
-                     "proposed 3, new 1, replaced 1, skipped 0, dropped 1 (secret 1); names normalized 1; tokens 100 in, 20 out; cost $0.05.",
+                     "proposed 3, new 1, replaced 1, reconciled 2, skipped 0, dropped 1 (secret 1); names normalized 1; tokens 100 in, "
+                     "20 out; cost $0.05.",
                      "2 of 2 written facts checked, each against its logged candidates and up to 10 unranked memories",
                      "Repeats that got through: 2: github.com/x/app/a (github.com/x/app/c); github.com/x/app/a (builtin/-w-app/far).",
                      "Missed replaces of an own fact: 1: github.com/x/app/a (github.com/x/app/c).",
