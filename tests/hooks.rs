@@ -4,7 +4,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // macOS sets close-on-exec on a new pipe in a second step, so a parallel test's spawn can inherit it.
 static SPAWN: Mutex<()> = Mutex::new(());
@@ -16,6 +16,8 @@ struct World {
     folder: PathBuf,
     entrypoint: &'static str,
     plugin: Option<PathBuf>,
+    /// The extraction worker waits and checks again; off, it exits after one pass, so no test waits on a poll.
+    poll: bool,
 }
 
 impl World {
@@ -35,6 +37,7 @@ impl World {
             folder,
             entrypoint: "cli",
             plugin: None,
+            poll: false,
         }
     }
 
@@ -72,6 +75,9 @@ impl World {
             .stdout(Stdio::piped());
         if let Some(plugin) = &self.plugin {
             cmd.env("CLAUDE_PLUGIN_ROOT", plugin);
+        }
+        if !self.poll {
+            cmd.env("OPENRECALL_POLL", "0");
         }
         let guard = SPAWN.lock().unwrap();
         let child = cmd.spawn().unwrap();
@@ -1474,12 +1480,17 @@ struct Provider {
 
 impl Provider {
     fn start(replies: Vec<(u16, Value)>) -> Provider {
+        Provider::start_with(replies, |_| {})
+    }
+
+    /// `before(i)` runs once request `i` has arrived, before its reply goes out.
+    fn start_with(replies: Vec<(u16, Value)>, before: impl Fn(usize) + Send + 'static) -> Provider {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let seen = Arc::new(Mutex::new(vec![]));
         let kept = seen.clone();
         std::thread::spawn(move || {
-            for (status, reply) in replies {
+            for (i, (status, reply)) in replies.into_iter().enumerate() {
                 let Ok((mut stream, _)) = listener.accept() else {
                     return;
                 };
@@ -1503,6 +1514,7 @@ impl Provider {
                 let mut body = vec![0; len];
                 reader.read_exact(&mut body).unwrap();
                 kept.lock().unwrap().push((head, serde_json::from_slice(&body).unwrap()));
+                before(i);
                 let text = reply.to_string();
                 write!(stream, "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}", text.len()).unwrap();
             }
@@ -1682,6 +1694,126 @@ fn dedupe_sees_a_built_in_memory_past_the_top_five_and_past_its_start() {
     let dedupe = p.requests()[1].1["messages"][1]["content"].as_str().unwrap().to_string();
     assert!(dedupe.contains("/tools-build [project] ") && dedupe.contains(stated), "{dedupe}");
     assert!(log.contains("\"action\":\"skip\"") && log.contains("\"skipped\":1") && !repo.join("search-tool-fills-k.md").exists(), "{log}");
+}
+
+/// Extraction on through the provider stand-in.
+fn extraction_on(w: &World, p: &Provider) {
+    let home = w.home.join(".openrecall");
+    put(&home.join("extract.toml"), &format!("base_url = \"http://127.0.0.1:{}/v1\"\nmodel = \"test/model\"\n", p.port));
+    put(&home.join("api-key"), "sk-test-123\n");
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(home.join("api-key"), fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+/// A transcript line with a `timestamp` `mins` minutes ago.
+fn ago(mins: u64, mut line: Value) -> Value {
+    let secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() - mins * 60;
+    let z = (secs / 86400) as i64 + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let (d, m) = (doy - (153 * mp + 2) / 5 + 1, if mp < 10 { mp + 3 } else { mp - 9 });
+    let (y, s) = (yoe + era * 400 + i64::from(m <= 2), secs % 86400);
+    line["timestamp"] = json!(format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.000Z", s / 3600, s % 3600 / 60, s % 60));
+    line
+}
+
+/// A session in the extraction queue as the capture writer leaves it, plus `extra` run-file fields, with no worker
+/// started.
+fn queue(w: &World, sid: &str, lines: &[Value], extra: Value) -> PathBuf {
+    transcript(w, sid, lines);
+    let path = w.root.join(format!("{sid}.jsonl"));
+    let mut run = json!({"transcript": path, "identity": "github.com/someone/app"});
+    run.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+    put(&w.home.join(format!(".openrecall/extract/{sid}.json")), &run.to_string());
+    path
+}
+
+/// The worker's `extract` lines of one session, once it has logged `n` of them.
+fn runs(w: &World, sid: &str, n: usize) -> Vec<Value> {
+    let started = Instant::now();
+    loop {
+        let lines: Vec<Value> = log_of(w, "extract").into_iter().filter(|e| e["session"] == sid).collect();
+        if lines.len() >= n {
+            return lines;
+        }
+        assert!(started.elapsed() < Duration::from_secs(20), "{n} runs of {sid}: {lines:?}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Waits for a running worker to exit: it holds `extract/lock` until then.
+fn worker_done(w: &World) {
+    let lock = fs::File::create(w.home.join(".openrecall/extract/lock")).unwrap();
+    while lock.try_lock().is_err() {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn a_stop_starts_the_worker_and_quiet_goes_by_the_last_line_not_the_mtime() {
+    let w = World::new("quiet");
+    w.branch("feat/x");
+    let none = || answer(json!({"facts": [], "claude_md_rules": []}));
+    let p = Provider::start(vec![none(), none()]);
+    extraction_on(&w, &p);
+    let recent = queue(&w, "B", &[ago(29, user("Rename the export job")), ago(29, said("Renamed.", None))], json!({}));
+    let old = SystemTime::now() - Duration::from_secs(2 * 3600);
+    fs::File::options().write(true).open(&recent).unwrap().set_modified(old).unwrap();
+
+    w.turn("A", &[ago(31, user("Fix the billing retries")), ago(31, said("Fixed.", None))], "");
+    runs(&w, "A", 1);
+    worker_done(&w);
+    let reqs = p.requests();
+    assert_eq!(reqs.len(), 1, "a last line 29 minutes old is not quiet, whatever the mtime");
+    assert!(reqs[0].1["messages"][1]["content"].as_str().unwrap().contains("[user] Fix the billing retries"));
+    assert!(runs(&w, "B", 0).is_empty());
+}
+
+#[test]
+fn the_worker_polls_only_while_a_session_can_still_become_due() {
+    let w = World::new("poll");
+    w.branch("feat/x");
+    let turn = |text: &str, mins: u64| [ago(mins, user(text)), ago(mins, said("Done.", None))];
+    let grows = w.root.join("G.jsonl");
+    let more: String = turn("Also note the retry limit", 35).iter().map(|l| format!("{l}\n")).collect();
+    let none = || answer(json!({"facts": [], "claude_md_rules": []}));
+    let too_long = (400, json!({"error": {"code": 400, "message": "too long", "metadata": {"error_type": "context_length_exceeded"}}}));
+    let grown = grows.clone();
+    let p = Provider::start_with(vec![too_long, none(), none(), none()], move |i| {
+        if i == 1 {
+            fs::OpenOptions::new().append(true).open(&grown).unwrap().write_all(more.as_bytes()).unwrap();
+        }
+    });
+    extraction_on(&w, &p);
+    queue(&w, "F", &turn("Ship the failed one", 50), json!({"failed": true}));
+    let read = turn("Ship the read one", 50);
+    let path = queue(&w, "D", &read, json!({}));
+    queue(&w, "D", &read, json!({"cursor": fs::metadata(&path).unwrap().len()}));
+    queue(&w, "X", &turn("Ship the struck one", 45), json!({}));
+    queue(&w, "G", &turn("Ship the growing one", 40), json!({}));
+    let first = fs::metadata(&grows).unwrap().len();
+
+    let mut worker = World { poll: true, ..w.clone() }.spawn(&["extract", "--job"]);
+    drop(worker.stdin.take());
+    let started = Instant::now();
+    while worker.try_wait().unwrap().is_none() {
+        if started.elapsed() > Duration::from_secs(20) {
+            worker.kill().unwrap();
+            panic!("the worker still polls: {:?}", log_of(&w, "extract"));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    assert_eq!(p.requests().len(), 3);
+    assert!(runs(&w, "F", 0).is_empty() && runs(&w, "D", 0).is_empty());
+    let struck = runs(&w, "X", 0);
+    assert_eq!((struck.len(), &struck[0]["strikes"]), (1, &json!(1)), "a struck session that did not grow is not taken again");
+    let taken: Vec<(u64, u64)> = runs(&w, "G", 0).iter().map(|e| (e["from"].as_u64().unwrap(), e["to"].as_u64().unwrap())).collect();
+    let end = fs::metadata(&grows).unwrap().len();
+    assert_eq!(taken, [(0, first), (first, end)], "a session that grew and went quiet again is taken again");
 }
 
 #[test]
