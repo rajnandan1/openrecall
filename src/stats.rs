@@ -50,6 +50,7 @@ struct Late {
 struct Facts {
     new: u64,
     replaced: u64,
+    reconciled: u64,
     skipped: u64,
     dropped: u64,
 }
@@ -320,6 +321,7 @@ fn count(lines: &[&Value]) -> Row {
                 r.stops += u64::from(e.get("stop").is_some());
                 r.facts.new += n(&e["new"]);
                 r.facts.replaced += n(&e["replaced"]);
+                r.facts.reconciled += n(&e["reconciled"]);
                 r.facts.skipped += n(&e["skipped"]);
                 if let Some(dropped) = e["dropped"].as_object() {
                     r.facts.dropped += dropped.values().map(n).sum::<u64>();
@@ -619,7 +621,7 @@ fn candidates(e: &Value) -> HashSet<&str> {
 const LOCKED_OUT: &str = "The stats job held the lock for 10 s, so today and the other open days were not recomputed.";
 
 const HEADER: &str = "day versions sessions prompts injections used_signal picks_delivered picks_used pushes right_pushes \
-    late_pushes extraction_runs facts_new strikes cost_usd hook_ms errors";
+    late_pushes extraction_runs facts_new facts_replaced facts_reconciled strikes cost_usd hook_ms errors";
 
 /// The `stats` tool's local days, both inclusive: `to` is today and `from` is 6 days before `to` when left out.
 pub fn range(from: Option<&str>, to: Option<&str>) -> Result<(String, String), String> {
@@ -679,7 +681,7 @@ pub fn table(from: &str, to: &str, locked_out: bool) -> crate::Result<String> {
     Ok(lines.join("\n"))
 }
 
-/// One row's 17 columns, None where the row lacks the field.
+/// One row's 19 columns, None where the row lacks the field.
 fn cells(r: &Value) -> Vec<Option<Cell>> {
     let n = |p: &str| r.pointer(p).and_then(Value::as_u64);
     let f = |p: &str| r.pointer(p).and_then(Value::as_f64);
@@ -699,6 +701,8 @@ fn cells(r: &Value) -> Vec<Option<Cell>> {
         share("/late_pushes/late", "/late_pushes/judged"),
         n("/extraction_runs").map(Cell::Count),
         n("/facts/new").map(Cell::Count),
+        n("/facts/replaced").map(Cell::Count),
+        n("/facts/reconciled").map(Cell::Count),
         n("/strikes").map(Cell::Count),
         f("/pick_cost").zip(f("/extraction_cost")).map(|(p, e)| Cell::Cost(p + e)),
         n("/hook_ms/median").zip(n("/hook_ms/p95")).map(|(m, p)| Cell::Text(format!("{m}/{p}"))),
