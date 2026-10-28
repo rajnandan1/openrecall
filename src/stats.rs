@@ -351,7 +351,7 @@ fn count(lines: &[&Value]) -> Row {
 /// a time.
 fn check_transcripts(lines: &[(String, Value)], rows: &mut BTreeMap<&str, Row>) {
     let mut recalls: HashMap<&str, Vec<&Value>> = HashMap::new();
-    let mut picks: HashMap<&str, &Value> = HashMap::new();
+    let mut picks: HashMap<(&str, &str), &Value> = HashMap::new();
     let mut checks: BTreeMap<&str, Vec<(&str, &Value)>> = BTreeMap::new();
     for (day, e) in lines {
         let sid = e["session"].as_str().unwrap_or("");
@@ -359,7 +359,7 @@ fn check_transcripts(lines: &[(String, Value)], rows: &mut BTreeMap<&str, Row>) 
         match event {
             "recall" => recalls.entry(sid).or_default().push(e),
             "pick" => {
-                picks.insert(e["prompt_id"].as_str().unwrap_or(""), e);
+                picks.insert((e["prompt_id"].as_str().unwrap_or(""), e["memory"].as_str().unwrap_or("")), e);
             }
             _ => {}
         }
@@ -390,21 +390,22 @@ fn check_transcripts(lines: &[(String, Value)], rows: &mut BTreeMap<&str, Row>) 
                         };
                         if let Some(ids) = ids {
                             row.used_signal.judged += 1;
-                            row.used_signal.yes += u64::from(used(&s.turns[t], &ids));
+                            row.used_signal.yes += u64::from(used(&s.turns[t], &ids, address));
                         }
                     }
                 }
                 "deliver" => {
                     let id = e["prompt_id"].as_str().unwrap_or("");
+                    let memory = e["memory"].as_str().unwrap_or("");
                     let turn = s.turns.iter().find(|t| !id.is_empty() && t.prompt_id == id);
                     let Some(t) = turn.filter(|t| t.answered) else { continue };
-                    let ids = match picks.get(id).and_then(|p| p.get("identifiers")) {
+                    let ids = match picks.get(&(id, memory)).and_then(|p| p.get("identifiers")) {
                         Some(list) => Some(strings(list)),
-                        None => memory_idents(e["memory"].as_str().unwrap_or("")),
+                        None => memory_idents(memory),
                     };
                     if let Some(ids) = ids {
                         row.picks_used.judged += 1;
-                        row.picks_used.yes += u64::from(used(t, &ids));
+                        row.picks_used.yes += u64::from(used(t, &ids, memory));
                     }
                 }
                 "pushed" => {
@@ -543,9 +544,9 @@ impl Session {
     }
 }
 
-/// The harness's `used_signal`: the turn's assistant text or tool inputs hold an identifier of the line that the prompt
-/// does not hold.
-fn used(t: &Turn, ids: &[String]) -> bool {
+/// The harness's `used_signal`: the turn's assistant text or tool inputs name the memory's file name, the end of its
+/// address, as a whole word (issue 37), or hold an identifier of the line that the prompt does not hold.
+fn used(t: &Turn, ids: &[String], address: &str) -> bool {
     let asked: HashSet<&str> = IDENT.find_iter(&t.ask).map(|m| m.as_str()).collect();
     let mut texts = vec![];
     let mut inputs = vec![];
@@ -557,7 +558,11 @@ fn used(t: &Turn, ids: &[String]) -> bool {
         }
     }
     let after = format!("{}\n{}", texts.join("\n"), inputs.join("\n"));
-    ids.iter().any(|i| !asked.contains(i.as_str()) && after.contains(i.as_str()))
+    let stem = address.rsplit('/').next().unwrap_or("");
+    let word = |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    let named = !stem.is_empty()
+        && after.match_indices(stem).any(|(i, _)| !word(after[..i].chars().next_back()) && !word(after[i + stem.len()..].chars().next()));
+    named || ids.iter().any(|i| !asked.contains(i.as_str()) && after.contains(i.as_str()))
 }
 
 /// The fallback for a line from before 0.10.0: the identifiers of the memory's file as it stands now, by the harness's

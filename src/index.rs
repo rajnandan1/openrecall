@@ -25,8 +25,8 @@ const TERMS: usize = 40;
 const BODY_BYTES: usize = 4096;
 /// bm25 weights for name, description, body and identifiers (ticket 06).
 const WEIGHTS: &str = "2.0, 2.0, 1.0, 4.0";
-/// Bumped when the cache's tables change; an older `index.db` is rebuilt.
-const SCHEMA: i64 = 2;
+/// Bumped when the cache's tables or what its rows hold change; an older `index.db` is rebuilt.
+const SCHEMA: i64 = 3;
 pub const KINDS: [&str; 5] = ["decision", "preference", "pointer", "state", "gotcha"];
 const NAME_CHARS: usize = 64;
 const EXPIRES_SECS: u64 = 14 * 86400;
@@ -133,7 +133,8 @@ pub struct Memory {
     pub body: String,
 }
 
-/// Flat frontmatter by hand: `key: value` lines, with `type` also read from under `metadata:`.
+/// Flat frontmatter by hand: `key: value` lines, with `type` also read from under `metadata:`. Claude Code's
+/// `metadata.originSessionId` is the `source` of a built-in memory: the session that wrote it (issue 37).
 pub fn parse(text: &str) -> Memory {
     let mut m = Memory::default();
     let Some((front, body)) = text
@@ -153,7 +154,7 @@ pub fn parse(text: &str) -> Memory {
             "description" => m.description = value,
             "type" => m.kind = value,
             "scope" => m.scope = value,
-            "source" => m.source = value,
+            "source" | "originSessionId" => m.source = value,
             "updated" => m.updated = value,
             "expires" => m.expires = value,
             _ => {}
@@ -640,9 +641,8 @@ fn symbol(token: &str) -> Option<&str> {
     (code && SYMBOL.is_match(bare)).then_some(last)
 }
 
-/// Tickets 19 and 21: `- <type> <date> <address>: <text>`, the body when it fits in 200 characters or the whole line
-/// fits in `room` characters, else the description plus the body's identifiers the description lacks, in
-/// parentheses, up to 200 characters.
+/// Tickets 19 and 21: `- <type> <date> <address>: <text>`, the body when it fits in 200 characters or the line in
+/// `room`, else the description and the body's identifiers it lacks in 200, plus an uncounted `(also names: …)` mark.
 pub fn line(c: &Candidate, room: usize) -> String {
     let prefix = prefix(c);
     let body = squash(&c.body);
@@ -666,7 +666,7 @@ pub fn line(c: &Candidate, room: usize) -> String {
         if extra.is_empty() {
             desc
         } else {
-            format!("{desc} ({})", extra.join(", "))
+            format!("{desc} (also names: {})", extra.join(", "))
         }
     };
     prefix + &text
@@ -703,7 +703,7 @@ fn head(s: &str, bytes: usize) -> &str {
     &s[..end]
 }
 
-fn squash(s: &str) -> String {
+pub(crate) fn squash(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -884,14 +884,15 @@ mod tests {
         let long = candidate("Exports fail on empty rows", &long_body);
         assert_eq!(
             line(&long, 0),
-            "- gotcha 2026-01-02 global/x: Exports fail on empty rows (src/export.py, ABC-12, abc1234def)"
+            "- gotcha 2026-01-02 global/x: Exports fail on empty rows (also names: src/export.py, ABC-12, abc1234def)"
         );
+        assert_eq!(identifiers(&long, &line(&long, 0)), ["src/export.py", "ABC-12", "abc1234def"]);
         let whole = format!("- gotcha 2026-01-02 global/x: {}", long_body.trim());
         assert_eq!(line(&long, whole.chars().count()), whole);
         assert_eq!(line(&long, whole.chars().count() - 1), line(&long, 0));
         let wide = candidate(&"w".repeat(250), &long_body);
         assert_eq!(line(&wide, 0).chars().count(), "- gotcha 2026-01-02 global/x: ".len() + 200);
-        assert!(line(&wide, 0).ends_with('…'));
+        assert!(line(&wide, 0).ends_with('…') && !line(&wide, 0).contains("also names"));
         assert_eq!(idents("`a_b` then a/b.md:3 and https://h/x.md and ABC-12"), ["a_b", "a/b.md", "ABC-12"]);
     }
 

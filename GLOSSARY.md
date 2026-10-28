@@ -174,8 +174,12 @@ _Avoid_: threshold (that is the number inside the gate), filter
 The part of the gate that lets a candidate through, whatever its score, when its file name, name or description shares a ticket ID, a PR number or a path with the prompt.
 _Avoid_: identifier route (that pushes a handoff record), identifier boost
 
+**Recall line**:
+The one line that stands for a memory in an injection, a pick or a search result: its type, date and address, then its body or its description.
+_Avoid_: injected line, memory line
+
 **Echo**:
-A candidate whose injected line names a path that the prompt also names, and adds at most 2 identifiers that the prompt lacks. An echo is never injected, and a pick can be one too.
+A candidate whose recall line names a path that the prompt also names, and adds at most 2 identifiers that the prompt lacks. An echo is never injected, and a pick can be one too.
 _Avoid_: repeat (that is a fact dedupe skips), skip rule (that stops a session or a prompt), duplicate
 
 **Score**:

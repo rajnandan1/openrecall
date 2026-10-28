@@ -176,7 +176,7 @@ If no memory passes the gate, OpenRecall injects nothing. OpenRecall also does n
 
 The score does not grow when the index grows. So one threshold works at every index size.
 
-Each injected memory is one line: `- <type> <date> <address>: <text>`. The address is a stable ID for the memory, such as `github.com/acme/exporter/windows-runner-timeout`. Claude can use the address to read the full memory or to forget it. The text is the whole memory if it fits in the space that the other lines leave in the 400 tokens. If not, OpenRecall cuts the text to at most 200 characters.
+Each injected memory is one line: `- <type> <date> <address>: <text>`. The address is a stable ID for the memory, such as `github.com/acme/exporter/windows-runner-timeout`. Claude can use the address to read the full memory or to forget it. The text is the whole memory if it fits in the space that the other lines leave in the 400 tokens. If not, the text is the memory's description, cut to at most 200 characters. When those 200 characters leave room, the line ends with `(also names: …)`: the paths, ticket IDs and other identifiers of the memory that the description lacks. This line is the recall line. A pick and a `recall` search show a memory in the same form.
 
 These limits are not settings. They are constants in `src/index.rs`:
 
@@ -218,8 +218,8 @@ A hook cannot help here, because Claude cannot call a hook. Claude can call an M
 
 The plugin also starts an MCP server, `openrecall mcp`. The server is the same binary, and it reads the same `~/.openrecall/`. The plugin install configures the server, so you do nothing extra. The server gives Claude four tools:
 
-- `recall` takes an address or some words. With an address, it returns the whole memory. An injected line that OpenRecall cut to 200 characters still carries its address. So Claude calls `recall` to read the rest. With other words, `recall` finds the memories that match and skips the gate. It returns 5 memories, or up to 20 if Claude asks for more.
-- `remember` stores a new fact. Claude gives the fact a type and a scope. The type is `decision`, `preference`, `pointer`, `state` or `gotcha`. The scope is `repo` or `global`. `remember` refuses a text that holds a secret. Without [extraction](#extraction-optional), `remember` is the only way that OpenRecall gets new facts.
+- `recall` takes an address or some words. With an address, it returns the whole memory. A recall line that OpenRecall cut to 200 characters still carries its address. So Claude calls `recall` to read the rest. With other words, `recall` finds the memories that match and skips the gate. It returns 5 memories, or up to 20 if Claude asks for more.
+- `remember` stores a new fact. Claude gives the fact a type, a scope and a description. The type is `decision`, `preference`, `pointer`, `state` or `gotcha`. The scope is `repo` or `global`. The description states the fact with its main identifier in at most 150 characters. A longer description gets an error that gives its length, and Claude writes a shorter one. `remember` refuses a description or text that holds a secret. Without [extraction](#extraction-optional), `remember` is the only way that OpenRecall gets new facts.
 - `forget` deletes one fact that OpenRecall wrote. Claude gives the address of the fact.
 - `stats` shows one row of counts per day. Ask Claude how OpenRecall did today or this week, and Claude answers from counts that stay on your machine.
 

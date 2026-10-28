@@ -1073,15 +1073,17 @@ def line_idents(path):
     return ids
 
 
-def used_signal(case, s, path, idents=None):
-    """Ticket 19 item 5 on a replayed case: the next assistant turn repeats an identifier from the injected line that
-    the prompt did not contain. None when the transcript is gone. `idents`, when given, are the line's identifiers."""
+def used_signal(case, s, path, address, idents=None):
+    """Ticket 19 item 5 and issue 37: the next assistant turn names the memory's file name, the end of its address, as
+    a whole word, or an identifier of the recall line (`idents`, else from `path`) the prompt lacks. None with no transcript."""
     t = next((t for t in s["turns"] if t["at"] == case["at"]), None) if s else None
     if not t:
         return None
     after = "\n".join(x for g in t["groups"] for x in g["text"]) + "\n" + "\n".join(json.dumps(i) for _, i in t["tools"])
     ids = set(line_idents(path) if idents is None else idents) - set(IDENT.findall(case["prompt"]))
-    return any(i in after for i in ids)
+    stem = re.escape(address.rsplit("/", 1)[-1])
+    named = bool(stem) and re.search(r"(?<![A-Za-z0-9_-])%s(?![A-Za-z0-9_-])" % stem, after)
+    return bool(named) or any(i in after for i in ids)
 
 
 def fnv(text):
@@ -1252,7 +1254,7 @@ def level2_lines(cases, results, labels, by_sid, gate, label_fn=None, picks=Fals
         for x in r["candidates"]:
             label = labels.get((c["id"], x["address"], x["text_hash"]))
             path = r["memories"].get(x["address"])
-            fired = used_signal(c, by_sid.get(c["session"]), path) if path else None
+            fired = used_signal(c, by_sid.get(c["session"]), path, x["address"]) if path else None
             used[fired] += 1
             if x["address"] in r["injected"] or label == "partly" or (label == "noise" and fired):
                 confirm.append("%s %s (%sjev %s, used signal %s)" % (c["id"], x["address"],
@@ -1406,14 +1408,14 @@ def daily(orhome):
         if e.get("event") == "recall":
             recalls[e.get("session")].append(e)
         days[datetime.fromtimestamp(e["at"] / 1000).date().isoformat()][e.get("event")].append(e)
-    picks = {e.get("prompt_id"): e for e in events if e.get("event") == "pick"}
+    picks = {(e.get("prompt_id"), e.get("memory")): e for e in events if e.get("event") == "pick"}
 
     def signal(s, t, idents, address):
         """The used signal of one memory given in turn t, or None when it is not judged."""
         path = address_path(address, orhome)
         if not (t and t["groups"]) or idents is None and not os.path.exists(path):
             return None
-        return used_signal(dict(at=t["at"], prompt=t["ask"]), s, path, idents)
+        return used_signal(dict(at=t["at"], prompt=t["ask"]), s, path, address, idents)
 
     count = lambda values: dict(sorted(Counter(values).items()))
     total = lambda lines, key: sum(e.get(key) or 0 for e in lines)
@@ -1437,7 +1439,7 @@ def daily(orhome):
         for e in by["deliver"]:
             s = by_sid.get(e.get("session"))
             t = next((t for t in s["turns"] if t["prompt_id"] == e.get("prompt_id")), None) if s else None
-            v = signal(s, t, picks.get(e.get("prompt_id"), {}).get("identifiers"), e.get("memory") or "")
+            v = signal(s, t, picks.get((e.get("prompt_id"), e.get("memory")), {}).get("identifiers"), e.get("memory") or "")
             picked["judged"] += v is not None
             picked["yes"] += bool(v)
         for e in by["pushed"]:
@@ -1587,7 +1589,8 @@ def freeze_set(out, since, until):
                     and x.get("skip") not in ("too_big", "cap"))
         c["state"] = dict(ledger=ledger, picks=calls)
         pick = next((x for x in by_session[sid] if x["event"] == "pick" and abs(x["at"] - x.get("ms", 0) - e["started_at"]) < 2000), None)
-        deliver = pick and next((x for x in by_session[sid] if x["event"] == "deliver" and x["prompt_id"] == pick["prompt_id"]), None)
+        deliver = pick and next((x for x in by_session[sid] if x["event"] == "deliver" and x["prompt_id"] == pick["prompt_id"]
+                                 and x.get("memory") == pick.get("memory")), None)
         c["live"] = dict(gate=[a for a in e["injected"] if a in (e.get("via") or {})], pick=pick and pick.get("memory"),
                          pick_skip=pick and pick.get("skip"), delivered=deliver and deliver.get("memory"))
     for sid, n in upto.items():

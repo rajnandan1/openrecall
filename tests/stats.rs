@@ -325,6 +325,39 @@ fn an_injection_is_used_when_its_turn_repeats_an_identifier_the_prompt_lacks() {
     assert_eq!(h.row("2026-01-10")["used_signal"], json!({"yes": 2, "judged": 3}));
 }
 
+/// Issue 37: a turn that names the memory's address or its file name uses it, even when its line has no identifier. A
+/// turn that names another memory's address does not.
+#[test]
+fn an_injection_is_used_when_its_turn_names_its_address_or_file_name() {
+    let h = Home::new("used-address");
+    let none = json!({"identifiers": {"app/export-rules": []}});
+    let ask = "how do exports work";
+    h.log(&[
+        recall("2026-01-10T05:00:00Z", "S1", 30, injected(ask, "app/export-rules", none.clone())),
+        recall("2026-01-10T05:10:00Z", "S2", 30, injected(ask, "app/export-rules", none.clone())),
+        recall("2026-01-10T05:20:00Z", "S3", 30, injected(ask, "app/export-rules", none.clone())),
+        recall("2026-01-10T05:30:00Z", "S4", 30, injected(ask, "app/export-rules", none)),
+    ]);
+    h.transcript("S1", &[
+        user("2026-01-10T05:00:01.000Z", ask, json!({})),
+        tool("2026-01-10T05:00:05.000Z", "mcp__plugin_openrecall_openrecall__recall", json!({"query": "app/export-rules"})),
+    ]);
+    h.transcript("S2", &[
+        user("2026-01-10T05:10:01.000Z", ask, json!({})),
+        tool("2026-01-10T05:10:05.000Z", "Read", json!({"file_path": "/u/.openrecall/repos/app/export-rules.md"})),
+    ]);
+    h.transcript("S3", &[
+        user("2026-01-10T05:20:01.000Z", ask, json!({})),
+        said("2026-01-10T05:20:05.000Z", "See app/import-rules for that."),
+    ]);
+    h.transcript("S4", &[
+        user("2026-01-10T05:30:01.000Z", ask, json!({})),
+        said("2026-01-10T05:30:05.000Z", "See app/export-rules-2 and app/old-export-rules for that."),
+    ]);
+    h.job();
+    assert_eq!(h.row("2026-01-10")["used_signal"], json!({"yes": 2, "judged": 4}));
+}
+
 /// Spec section 5.4: a delivered pick joins its prompt by `promptId` and its pick line by `prompt_id`.
 #[test]
 fn a_delivered_pick_is_used_when_its_turn_repeats_an_identifier() {
@@ -358,6 +391,27 @@ fn a_delivered_pick_is_used_when_its_turn_repeats_an_identifier() {
     h.job();
     let row = h.row("2026-01-10");
     assert_eq!((&row["picks_delivered"], &row["picks_used"]), (&json!(5), &json!({"yes": 2, "judged": 3})));
+}
+
+/// Issue 37: two pick jobs for one prompt. The delivered pick joins the pick line of its own memory, not the last one.
+#[test]
+fn a_delivered_pick_joins_the_pick_line_of_its_memory() {
+    let h = Home::new("two-picks");
+    let pick = |iso: &str, memory: &str, ids: Value| {
+        at(iso, json!({"event": "pick", "session": "S1", "prompt_id": "q1", "memory": memory, "skip": null, "cost": 0.0,
+                       "ms": 10, "identifiers": ids}))
+    };
+    h.log(&[
+        pick("2026-01-10T05:00:00Z", "app/release-steps", json!(["CORE-7"])),
+        at("2026-01-10T05:00:01Z", json!({"event": "deliver", "session": "S1", "prompt_id": "q1", "ms": 1, "memory": "app/release-steps"})),
+        pick("2026-01-10T05:00:02Z", "app/other-notes", json!(["ZZZ-10"])),
+    ]);
+    h.transcript("S1", &[
+        user("2026-01-10T04:59:59Z", "go", json!({"promptId": "q1"})),
+        tool("2026-01-10T05:00:03Z", "Bash", json!({"command": "grep -rn CORE-7 ."})),
+    ]);
+    h.job();
+    assert_eq!(h.row("2026-01-10")["picks_used"], json!({"yes": 1, "judged": 1}));
 }
 
 /// Spec sections 5.5 to 5.8: the verdict and the late test of each push whose turn is found, the record from the
