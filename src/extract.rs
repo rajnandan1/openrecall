@@ -169,13 +169,12 @@ pub fn work() -> crate::Result<()> {
     if lock.try_lock().is_err() {
         return Ok(());
     }
-    let settings = match Settings::load(&crate::home()) {
-        Ok(s) => s,
-        Err(why) => {
-            crate::log(json!({"event": "extract", "off": why}));
-            return Ok(());
-        }
+    let settings = || {
+        Settings::load(&crate::home()).inspect_err(|why| crate::log(json!({"event": "extract", "off": why})))
     };
+    if settings().is_err() {
+        return Ok(());
+    }
     let scanner = OnceCell::new();
     let poll = std::env::var("OPENRECALL_POLL").as_deref() != Ok("0");
     let mut tried = HashMap::new();
@@ -189,6 +188,7 @@ pub fn work() -> crate::Result<()> {
             continue;
         };
         tried.insert(sid.clone(), size);
+        let Ok(settings) = settings() else { break };
         let started = crate::now_ms();
         match extract(&sid, &e, &settings, scanner.get_or_init(scan::Scanner::new)) {
             Ok(mut detail) => {
@@ -409,10 +409,10 @@ fn extract(sid: &str, e: &Entry, s: &Settings, scanner: &scan::Scanner) -> Resul
         0 => Some(0),
         cursor => data.get(..cursor as usize).and_then(turn::last_time),
     };
-    if remembers && let Some(since) = since {
-        facts.extend(remembered(&ix, &scopes, &own, sid, since)?);
-    }
     let today = &record::iso(crate::now_secs())[..10];
+    if remembers && let Some(since) = since {
+        facts.extend(remembered(&ix, &scopes, &own, sid, since, today)?);
+    }
     let (found, ranked): (Vec<_>, Vec<_>) = facts
         .iter()
         .map(|f| candidates(&ix, &scopes, f, today))
@@ -575,12 +575,14 @@ fn remembered(
     own: &str,
     sid: &str,
     since: i64,
+    today: &str,
 ) -> rusqlite::Result<Vec<Fact>> {
     let mut out = vec![];
     for c in ix.all(scopes)? {
         let mut stamp = c.source.split_whitespace();
         let after = stamp.next() == Some(sid) && stamp.next().and_then(turn::ms_of).is_some_and(|ms| ms > since);
-        if after && c.address.starts_with(own) {
+        let live = c.expires.is_empty() || c.expires.as_str() > today;
+        if after && live && c.address.starts_with(own) {
             out.push(Fact {
                 kind: c.kind,
                 name: c.name,

@@ -2127,6 +2127,24 @@ fn the_worker_polls_only_while_a_session_can_still_become_due() {
 }
 
 #[test]
+fn the_worker_sends_nothing_after_extraction_is_turned_off() {
+    let w = World::new("off-mid-run");
+    w.branch("feat/x");
+    let turn = |text: &str, mins: u64| [ago(mins, user(text)), ago(mins, said("Done.", None))];
+    let none = || answer(json!({"facts": [], "claude_md_rules": []}));
+    let toml = w.home.join(".openrecall/extract.toml");
+    let p = Provider::start_with(vec![none(), none()], move |_| {
+        let _ = fs::remove_file(&toml);
+    });
+    extraction_on(&w, &p);
+    queue(&w, "A", &turn("Ship the first one", 50), json!({}));
+    queue(&w, "B", &turn("Ship the second one", 40), json!({}));
+    w.run(&["extract", "--job"], "");
+    assert_eq!(p.requests().len(), 1, "no transcript goes out once extract.toml is gone");
+    assert!(log_of(&w, "extract").iter().any(|e| e["off"] == "no extract.toml"), "{:?}", log_of(&w, "extract"));
+}
+
+#[test]
 fn a_run_of_only_task_notification_turns_with_text_still_runs() {
     let w = World::new("extract-notification");
     w.branch("feat/x");
