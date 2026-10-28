@@ -291,13 +291,15 @@ The worker starts each time a session starts or ends. It takes each session that
 
 The worker sends a short form of the session through `/usr/bin/curl`. The short form holds your prompts, Claude's text, and one line per tool call. It holds no tool output, and it leaves out calls to OpenRecall's own tools, `recall`, `remember`, `forget` and `stats`. OpenRecall replaces each secret in it with `[REDACTED:<rule-id>]` first. The worker gives the key to curl on stdin, never on a command line. If you use OpenRouter, turn on "deny data collection" in its privacy settings.
 
-The second call to the model stops duplicate facts. This step is dedupe. Dedupe compares each new fact with the 10 most similar memories. Then the model picks one of three actions for the fact:
+The second call to the model stops duplicate facts and fixes old ones. This step is dedupe. Dedupe compares each new fact with the 10 most similar memories. It also adds up to 10 more memories that name the same ticket ID, PR number or path as the fact. A state fact past its expiry date is never on the list. The model sees when the last new turn of the session ended, and when each memory last changed. A memory that changed later is newer than the fact, and the newer text wins. Then the model picks one of three actions for the fact:
 
 - `new` writes the fact as a new memory.
-- `skip` drops the fact as a repeat.
-- `replace` rewrites an old fact in its own file, with a merged text. OpenRecall keeps the old text in `replaced/`.
+- `skip` drops the fact as a repeat, and names the memory that already states it.
+- `replace` rewrites an old fact in its own file, with a merged text.
 
-Dedupe never replaces a built-in memory or a global memory.
+The model can also give a fourth action, `reconcile`, for each other memory that the fact makes out of date. For example, a memory says that a ticket is open, and the new fact says that it is closed. `reconcile` rewrites only the out-of-date part of that memory, and the memory keeps its type. A fact that you stored with `remember` reconciles other memories at the next run of the session.
+
+OpenRecall keeps the old text of each `replace` and `reconcile` in `replaced/`. To undo a wrong rewrite, copy that file back by hand. The `dedupe` line in the log names the file. Dedupe never changes a built-in memory or a global memory.
 
 Sometimes the model finds a standing rule: a rule for every session in the repo, such as a coding standard. Extraction writes such rules to `~/.openrecall/repos/<host>/<owner>/<repo>/claude-md-suggestions.md`. You copy the rules that you want into CLAUDE.md by hand. OpenRecall never recalls that file.
 

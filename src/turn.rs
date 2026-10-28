@@ -210,7 +210,7 @@ pub fn turns(transcript: &[u8]) -> Vec<(Turn, usize)> {
 }
 
 /// An ISO 8601 UTC time such as `2026-01-10T08:00:01.250Z` in ms since 1970.
-fn ms_of(time: &str) -> Option<i64> {
+pub(crate) fn ms_of(time: &str) -> Option<i64> {
     let secs = crate::record::parse_iso(time)? as i64;
     let frac = time.get(19..).and_then(|f| f.strip_prefix('.')).unwrap_or("");
     let digits: String = frac.chars().take_while(char::is_ascii_digit).chain("000".chars()).take(3).collect();
