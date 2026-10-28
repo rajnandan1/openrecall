@@ -1684,6 +1684,27 @@ fn dedupe_sees_a_built_in_memory_past_the_top_five_and_past_its_start() {
     assert!(log.contains("\"action\":\"skip\"") && log.contains("\"skipped\":1") && !repo.join("search-tool-fills-k.md").exists(), "{log}");
 }
 
+#[test]
+fn a_run_of_only_task_notification_turns_with_text_still_runs() {
+    let w = World::new("extract-notification");
+    w.branch("feat/x");
+    let home = w.home.join(".openrecall");
+    let p = Provider::start(vec![answer(json!({"facts": [], "claude_md_rules": []}))]);
+    fs::create_dir_all(&home).unwrap();
+    fs::write(home.join("extract.toml"), format!("base_url = \"http://127.0.0.1:{}/v1\"\nmodel = \"test/model\"\n", p.port)).unwrap();
+    fs::write(home.join("api-key"), "sk-test-123\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(home.join("api-key"), fs::Permissions::from_mode(0o600)).unwrap();
+    w.turn("S1", &[user("<task-notification><status>completed</status><summary>exit code 0</summary></task-notification>"),
+                   said("The deploy check for ABC-12 ended with 1 failed.", None)], "");
+    w.hook(&["extract"], "S1", json!({"hook_event_name": "SessionEnd"}));
+    wait_for(&home.join("log/openrecall.jsonl"), "\"event\":\"extract\",\"from\":0");
+    let reqs = p.requests();
+    assert_eq!(reqs.len(), 1, "the run calls the model");
+    let input = reqs[0].1["messages"][1]["content"].as_str().unwrap();
+    assert!(input.ends_with("Transcript:\n[task notification]\n[assistant] The deploy check for ABC-12 ended with 1 failed."), "{input}");
+}
+
 const PICK_SYSTEM: &str = "You pick memories for a coding assistant (Claude Code) that is about to act on the user's prompt. You get the list of memories (id, name and description), the session so far, newest turn first, and the prompt. Pick at most one memory, and only one that states a fact, decision, pointer or gotcha that the assistant needs to act on this prompt and that neither the prompt nor the session already contains. A memory about the same project but another task, or one that only repeats what the prompt or the session says, is a wrong pick. Most prompts need no memory: pick none unless you are sure. Return its id, or no id.";
 
 /// Picks on through the provider stand-in: extraction's settings plus `pick = true`.
