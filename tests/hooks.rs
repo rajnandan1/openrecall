@@ -1318,7 +1318,7 @@ fn stats_row(day: &str, written_at: u64, extra: Value) -> Value {
         "picks": 3, "pick_skips": {}, "picks_delivered": 2, "pick_drops": {}, "picks_used": {"yes": 1, "judged": 2},
         "pick_cost": 0.31, "pick_ms": 3000, "pushes": {"settle": 2, "identifier": 1},
         "right_pushes": {"right": 2, "wrong": 1, "unjudged": 4}, "late_pushes": {"late": 1, "judged": 3},
-        "extraction_runs": 5, "facts": {"new": 7, "replaced": 1, "skipped": 0, "dropped": 0}, "suggestions": 0,
+        "extraction_runs": 5, "facts": {"new": 7, "replaced": 1, "reconciled": 2, "skipped": 0, "dropped": 0}, "suggestions": 0,
         "strikes": 1, "failed_sessions": 0, "stops": 0, "extraction_cost": 1.5, "extraction_ms": 20000, "redactions": 0,
         "own_tool_calls": {}, "update_check": {}, "errors": 0});
     row.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
@@ -1326,7 +1326,7 @@ fn stats_row(day: &str, written_at: u64, extra: Value) -> Value {
 }
 
 const STATS_HEADER: &str = "day versions sessions prompts injections used_signal picks_delivered picks_used pushes \
-    right_pushes late_pushes extraction_runs facts_new strikes cost_usd hook_ms errors";
+    right_pushes late_pushes extraction_runs facts_new facts_replaced facts_reconciled strikes cost_usd hook_ms errors";
 
 /// Spec test 11: the table shows the range's rows, `-` for a field a row lacks, and a totals line.
 #[test]
@@ -1355,9 +1355,9 @@ fn the_stats_tool_prints_the_ranges_rows_and_their_totals() {
     let (text, err) = m.tool("stats", range.clone());
     let table = format!(
         "{}: the newest row was written at 2026-01-16 05:30:00 local time.\n{STATS_HEADER}\n\
-         2026-01-09 0.8.0,0.9.0 3 12 4 2/4 1 - 1 1/1 0/1 2 3 0 0.33 35/90 1\n\
-         2026-01-10 0.9.0 2 10 3 1/3 2 1/2 3 2/3 1/3 5 7 1 1.81 40/70 0\n\
-         total - - 22 7 3/7 3 - 4 3/4 1/4 7 10 1 2.14 - 1",
+         2026-01-09 0.8.0,0.9.0 3 12 4 2/4 1 - 1 1/1 0/1 2 3 0 - 0 0.33 35/90 1\n\
+         2026-01-10 0.9.0 2 10 3 1/3 2 1/2 3 2/3 1/3 5 7 1 2 1 1.81 40/70 0\n\
+         total - - 22 7 3/7 3 - 4 3/4 1/4 7 10 1 - 1 2.14 - 1",
         rows.display()
     );
     assert!(!err);
