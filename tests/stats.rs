@@ -325,6 +325,34 @@ fn an_injection_is_used_when_its_turn_repeats_an_identifier_the_prompt_lacks() {
     assert_eq!(h.row("2026-01-10")["used_signal"], json!({"yes": 2, "judged": 3}));
 }
 
+/// Issue 37: a turn that names the memory's address or its file name uses it, even when its line has no identifier. A
+/// turn that names another memory's address does not.
+#[test]
+fn an_injection_is_used_when_its_turn_names_its_address_or_file_name() {
+    let h = Home::new("used-address");
+    let none = json!({"identifiers": {"app/export-rules": []}});
+    let ask = "how do exports work";
+    h.log(&[
+        recall("2026-01-10T05:00:00Z", "S1", 30, injected(ask, "app/export-rules", none.clone())),
+        recall("2026-01-10T05:10:00Z", "S2", 30, injected(ask, "app/export-rules", none.clone())),
+        recall("2026-01-10T05:20:00Z", "S3", 30, injected(ask, "app/export-rules", none)),
+    ]);
+    h.transcript("S1", &[
+        user("2026-01-10T05:00:01.000Z", ask, json!({})),
+        tool("2026-01-10T05:00:05.000Z", "mcp__plugin_openrecall_openrecall__recall", json!({"query": "app/export-rules"})),
+    ]);
+    h.transcript("S2", &[
+        user("2026-01-10T05:10:01.000Z", ask, json!({})),
+        tool("2026-01-10T05:10:05.000Z", "Read", json!({"file_path": "/u/.openrecall/repos/app/export-rules.md"})),
+    ]);
+    h.transcript("S3", &[
+        user("2026-01-10T05:20:01.000Z", ask, json!({})),
+        said("2026-01-10T05:20:05.000Z", "See app/import-rules for that."),
+    ]);
+    h.job();
+    assert_eq!(h.row("2026-01-10")["used_signal"], json!({"yes": 2, "judged": 3}));
+}
+
 /// Spec section 5.4: a delivered pick joins its prompt by `promptId` and its pick line by `prompt_id`.
 #[test]
 fn a_delivered_pick_is_used_when_its_turn_repeats_an_identifier() {

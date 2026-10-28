@@ -390,7 +390,7 @@ fn check_transcripts(lines: &[(String, Value)], rows: &mut BTreeMap<&str, Row>) 
                         };
                         if let Some(ids) = ids {
                             row.used_signal.judged += 1;
-                            row.used_signal.yes += u64::from(used(&s.turns[t], &ids));
+                            row.used_signal.yes += u64::from(used(&s.turns[t], &ids, address));
                         }
                     }
                 }
@@ -404,7 +404,7 @@ fn check_transcripts(lines: &[(String, Value)], rows: &mut BTreeMap<&str, Row>) 
                     };
                     if let Some(ids) = ids {
                         row.picks_used.judged += 1;
-                        row.picks_used.yes += u64::from(used(t, &ids));
+                        row.picks_used.yes += u64::from(used(t, &ids, e["memory"].as_str().unwrap_or("")));
                     }
                 }
                 "pushed" => {
@@ -543,9 +543,9 @@ impl Session {
     }
 }
 
-/// The harness's `used_signal`: the turn's assistant text or tool inputs hold an identifier of the line that the prompt
-/// does not hold.
-fn used(t: &Turn, ids: &[String]) -> bool {
+/// The harness's `used_signal`: the turn's assistant text or tool inputs hold the memory's file name, which its address
+/// ends with (issue 37), or an identifier of the line that the prompt does not hold.
+fn used(t: &Turn, ids: &[String], address: &str) -> bool {
     let asked: HashSet<&str> = IDENT.find_iter(&t.ask).map(|m| m.as_str()).collect();
     let mut texts = vec![];
     let mut inputs = vec![];
@@ -557,7 +557,8 @@ fn used(t: &Turn, ids: &[String]) -> bool {
         }
     }
     let after = format!("{}\n{}", texts.join("\n"), inputs.join("\n"));
-    ids.iter().any(|i| !asked.contains(i.as_str()) && after.contains(i.as_str()))
+    let stem = address.rsplit('/').next().unwrap_or("");
+    (!stem.is_empty() && after.contains(stem)) || ids.iter().any(|i| !asked.contains(i.as_str()) && after.contains(i.as_str()))
 }
 
 /// The fallback for a line from before 0.10.0: the identifiers of the memory's file as it stands now, by the harness's

@@ -211,7 +211,8 @@ class HarnessTest(unittest.TestCase):
         self.assertEqual(harness.slug("/Users/x/Code/app.v2"), "-Users-x-Code-app-v2")
         sessions, _ = harness.load()
         by_sid = {s["sid"]: s for s in sessions}
-        self.assertTrue(harness.used_signal(cases[0], by_sid["new"], mem) is False)
+        self.assertTrue(harness.used_signal(cases[0], by_sid["new"], mem, "builtin/-w-app/m") is False)
+        self.assertTrue(harness.used_signal(cases[0], by_sid["new"], mem, "builtin/-w-app/Done"), "the turn names the file name")
         lines, best_threshold = harness.level2_lines(cases, results, labels, by_sid, (5.5, 10))
         text = "\n".join(lines)
         for row in ("Searched: 2.", "Candidates: 4 over 2 cases", "Labels: useful 1, partly 0, noise 3, unlabeled 0.",

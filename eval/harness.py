@@ -1073,15 +1073,17 @@ def line_idents(path):
     return ids
 
 
-def used_signal(case, s, path, idents=None):
-    """Ticket 19 item 5 on a replayed case: the next assistant turn repeats an identifier from the injected line that
-    the prompt did not contain. None when the transcript is gone. `idents`, when given, are the line's identifiers."""
+def used_signal(case, s, path, address, idents=None):
+    """Ticket 19 item 5 on a replayed case: the next assistant turn names the memory's file name, which its address
+    ends with (issue 37), or repeats an identifier from the injected line that the prompt did not contain. None when
+    the transcript is gone. `idents`, when given, are the line's identifiers."""
     t = next((t for t in s["turns"] if t["at"] == case["at"]), None) if s else None
     if not t:
         return None
     after = "\n".join(x for g in t["groups"] for x in g["text"]) + "\n" + "\n".join(json.dumps(i) for _, i in t["tools"])
     ids = set(line_idents(path) if idents is None else idents) - set(IDENT.findall(case["prompt"]))
-    return any(i in after for i in ids)
+    stem = address.rsplit("/", 1)[-1]
+    return bool(stem) and stem in after or any(i in after for i in ids)
 
 
 def fnv(text):
@@ -1252,7 +1254,7 @@ def level2_lines(cases, results, labels, by_sid, gate, label_fn=None, picks=Fals
         for x in r["candidates"]:
             label = labels.get((c["id"], x["address"], x["text_hash"]))
             path = r["memories"].get(x["address"])
-            fired = used_signal(c, by_sid.get(c["session"]), path) if path else None
+            fired = used_signal(c, by_sid.get(c["session"]), path, x["address"]) if path else None
             used[fired] += 1
             if x["address"] in r["injected"] or label == "partly" or (label == "noise" and fired):
                 confirm.append("%s %s (%sjev %s, used signal %s)" % (c["id"], x["address"],
@@ -1413,7 +1415,7 @@ def daily(orhome):
         path = address_path(address, orhome)
         if not (t and t["groups"]) or idents is None and not os.path.exists(path):
             return None
-        return used_signal(dict(at=t["at"], prompt=t["ask"]), s, path, idents)
+        return used_signal(dict(at=t["at"], prompt=t["ask"]), s, path, address, idents)
 
     count = lambda values: dict(sorted(Counter(values).items()))
     total = lambda lines, key: sum(e.get(key) or 0 for e in lines)
