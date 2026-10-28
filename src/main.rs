@@ -618,14 +618,8 @@ fn write_record(
         }
     }
     found.commands = found.commands.iter().map(|c| clean(c, "command")).collect();
-    let (ask, answer) = if full && turn.real {
-        (
-            clean(&turn.ask, "last_ask"),
-            clean(&turn.answer(), "last_answer"),
-        )
-    } else {
-        (String::new(), String::new())
-    };
+    let ask = if full && turn.real { clean(&turn.ask, "last_ask") } else { String::new() };
+    let answer = if full { clean(&turn.answer(), "last_answer") } else { String::new() };
     rec.merge(&found, &ask, &answer, full, sid, &record::iso_ms(now_ms()));
     write_atomic(&path, &rec.render())?;
     if existing.is_none() {

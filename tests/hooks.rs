@@ -596,6 +596,33 @@ fn keys_are_redacted_and_renames_move_the_record() {
 }
 
 #[test]
+fn a_notification_turn_changes_the_last_answer_and_keeps_the_last_ask() {
+    let w = World::new("notification");
+    w.branch("feat/x");
+    start(&w, "E");
+    turn(&w, "E", "merge ABC-12 and release it", "Merged. The release run is going.");
+    let answered_at = |w: &World| {
+        let rec = w.record("feat--x").unwrap();
+        rec.lines().find_map(|l| l.strip_prefix("answered_at: ")).unwrap().to_string()
+    };
+    let merged_at = answered_at(&w);
+    let note = "<task-notification><task-id>t1</task-id><status>completed</status></task-notification>";
+    turn(&w, "E", note, "The release run finished: ABC-12 is live in prod.");
+    let rec = w.record("feat--x").unwrap();
+    assert!(
+        rec.contains("## Last ask\nmerge ABC-12 and release it\n## Last answer\nThe release run finished: ABC-12 is live in prod.\n"),
+        "{rec}"
+    );
+    assert_ne!(answered_at(&w), merged_at);
+
+    w.turn("E", &[user(note)], "");
+    assert!(
+        w.record("feat--x").unwrap().contains("## Last answer\nThe release run finished: ABC-12 is live in prod.\n"),
+        "a notification with no text keeps the answer"
+    );
+}
+
+#[test]
 fn idle_records_retire_at_session_start() {
     let w = World::new("retire");
     w.branch("feat/old");
