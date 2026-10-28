@@ -20,6 +20,8 @@ const CANDIDATES: usize = 10;
 // ken: 10 identifier matches per fact; raise when a live check finds a missed reconcile past the 10th match
 const IDENT_CANDIDATES: usize = 10;
 const TOOL_CHARS: usize = 200;
+const PROSE_CHARS: usize = 1000;
+const PROSE_KEYS: [&str; 5] = ["body", "description", "content", "text", "message"];
 /// An own tool call: `recall`, `remember`, `forget` and `stats` are OpenRecall's doing, so the short form leaves them out.
 const OWN_TOOL: &str = "mcp__plugin_openrecall_openrecall__";
 const TOOL_KEYS: [&str; 8] = [
@@ -37,21 +39,21 @@ const MARK: &str = "=== NEW TURNS ===";
 /// Ticket 21's `SYSTEM`, without the `scope` field the binary now sets.
 const EXTRACT: &str = r#"You extract lasting facts from one Claude Code session, for a memory store that later sessions on the same repository search.
 
-The transcript is condensed. [user] lines are the person's prompts. [assistant] lines are Claude's replies. [tool] lines are one line per tool call; tool results are left out.
+The transcript is condensed. [user] lines are the person's prompts. [task notification] marks a turn that Claude Code started itself when background work finished; the lines after it are Claude's reply to that result. [assistant] lines are Claude's replies. [tool] lines are one line per tool call; tool results are left out.
 
 Write only facts that a later session would still need after this session is gone. Each fact has one of five types:
 - decision: what was decided and why, and who decided it (the user or Claude). Always keep the reason.
 - preference: how the user wants work done.
 - pointer: where something lives in this repository, as a repo-relative path plus a symbol name. Never a line number, and never a path outside the repository (a home directory or an absolute path).
-- state: the status or next step of a ticket, PR or branch. Name the ticket, PR or branch. A next step counts only when the user asked for it or agreed to it.
+- state: the status or next step of a ticket, PR, branch or release. Name it. A next step counts only when the user asked for it or agreed to it. A check planned for that ticket, PR, branch or release (in the user's ask, a PR body, a test plan or Claude's plan) is status: write its last result (passed, failed, or not run by the end of the transcript), and name the check in the session's own words.
 - gotcha: surprising behavior someone discovered, with the condition that triggers it.
 
 Never write:
 - a summary of what the session did ("we fixed X", "the session explored Y")
 - the task's own instructions restated as a fact
 - things only true inside this session: which branch is checked out, open files, a test run's output
-- the progress or next step of a check, test run or experiment that the session itself was carrying out
-- a change or next step that Claude offered or proposed and the user did not ask for or accept
+- the progress or result of a check, test run or experiment that the session itself was carrying out ("running", "in progress", "3 of 5 done", "now passes"), unless it is a planned check (see state): then only its last result is written, as a state fact
+- a change or next step that Claude offered or proposed and the user did not ask for or accept (a planned check that was not run is status, not a next step)
 - secrets, keys, tokens or passwords, or anything marked [REDACTED:...]
 - general knowledge that any engineer already has
 
@@ -292,7 +294,7 @@ fn extract(sid: &str, e: &Entry, s: &Settings, scanner: &scan::Scanner) -> Resul
         .position(|(_, end)| *end as u64 > e.cursor)
         .unwrap_or(turns.len());
     let mut detail = json!({"event": "extract", "session": sid, "from": e.cursor, "to": data.len(), "model": s.model});
-    if !turns[split..].iter().any(|(t, _)| t.real) {
+    if !turns[split..].iter().any(|(t, _)| read(t)) {
         detail["proposed"] = json!(0);
         return Ok(detail);
     }
@@ -573,13 +575,13 @@ fn candidates(
     Ok((out, ranked))
 }
 
-/// Ticket 17's input: real prompts, assistant text and one line per tool call, tool results left out, with the
-/// marker before the first turn the last run did not read. Returns the text and whether the marker is in it.
+/// Ticket 17's input: each turn that `read` holds, as assistant text and one line per tool call, tool results left
+/// out, with the marker before the first turn the last run did not read. Returns the text and whether the marker is in it.
 fn condense(turns: &[(Turn, usize)], split: usize) -> (String, bool) {
     let mut out: Vec<String> = vec![];
     let (mut past, mut marked) = (false, false);
     for (i, (t, _)) in turns.iter().enumerate() {
-        if !t.real {
+        if !read(t) {
             continue;
         }
         if i >= split && !past {
@@ -589,35 +591,53 @@ fn condense(turns: &[(Turn, usize)], split: usize) -> (String, bool) {
                 marked = true;
             }
         }
-        out.push(short_form(t));
+        let head = if t.real { format!("[user] {}", t.ask) } else { "[task notification]".into() };
+        out.push(lines(t, head, true));
     }
     (out.join("\n"), marked)
+}
+
+/// A turn the extraction input holds: a real prompt, or a task notification that Claude answered in text.
+fn read(t: &Turn) -> bool {
+    t.real || t.events.iter().any(|e| matches!(e, Event::Text(_)))
 }
 
 /// One turn's lines of the short form: its prompt, the assistant's text and one line per tool call that is not
 /// OpenRecall's own.
 pub fn short_form(t: &Turn) -> String {
-    let mut out = vec![format!("[user] {}", t.ask)];
+    lines(t, format!("[user] {}", t.ask), false)
+}
+
+fn lines(t: &Turn, head: String, prose: bool) -> String {
+    let mut out = vec![head];
     for event in &t.events {
         match event {
             Event::Text(text) => out.push(format!("[assistant] {text}")),
             Event::Tool(name, _) if name.starts_with(OWN_TOOL) => {}
-            Event::Tool(name, input) => out.push(format!("[tool] {}", tool_line(name, input))),
+            Event::Tool(name, input) => out.push(format!("[tool] {}", tool_line(name, input, prose))),
             Event::Output(..) => {}
         }
     }
     out.join("\n")
 }
 
-fn tool_line(name: &str, input: &Value) -> String {
-    let arg = TOOL_KEYS.iter().find_map(|k| input.get(k)).map_or_else(
-        || input.to_string(),
-        |v| v.as_str().map_or_else(|| v.to_string(), str::to_string),
-    );
-    format!(
-        "{name} {}",
-        arg.chars().take(TOOL_CHARS).collect::<String>()
-    )
+/// With `prose`, an MCP call shows up to `PROSE_CHARS` of its first prose key: the extraction input only (ticket 08).
+fn tool_line(name: &str, input: &Value, prose: bool) -> String {
+    let body = PROSE_KEYS
+        .iter()
+        .find_map(|k| input[k].as_str())
+        .filter(|_| prose && name.starts_with("mcp__"));
+    let (arg, cut) = match body {
+        Some(body) => (body.to_string(), PROSE_CHARS),
+        None => (
+            TOOL_KEYS.iter().find_map(|k| input.get(k)).map_or_else(
+                || input.to_string(),
+                |v| v.as_str().map_or_else(|| v.to_string(), str::to_string),
+            ),
+            TOOL_CHARS,
+        ),
+    };
+    format!("{name} {}", arg.chars().take(cut).collect::<String>())
 }
 
 /// The day the session was last active, from its transcript's mtime.
@@ -1181,9 +1201,13 @@ mod tests {
         let user = |t: &str| json!({"type": "user", "message": {"content": t}});
         let said = |t: &str, tool: Value| json!({"type": "assistant", "message": {"content": [{"type": "text", "text": t}, tool]}});
         let bash = json!({"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "cargo test"}});
+        let comment = json!({"type": "tool_use", "id": "t3", "name": "mcp__tracker__save_comment",
+                             "input": {"query": "ABC-12", "body": "Not run: the after-deploy check."}});
         let lines = [
             user("first ask"),
             said("first answer", bash),
+            user("<task-notification><status>completed</status><summary>exit code 0</summary></task-notification>"),
+            said("The run ended with 1 failed.", comment),
             user("<task-notification>x</task-notification>"),
             user("second ask"),
             said(
@@ -1193,15 +1217,37 @@ mod tests {
         ];
         let data: String = lines.iter().map(|l| format!("{l}\n")).collect();
         let turns = turn::turns(data.as_bytes());
-        assert_eq!(turns.len(), 3);
+        assert_eq!(turns.len(), 4);
         let whole = "[user] first ask\n[assistant] first answer\n[tool] Bash cargo test\n\
+                     [task notification]\n[assistant] The run ended with 1 failed.\n\
+                     [tool] mcp__tracker__save_comment Not run: the after-deploy check.\n\
                      [user] second ask\n[assistant] second answer\n[tool] Mystery {\"n\":1}";
         assert_eq!(condense(&turns, 0), (whole.to_string(), false));
         let (text, marked) = condense(&turns, 1);
-        assert!(
-            marked && text.contains("[tool] Bash cargo test\n=== NEW TURNS ===\n[user] second ask")
-        );
-        assert!(!condense(&turns, 3).1);
+        assert!(marked && text.contains("[tool] Bash cargo test\n=== NEW TURNS ===\n[task notification]\n"));
+        let (text, marked) = condense(&turns, 2);
+        assert!(marked && text.contains("check.\n=== NEW TURNS ===\n[user] second ask"));
+        assert!(!condense(&turns, 4).1);
+    }
+
+    #[test]
+    fn the_extraction_input_keeps_1000_characters_of_an_mcp_body_and_picks_keep_200() {
+        let mcp = "mcp__tracker__save_comment";
+        let prose = "word ".repeat(300);
+        let comment = json!({"issue": "ABC-12", "query": "q", "body": prose});
+        let kept = |line: String, name: &str| line.strip_prefix(&format!("{name} ")).unwrap().chars().count();
+        assert_eq!(kept(tool_line(mcp, &comment, true), mcp), 1000);
+        let heredoc = json!({"command": format!("cat <<'EOF' > notes.md\n{prose}EOF")});
+        assert_eq!(kept(tool_line("Bash", &heredoc, true), "Bash"), 200);
+        assert_eq!(kept(tool_line(mcp, &json!({"title": prose}), true), mcp), 200, "no prose key, no 1,000-character rule");
+        assert_eq!(tool_line(mcp, &json!({"body": 7, "text": "t"}), true), format!("{mcp} t"));
+        let t = Turn {
+            ask: "post it".into(),
+            real: true,
+            events: vec![Event::Tool(mcp.into(), comment)],
+            ..Default::default()
+        };
+        assert_eq!(short_form(&t), format!("[user] post it\n[tool] {mcp} q"), "picks keep today's line");
     }
 
     #[test]
