@@ -708,15 +708,16 @@ class HarnessTest(unittest.TestCase):
         turn_one = len("".join(json.dumps(o) + "\n" for o in lines[:2]).encode())
         memory = lambda body, expires="": "---\nname: m\ndescription: %s\nmetadata:\n  type: state\n%s---\n\n%s\n" % (
             body, "expires: %s\n" % expires if expires else "", body)
-        repo = os.path.join(folder, "home", ".openrecall", "repos", "github.com", "acme", "app")
-        for rel, body in (("abc-12-open.md", memory("ABC-12 is open.", "2099-01-01")),
-                          ("abc-12-older.md", memory("ABC-12 is open since January.", "2000-01-01")),
-                          ("replaced/abc-12-open.2026-01-01T000000Z.md", memory("ABC-12 is planned.")),
-                          ("../../../../global/deploy-days.md", memory("Deploys go out on Fridays.")),
-                          ("../../../../../.claude/projects/PROJECT/memory/abc-12-notes.md", memory("ABC-12 notes: rows.")),
-                          ("../../../../../.claude/projects/PROJECT/memory/MEMORY.md", "- ABC-12 notes")):
-            os.makedirs(os.path.dirname(os.path.join(repo, rel)), exist_ok=True)
-            with open(os.path.join(repo, rel), "w") as fh:
+        repo = ".openrecall/repos/github.com/acme/app/"
+        for rel, body in ((repo + "abc-12-open.md", memory("ABC-12 is open.", "2099-01-01")),
+                          (repo + "abc-12-older.md", memory("ABC-12 is open since January.", "2000-01-01")),
+                          (repo + "replaced/abc-12-open.2026-01-01T000000Z.md", memory("ABC-12 is planned.")),
+                          (".openrecall/global/deploy-days.md", memory("Deploys go out on Fridays.")),
+                          (".claude/projects/PROJECT/memory/abc-12-notes.md", memory("ABC-12 notes: rows.")),
+                          (".claude/projects/PROJECT/memory/MEMORY.md", "- ABC-12 notes")):
+            path = os.path.join(folder, "home", rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as fh:
                 fh.write(body)
         orhome = os.path.join(folder, "home", ".openrecall")
         os.makedirs(os.path.join(orhome, "extract"))
