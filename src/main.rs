@@ -90,9 +90,9 @@ fn handoff() -> Result<()> {
         println!("{}", json!({"systemMessage": due.join("\n")}));
     }
     let source = input["source"].as_str().unwrap_or("startup");
-    let branch = git::Repo::find(input["cwd"].as_str().unwrap_or(""))
-        .and_then(|r| r.branch())
-        .unwrap_or_default();
+    let repo = git::Repo::find(input["cwd"].as_str().unwrap_or(""));
+    let branch = repo.as_ref().and_then(|r| r.branch()).unwrap_or_default();
+    let identity = repo.map(|r| r.identity).unwrap_or_default();
     let (_lock, mut s) = load_session(&sid)?;
     match source {
         "compact" => {
@@ -101,7 +101,7 @@ fn handoff() -> Result<()> {
             log(json!({"event": "ledger_cleared", "session": sid}));
         }
         "resume" | "fork" => {}
-        _ => s = json!({"branch": branch, "turns": 0, "ledger": []}),
+        _ => s = json!({"branch": branch, "repo": identity, "turns": 0, "ledger": []}),
     }
     s["source"] = json!(source);
     save_session(&sid, &s)?;
@@ -552,8 +552,11 @@ fn capture_job() -> Result<()> {
     let scanner = git::is_task(&head).then(scan::Scanner::new);
     let (_lock, mut s) = load_session(&sid)?;
     let last = s["branch"].as_str().map(str::to_string);
+    let same_repo = s["repo"]
+        .as_str()
+        .is_some_and(|kept| repo.as_ref().is_none_or(|r| r.identity == kept));
     let branch = match &last {
-        Some(kept) if !git::is_task(&head) => kept.clone(),
+        Some(kept) if same_repo && !git::is_task(&head) => kept.clone(),
         _ => head.clone(),
     };
     let scanner = scanner.or_else(|| git::is_task(&branch).then(scan::Scanner::new));
@@ -568,6 +571,9 @@ fn capture_job() -> Result<()> {
         }
     }
     s["branch"] = json!(branch);
+    if let Some(repo) = &repo {
+        s["repo"] = json!(repo.identity);
+    }
     if turn.real && job["stop_hook_active"] != true {
         let turns = s["turns"].as_u64().unwrap_or(0) + 1;
         s["turns"] = json!(turns);

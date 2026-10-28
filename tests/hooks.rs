@@ -659,6 +659,27 @@ fn a_turn_that_ends_on_trunk_writes_the_record_of_the_branch_it_started_on() {
 }
 
 #[test]
+fn a_turn_that_ends_on_trunk_in_another_repo_writes_nothing_there() {
+    let w = World::new("trunk-repos");
+    w.branch("feat/x");
+    start(&w, "E");
+    turn(&w, "E", "Build ABC-12 so exports stop failing on empty rows", "Built it.");
+    let api = w.repo("api", Some("git@github.com:someone/api.git"));
+    api.branch("main");
+    turn(&api, "E", "merge the api fix into main", "Merged into main.");
+    let handoffs = w.home.join(".openrecall/repos/github.com/someone/api/handoffs");
+    assert!(fs::read_dir(&handoffs).map_or(true, |mut d| d.next().is_none()), "nothing in {}", handoffs.display());
+    assert!(w.record("feat--x").unwrap().contains("## Last ask\nBuild ABC-12"));
+    assert!(log_of(&w, "trunk").is_empty());
+
+    put(&w.home.join(".openrecall/sessions/O.json"), &json!({"branch": "feat/x", "turns": 1, "ledger": []}).to_string());
+    w.branch("main");
+    turn(&w, "O", "merge it into main", "Merged into main.");
+    assert!(w.record("feat--x").unwrap().contains("## Last ask\nBuild ABC-12"), "a state from 0.10.1 keeps no branch");
+    assert!(log_of(&w, "trunk").is_empty());
+}
+
+#[test]
 fn idle_records_retire_at_session_start() {
     let w = World::new("retire");
     w.branch("feat/old");
