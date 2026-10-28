@@ -23,7 +23,7 @@ The state of a pointer whose cited path no longer exists, or whose code symbol n
 _Avoid_: stale, broken link, drift
 
 **State**:
-A fact about the current status or next step of a ticket, PR or branch. It expires.
+A fact about the current status or next step of a ticket, PR, branch or release. It expires.
 _Avoid_: progress, status note
 
 **Gotcha**:
@@ -93,7 +93,7 @@ The way a handoff record reaches a session. Alias: the prompt names one of the a
 _Avoid_: trigger, source, path route (the identifier route also matches paths), writer route
 
 **Task hop**:
-A session that switches to a new task's branch after it starts, so the branch it started on belongs to the previous task. A rename keeps the task; a hop changes it.
+A session that switches to a new task's branch after it starts, so the branch it started on belongs to the previous task. A rename keeps the task; a hop changes it. A switch to a trunk branch is not a hop: the turn stays with the task it started on.
 _Avoid_: branch switch, context switch
 
 **Retired**:
@@ -143,7 +143,7 @@ A skip rule that drops recall for one prompt, such as a task notification or a p
 _Avoid_: ignored prompt, filtered prompt
 
 **Task notification**:
-A user turn that Claude Code sends itself when background work finishes. It is not a prompt: it never triggers recall and never counts as a turn.
+A user turn that Claude Code sends itself when background work finishes. It is not a prompt: it never triggers recall, never counts as a turn and never becomes the last ask. The answer Claude gives after it is still the task's last answer.
 _Avoid_: system prompt, background message
 
 **Real prompt**:
@@ -212,12 +212,16 @@ _Avoid_: capture, summarization, ingestion
 The step in extraction that compares each proposed fact with the existing memories most like it, and writes the fact new, skips it as a repeat, or replaces an existing fact with a merged text. Built-in memories, global memories and handoff records are never replaced.
 _Avoid_: merge, consolidation, cleanup
 
+**Reconcile**:
+The part of dedupe that rewrites each other memory of the repo that a new fact makes out of date. A memory whose last change is later than the end of the session's last turn is newer than the fact and wins where they disagree.
+_Avoid_: strike (that is a failed extraction run), update, sync
+
 **Provider**:
 The LLM service that extraction and picks send session text to, chosen by the user. OpenRecall has no default provider; with none set, extraction and picks are off.
 _Avoid_: vendor, backend, model (one provider serves many models)
 
 **Quiet**:
-A session whose transcript has not changed for 30 minutes. A quiet session can still resume; its later turns are extracted when it goes quiet again.
+A session whose transcript's last line with a timestamp is at least 30 minutes old. A quiet session can still resume; its later turns are extracted when it goes quiet again.
 _Avoid_: idle, finished, stale
 
 **Cursor**:
