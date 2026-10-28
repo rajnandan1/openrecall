@@ -544,8 +544,8 @@ impl Session {
     }
 }
 
-/// The harness's `used_signal`: the turn's assistant text or tool inputs hold the memory's file name, which its address
-/// ends with (issue 37), or an identifier of the line that the prompt does not hold.
+/// The harness's `used_signal`: the turn's assistant text or tool inputs name the memory's file name, the end of its
+/// address, as a whole word (issue 37), or hold an identifier of the line that the prompt does not hold.
 fn used(t: &Turn, ids: &[String], address: &str) -> bool {
     let asked: HashSet<&str> = IDENT.find_iter(&t.ask).map(|m| m.as_str()).collect();
     let mut texts = vec![];
@@ -559,7 +559,10 @@ fn used(t: &Turn, ids: &[String], address: &str) -> bool {
     }
     let after = format!("{}\n{}", texts.join("\n"), inputs.join("\n"));
     let stem = address.rsplit('/').next().unwrap_or("");
-    (!stem.is_empty() && after.contains(stem)) || ids.iter().any(|i| !asked.contains(i.as_str()) && after.contains(i.as_str()))
+    let word = |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    let named = !stem.is_empty()
+        && after.match_indices(stem).any(|(i, _)| !word(after[..i].chars().next_back()) && !word(after[i + stem.len()..].chars().next()));
+    named || ids.iter().any(|i| !asked.contains(i.as_str()) && after.contains(i.as_str()))
 }
 
 /// The fallback for a line from before 0.10.0: the identifiers of the memory's file as it stands now, by the harness's

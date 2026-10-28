@@ -335,7 +335,8 @@ fn an_injection_is_used_when_its_turn_names_its_address_or_file_name() {
     h.log(&[
         recall("2026-01-10T05:00:00Z", "S1", 30, injected(ask, "app/export-rules", none.clone())),
         recall("2026-01-10T05:10:00Z", "S2", 30, injected(ask, "app/export-rules", none.clone())),
-        recall("2026-01-10T05:20:00Z", "S3", 30, injected(ask, "app/export-rules", none)),
+        recall("2026-01-10T05:20:00Z", "S3", 30, injected(ask, "app/export-rules", none.clone())),
+        recall("2026-01-10T05:30:00Z", "S4", 30, injected(ask, "app/export-rules", none)),
     ]);
     h.transcript("S1", &[
         user("2026-01-10T05:00:01.000Z", ask, json!({})),
@@ -349,8 +350,12 @@ fn an_injection_is_used_when_its_turn_names_its_address_or_file_name() {
         user("2026-01-10T05:20:01.000Z", ask, json!({})),
         said("2026-01-10T05:20:05.000Z", "See app/import-rules for that."),
     ]);
+    h.transcript("S4", &[
+        user("2026-01-10T05:30:01.000Z", ask, json!({})),
+        said("2026-01-10T05:30:05.000Z", "See app/export-rules-2 and app/old-export-rules for that."),
+    ]);
     h.job();
-    assert_eq!(h.row("2026-01-10")["used_signal"], json!({"yes": 2, "judged": 3}));
+    assert_eq!(h.row("2026-01-10")["used_signal"], json!({"yes": 2, "judged": 4}));
 }
 
 /// Spec section 5.4: a delivered pick joins its prompt by `promptId` and its pick line by `prompt_id`.

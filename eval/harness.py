@@ -1074,15 +1074,16 @@ def line_idents(path):
 
 
 def used_signal(case, s, path, address, idents=None):
-    """Ticket 19 item 5 and issue 37: the next assistant turn names the memory's file name, the end of its address, or
-    an identifier of the recall line (`idents`, else read from `path`) that the prompt lacks. None with no transcript."""
+    """Ticket 19 item 5 and issue 37: the next assistant turn names the memory's file name, the end of its address, as
+    a whole word, or an identifier of the recall line (`idents`, else from `path`) the prompt lacks. None with no transcript."""
     t = next((t for t in s["turns"] if t["at"] == case["at"]), None) if s else None
     if not t:
         return None
     after = "\n".join(x for g in t["groups"] for x in g["text"]) + "\n" + "\n".join(json.dumps(i) for _, i in t["tools"])
     ids = set(line_idents(path) if idents is None else idents) - set(IDENT.findall(case["prompt"]))
-    stem = address.rsplit("/", 1)[-1]
-    return (bool(stem) and stem in after) or any(i in after for i in ids)
+    stem = re.escape(address.rsplit("/", 1)[-1])
+    named = bool(stem) and re.search(r"(?<![A-Za-z0-9_-])%s(?![A-Za-z0-9_-])" % stem, after)
+    return bool(named) or any(i in after for i in ids)
 
 
 def fnv(text):

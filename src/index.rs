@@ -642,7 +642,7 @@ fn symbol(token: &str) -> Option<&str> {
 }
 
 /// Tickets 19 and 21: `- <type> <date> <address>: <text>`, the body when it fits in 200 characters or the line in
-/// `room`, else the description and, within the same 200, the body's identifiers it lacks, marked `(also names: …)`.
+/// `room`, else the description and the body's identifiers it lacks in 200, plus an uncounted `(also names: …)` mark.
 pub fn line(c: &Candidate, room: usize) -> String {
     let prefix = prefix(c);
     let body = squash(&c.body);
