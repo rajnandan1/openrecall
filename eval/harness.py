@@ -682,8 +682,8 @@ def extraction_lines(since, dedupe_fn=None, yes=0.7):
     total = Counter()
     dropped = Counter()
     for e in runs:
-        total.update({k: e.get(k, 0) for k in ("proposed", "new", "replaced", "skipped", "normalized", "suggestions",
-                                              "tokens_in", "tokens_out")})
+        total.update({k: e.get(k, 0) for k in ("proposed", "new", "replaced", "reconciled", "skipped", "normalized",
+                                              "suggestions", "tokens_in", "tokens_out")})
         dropped.update(e.get("dropped") or {})
     cost = sum(e.get("cost", 0) for e in runs)
 
@@ -742,10 +742,11 @@ def extraction_lines(since, dedupe_fn=None, yes=0.7):
             len(strikes), len(failed), listed(failed),
             "%s at %s" % (stops[-1]["stop"], when(stops[-1]["at"])) if stops else "none",
             "%s at %s" % (off[-1]["off"], when(off[-1]["at"])) if off else "none"),
-        "- Facts: proposed %d, new %d, replaced %d, skipped %d, dropped %d (%s); names normalized %d; tokens %d in, %d "
-        "out; cost $%.2f." % (total["proposed"], total["new"], total["replaced"], total["skipped"], sum(dropped.values()),
-                             ", ".join("%s %d" % kv for kv in sorted(dropped.items())) or "none", total["normalized"],
-                             total["tokens_in"], total["tokens_out"], cost),
+        "- Facts: proposed %d, new %d, replaced %d, reconciled %d, skipped %d, dropped %d (%s); names normalized %d; "
+        "tokens %d in, %d out; cost $%.2f." % (
+            total["proposed"], total["new"], total["replaced"], total["reconciled"], total["skipped"],
+            sum(dropped.values()), ", ".join("%s %d" % kv for kv in sorted(dropped.items())) or "none",
+            total["normalized"], total["tokens_in"], total["tokens_out"], cost),
         "- Dedupe check (ticket 26; Jev, yes at %.1f or more): %d of %d written facts checked, each against its logged "
         "candidates and up to 10 unranked memories that share the most words with it. Repeats that got through: %d%s. "
         "Missed replaces of an own fact: %d%s. New facts that make a built-in file out of date: %d%s. "
@@ -1429,7 +1430,8 @@ def daily(orhome):
             pushes=count(e.get("how") for e in by["pushed"]),
             right_pushes=dict(right=verdicts["right"], wrong=verdicts["wrong"], unjudged=verdicts["unjudged"]),
             late_pushes=dict(late=late["late"], judged=late["judged"]), extraction_runs=sum("to" in e for e in ex),
-            facts=dict(new=total(ex, "new"), replaced=total(ex, "replaced"), skipped=total(ex, "skipped"),
+            facts=dict(new=total(ex, "new"), replaced=total(ex, "replaced"), reconciled=total(ex, "reconciled"),
+                       skipped=total(ex, "skipped"),
                        dropped=sum(sum((e.get("dropped") or {}).values()) for e in ex)),
             suggestions=total(ex, "suggestions"), strikes=sum("strike" in e for e in ex),
             failed_sessions=sum(bool(e.get("failed")) for e in ex), stops=sum("stop" in e for e in ex),
