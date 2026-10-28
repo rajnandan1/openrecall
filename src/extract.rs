@@ -20,6 +20,8 @@ const STRIKES: u32 = 3;
 /// Ticket 26 took the top 5 and set the switch to 10 for when a target showed up at ranks 6 to 10: the live test's
 /// repeated built-in file ranked 8th (build step 7).
 const CANDIDATES: usize = 10;
+// ken: 10 identifier matches per fact; raise when a live check finds a missed reconcile past the 10th match
+const IDENT_CANDIDATES: usize = 10;
 const TOOL_CHARS: usize = 200;
 const PROSE_CHARS: usize = 1000;
 const PROSE_KEYS: [&str; 5] = ["body", "description", "content", "text", "message"];
@@ -75,22 +77,28 @@ Answer with one JSON object and nothing else, matching this JSON schema:
 
 const EXTRACT_SCHEMA: &str = r#"{"type": "object", "additionalProperties": false, "required": ["facts", "claude_md_rules"], "properties": {"facts": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["type", "name", "description", "body"], "properties": {"type": {"type": "string", "enum": ["decision", "preference", "pointer", "state", "gotcha"]}, "name": {"type": "string"}, "description": {"type": "string"}, "body": {"type": "string"}}}}, "claude_md_rules": {"type": "array", "items": {"type": "string"}}}}"#;
 
-/// Ticket 26's `MERGE_SYSTEM`.
-const MERGE: &str = r#"You keep a memory store free of near-copies. You get new facts just extracted from one Claude Code session, and the existing memories of the same repository that look most like them. Decide each new fact:
+/// Ticket 26's `MERGE_SYSTEM`, with reconcile, newer wins and the skip's address (spec 3.4 of reconcile notes on write).
+const MERGE: &str = r#"You keep a memory store free of near-copies. You get new facts just extracted from one Claude Code session, and the existing memories of the same repository that look most like them or name the same ticket ID, PR number or path. The input gives the time at which the session's last new turn ended, and each memory's last change, to the second. Decide each new fact:
 
-- skip: an existing memory already states it, so a later session that read that memory would learn nothing new from the fact.
-- replace: the new fact is about the same thing as one existing memory whose address does not start with builtin/, and it changes that memory or adds to it. Give that memory's address, and write the replacement: a description and a body that hold everything in the old memory that is still true plus everything in the new fact. Where they disagree, the new fact wins.
-- new: no existing memory states it, or the only memory about the same thing has an address that starts with builtin/. Leave address, description and body empty.
+- skip: an existing memory already states it, so a later session that read that memory would learn nothing new from the fact. Give the address of that memory.
+- replace: the new fact is about the same thing as one existing memory whose address does not start with builtin/ or global/, and it changes that memory or adds to it. Give that memory's address, and write the replacement: a description and a body that hold everything in the old memory that is still true plus everything in the new fact. Where they disagree, the new fact wins, unless the memory changed after the session's last new turn ended: then the memory is newer and wins.
+- new: no existing memory states it, or the only memory about the same thing has an address that starts with builtin/ or global/. Leave address, description and body empty.
 
-Memories whose address starts with builtin/ are never replaced. If two new facts change the same memory, put both into one replacement and skip the other. When unsure, choose new.
+When unsure between new, skip and replace, choose new. A memory that changed after the session's last new turn ended is newer than every new fact. Where it disagrees with a fact, it wins: a replacement or a rewrite keeps its version, and a fact that it shows to be out of date as a whole is skipped, with its address.
 
-A replacement follows the store's rules: identifiers verbatim (paths, symbols, ticket IDs, PR numbers, commands), never a line number, a description of at most 150 characters that states the fact itself, a body in plain sentences.
+Then add a reconcile decision for every other existing memory whose address does not start with builtin/ or global/ and that the fact makes wrong or out of date, for example a memory that says a ticket is open when the fact says it is closed. Give that memory's address and its rewrite: a description and a body that keep its subject and everything in it that is still true, with only the out-of-date part changed. Never reconcile a memory that changed after the session's last new turn ended. When unsure whether a memory is out of date, leave it.
 
-Answer with one JSON object and nothing else, one decision per new fact, matching this JSON schema:
+A fact marked remembered is already in the store. Decide it as new, and add its reconcile decisions as for any fact.
+
+Memories whose address starts with builtin/ or global/ are never replaced or reconciled. If two new facts change the same memory, put both into one rewrite: one replace or reconcile decision for that memory. A fact whose only change went into that rewrite is skipped.
+
+A replacement or a rewrite follows the store's rules: identifiers verbatim (paths, symbols, ticket IDs, PR numbers, commands), never a line number, a description of at most 150 characters that states what the memory itself says (for a rewrite, its own subject, not the new fact), a body in plain sentences.
+
+Answer with one JSON object and nothing else, one new, skip or replace decision per new fact plus its reconcile decisions, matching this JSON schema:
 "#;
 
 /// `fact` is the new fact's number: as a string, Sonnet wrote the fact's name in 9 of 37 runs (ticket 26).
-const MERGE_SCHEMA: &str = r#"{"type": "object", "additionalProperties": false, "required": ["decisions"], "properties": {"decisions": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["fact", "action", "address", "description", "body"], "properties": {"fact": {"type": "integer"}, "action": {"type": "string", "enum": ["new", "skip", "replace"]}, "address": {"type": "string"}, "description": {"type": "string"}, "body": {"type": "string"}}}}}}"#;
+const MERGE_SCHEMA: &str = r#"{"type": "object", "additionalProperties": false, "required": ["decisions"], "properties": {"decisions": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["fact", "action", "address", "description", "body"], "properties": {"fact": {"type": "integer"}, "action": {"type": "string", "enum": ["new", "skip", "replace", "reconcile"]}, "address": {"type": "string"}, "description": {"type": "string"}, "body": {"type": "string"}}}}}}"#;
 
 /// A session's place in the extraction queue (ticket 17): one file per session under `extract/`.
 #[derive(Serialize, Deserialize, Default)]
@@ -298,6 +306,8 @@ struct Fact {
     name: String,
     description: String,
     body: String,
+    /// The address of the memory that `remember` stored, for a remembered fact.
+    remembered: Option<String>,
 }
 
 struct Decision {
@@ -391,13 +401,20 @@ fn extract(sid: &str, e: &Entry, s: &Settings, scanner: &scan::Scanner) -> Resul
     let scopes = index::scopes(&home, &crate::user_home(), Some(&e.identity), main);
     let mut ix = index::Index::open(&home)?;
     ix.sync(&scopes)?;
-    let found = facts
+    let since = match e.cursor {
+        0 => Some(0),
+        cursor => data.get(..cursor as usize).and_then(turn::last_time),
+    };
+    if let Some(since) = since {
+        facts.extend(remembered(&ix, &scopes, &own, sid, since)?);
+    }
+    let today = &record::iso(crate::now_secs())[..10];
+    let (found, ranked): (Vec<_>, Vec<_>) = facts
         .iter()
-        .map(|f| {
-            let query = format!("{} {} {}", f.name.replace('-', " "), f.description, f.body);
-            ix.search(&index::terms(&query), &scopes, CANDIDATES)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+        .map(|f| candidates(&ix, &scopes, f, today))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .unzip();
     let stat = |address: &str| {
         fs::metadata(home.join("repos").join(format!("{address}.md")))
             .ok()
@@ -409,11 +426,13 @@ fn extract(sid: &str, e: &Entry, s: &Settings, scanner: &scan::Scanner) -> Resul
         .filter(|c| c.address.starts_with(&own))
         .map(|c| (c.address.as_str(), stat(&c.address)))
         .collect();
+    let ended = turn::last_time(&data).map_or_else(crate::now_ms, |ms| ms as u128);
+    let stamp = format!("{sid} {}", record::iso_ms(ended));
     let decided = if found.iter().any(|c| !c.is_empty()) {
         ask(
             s,
             &format!("{MERGE}{MERGE_SCHEMA}"),
-            &merge_input(&e.identity, &facts, &found),
+            &merge_input(&e.identity, &record::iso((ended / 1000) as u64), &facts, &found),
             ("decisions", MERGE_SCHEMA),
             &mut usage,
             decisions,
@@ -424,39 +443,56 @@ fn extract(sid: &str, e: &Entry, s: &Settings, scanner: &scan::Scanner) -> Resul
 
     let now = crate::now_ms();
     let secs = (now / 1000) as u64;
-    let stamp = format!("{sid} {}", record::iso_ms(now));
     let suggested = suggest(&dir, &rules, sid, &date, scanner, &mut secrets)?;
     let mut actions: HashMap<&str, usize> = HashMap::new();
-    let mut replaced: HashSet<&str> = HashSet::new();
-    for (i, (f, cands)) in facts.iter().zip(&found).enumerate() {
-        let mut line = json!({"event": "dedupe", "session": sid, "name": f.name,
-            "candidates": cands.iter().map(|c| json!({"address": c.address, "bm25": (c.bm25 * 100.0).round() / 100.0})).collect::<Vec<_>>()});
-        let d = decided.iter().find(|d| d.fact == i);
-        let action = match d {
+    let mut changed: HashSet<&str> = HashSet::new();
+    let kept: HashSet<&str> = facts.iter().filter_map(|f| f.remembered.as_deref()).collect();
+    let refused = |d: &Decision, changed: &HashSet<&str>| {
+        if !d.address.starts_with(&own) {
+            Some("not own")
+        } else if kept.contains(d.address.as_str()) {
+            Some("remembered")
+        } else if changed.contains(d.address.as_str()) {
+            Some("replaced twice")
+        } else if d.description.is_empty() || d.body.is_empty() {
+            Some("empty")
+        } else if before.get(d.address.as_str()) != Some(&stat(&d.address)) {
+            Some("changed")
+        } else {
+            None
+        }
+    };
+    let secret = |d: &Decision| scanner.redact(&format!("{}\n{}", d.description, d.body)).1;
+    let written = facts.iter().zip(&found).enumerate().filter(|(_, (f, _))| f.remembered.is_none());
+    for (i, (f, cands)) in written {
+        let shown: Vec<Value> = cands
+            .iter()
+            .enumerate()
+            .map(|(k, c)| {
+                let mut v = json!({"address": c.address, "bm25": (c.bm25 * 100.0).round() / 100.0});
+                if k >= ranked[i] {
+                    v["ident"] = json!(true);
+                }
+                v
+            })
+            .collect();
+        let mut line = json!({"event": "dedupe", "session": sid, "name": f.name, "candidates": shown});
+        let listed = |d: &Decision| cands.iter().any(|c| c.address == d.address);
+        let action = match decided.iter().find(|d| d.fact == i && d.action != "reconcile") {
             Some(d) if d.action == "skip" => {
                 line["address"] = json!(d.address);
+                if !listed(d) {
+                    line["why"] = json!("not a candidate");
+                }
                 "skip"
             }
             Some(d) if d.action == "replace" => {
-                let why = if !cands.iter().any(|c| c.address == d.address) {
-                    Some("not a candidate")
-                } else if !d.address.starts_with(&own) {
-                    Some("not own")
-                } else if replaced.contains(d.address.as_str()) {
-                    Some("replaced twice")
-                } else if d.description.is_empty() || d.body.is_empty() {
-                    Some("empty")
-                } else if before.get(d.address.as_str()) != Some(&stat(&d.address)) {
-                    Some("changed")
-                } else {
-                    None
-                };
-                let hits = || scanner.redact(&format!("{}\n{}", d.description, d.body)).1;
+                let why = if listed(d) { refused(d, &changed) } else { Some("not a candidate") };
                 if let Some(why) = why {
                     line["why"] = json!(why);
                     line["address"] = json!(write_new(&dir, &e.identity, f, &stamp, secs)?);
                     "new"
-                } else if let hits @ [rule, ..] = hits().as_slice() {
+                } else if let hits @ [rule, ..] = secret(d).as_slice() {
                     line["address"] = json!(d.address);
                     line["rule"] = json!(rule);
                     *dropped.entry("secret").or_default() += 1;
@@ -464,9 +500,9 @@ fn extract(sid: &str, e: &Entry, s: &Settings, scanner: &scan::Scanner) -> Resul
                     "dropped"
                 } else {
                     let path = home.join("repos").join(format!("{}.md", d.address));
-                    line["copy"] = json!(replace(&path, &e.identity, f, d, &stamp, secs)?);
+                    line["copy"] = json!(replace(&path, &e.identity, &f.kind, d, &stamp, secs)?);
                     line["address"] = json!(d.address);
-                    replaced.insert(&d.address);
+                    changed.insert(&d.address);
                     "replace"
                 }
             }
@@ -479,10 +515,38 @@ fn extract(sid: &str, e: &Entry, s: &Settings, scanner: &scan::Scanner) -> Resul
         crate::log(line);
         *actions.entry(action).or_default() += 1;
     }
+    let mut reconciled = 0;
+    for (i, f) in facts.iter().enumerate() {
+        for d in decided.iter().filter(|d| d.fact == i && d.action == "reconcile") {
+            let mut line = json!({"event": "dedupe", "session": sid, "name": f.name, "action": "reconcile", "address": d.address});
+            if let Some(address) = &f.remembered {
+                line["remembered"] = json!(address);
+            }
+            let target = found.iter().flatten().find(|c| c.address == d.address);
+            let why = match target {
+                Some(_) => refused(d, &changed),
+                None => Some("not a candidate"),
+            };
+            if let Some(why) = why {
+                line["why"] = json!(why);
+            } else if let hits @ [rule, ..] = secret(d).as_slice() {
+                line["why"] = json!("secret");
+                line["rule"] = json!(rule);
+                secrets.extend_from_slice(hits);
+            } else if let Some(c) = target {
+                let path = home.join("repos").join(format!("{}.md", d.address));
+                line["copy"] = json!(replace(&path, &e.identity, &c.kind, d, &stamp, secs)?);
+                changed.insert(&d.address);
+                reconciled += 1;
+            }
+            crate::log(line);
+        }
+    }
     for (key, value) in [
         ("proposed", json!(proposed.len())),
         ("new", json!(actions.get("new").unwrap_or(&0))),
         ("replaced", json!(actions.get("replace").unwrap_or(&0))),
+        ("reconciled", json!(reconciled)),
         ("skipped", json!(actions.get("skip").unwrap_or(&0))),
         ("dropped", json!(dropped)),
         ("secret_rules", json!(secrets)),
@@ -497,6 +561,60 @@ fn extract(sid: &str, e: &Entry, s: &Settings, scanner: &scan::Scanner) -> Resul
         detail[key] = value;
     }
     Ok(detail)
+}
+
+/// The session's remembered facts: its own memories whose `source` names the session at a time after `since`, the end of
+/// what its previous run read. The memories that runs write carry the end of what they read, so they are left out.
+fn remembered(
+    ix: &index::Index,
+    scopes: &[index::Scope],
+    own: &str,
+    sid: &str,
+    since: i64,
+) -> rusqlite::Result<Vec<Fact>> {
+    let mut out = vec![];
+    for c in ix.all(scopes)? {
+        let mut stamp = c.source.split_whitespace();
+        let after = stamp.next() == Some(sid) && stamp.next().and_then(turn::ms_of).is_some_and(|ms| ms > since);
+        if after && c.address.starts_with(own) {
+            out.push(Fact {
+                kind: c.kind,
+                name: c.name,
+                description: c.description,
+                body: c.body,
+                remembered: Some(c.address),
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// A fact's candidates, and how many of them come first from bm25: its top 10, then up to 10 more that share a ticket
+/// ID, PR number or path with it in their file name, name, description or body, from a search on those identifiers.
+fn candidates(
+    ix: &index::Index,
+    scopes: &[index::Scope],
+    f: &Fact,
+    today: &str,
+) -> rusqlite::Result<(Vec<Candidate>, usize)> {
+    let query = format!("{} {} {}", f.name.replace('-', " "), f.description, f.body);
+    let mut out = ix.search_unexpired(&index::terms(&query), scopes, CANDIDATES, today)?;
+    let ranked = out.len();
+    let mut ids = index::rule_identifiers(&query);
+    ids.sort();
+    ids.dedup();
+    let shared: Vec<Candidate> = ix
+        .search_unexpired(&ids, scopes, usize::MAX, today)?
+        .into_iter()
+        .filter(|c| {
+            let stem = c.address.rsplit('/').next().unwrap_or("");
+            !out.iter().any(|b| b.address == c.address)
+                && index::shares_identifier(&query, &format!("{stem} {} {} {}", c.name, c.description, c.body))
+        })
+        .take(IDENT_CANDIDATES)
+        .collect();
+    out.extend(shared);
+    Ok((out, ranked))
 }
 
 /// Ticket 17's input: each turn that `read` holds, as assistant text and one line per tool call, tool results left
@@ -574,19 +692,18 @@ fn session_date(transcript: &str) -> String {
     record::iso(secs)[..10].to_string()
 }
 
-/// The dedupe call's input: every candidate once, as much of it as the index holds, then each new fact with the
-/// addresses it looks like (ticket 26). A built-in file goes in whole too: what a fact repeats is often past its start.
-fn merge_input(identity: &str, facts: &[Fact], found: &[Vec<Candidate>]) -> String {
+/// The dedupe call's input: when the run's last new turn ended, every candidate once with its last change, as much of
+/// it as the index holds, then each new fact with the addresses it looks like (ticket 26). A built-in file goes in
+/// whole too: what a fact repeats is often past its start.
+fn merge_input(identity: &str, ended: &str, facts: &[Fact], found: &[Vec<Candidate>]) -> String {
     let mut seen = HashSet::new();
     let memories: Vec<String> = found
         .iter()
         .flatten()
         .filter(|c| seen.insert(c.address.as_str()))
         .map(|c| {
-            format!(
-                "{} [{}] {}\n{}\n{}",
-                c.address, c.kind, c.date, c.description, c.body
-            )
+            let time = changed_at(c).map_or(String::new(), |t| format!(" {t}"));
+            format!("{} [{}]{time}\n{}\n{}", c.address, c.kind, c.description, c.body)
         })
         .collect();
     let new: Vec<String> = facts
@@ -595,8 +712,9 @@ fn merge_input(identity: &str, facts: &[Fact], found: &[Vec<Candidate>]) -> Stri
         .enumerate()
         .map(|(i, (f, cands))| {
             let like: Vec<&str> = cands.iter().map(|c| c.address.as_str()).collect();
+            let mark = if f.remembered.is_some() { ", remembered" } else { "" };
             format!(
-                "Fact {i} [{}] {}\n{}\n{}\nLooks like: {}",
+                "Fact {i} [{}{mark}] {}\n{}\n{}\nLooks like: {}",
                 f.kind,
                 f.name,
                 f.description,
@@ -610,10 +728,22 @@ fn merge_input(identity: &str, facts: &[Fact], found: &[Vec<Candidate>]) -> Stri
         })
         .collect();
     format!(
-        "Repository: {identity}\n\nExisting memories:\n\n{}\n\nNew facts:\n\n{}",
+        "Repository: {identity}\nLast new turn ended: {ended}\n\nExisting memories:\n\n{}\n\nNew facts:\n\n{}",
         memories.join("\n\n"),
         new.join("\n\n")
     )
+}
+
+/// A candidate's last change to the second: the time in its `updated`, else in its `source`; a built-in file's mtime.
+fn changed_at(c: &Candidate) -> Option<String> {
+    let secs = if c.address.starts_with("builtin/") {
+        u64::try_from(c.mtime / 1_000_000_000).ok()
+    } else {
+        [&c.updated, &c.source]
+            .into_iter()
+            .find_map(|stamp| record::parse_iso(stamp.split_whitespace().nth(1)?))
+    };
+    secs.map(record::iso)
 }
 
 fn expiry(kind: &str, secs: u64) -> String {
@@ -653,7 +783,7 @@ fn write_new(
 fn replace(
     path: &Path,
     identity: &str,
-    f: &Fact,
+    kind: &str,
     d: &Decision,
     stamp: &str,
     secs: u64,
@@ -672,7 +802,7 @@ fn replace(
         &index::render(&Memory {
             name: if old.name.is_empty() { stem } else { old.name },
             description: d.description.clone(),
-            kind: f.kind.clone(),
+            kind: kind.into(),
             scope: if old.scope.is_empty() {
                 identity.into()
             } else {
@@ -680,7 +810,7 @@ fn replace(
             },
             source: old.source,
             updated: stamp.into(),
-            expires: expiry(&f.kind, secs),
+            expires: expiry(kind, secs),
             body: d.body.clone(),
         }),
     )?;
@@ -775,6 +905,7 @@ fn fact_of(v: &Value) -> Result<Fact, &'static str> {
         name: name.into(),
         description: description.into(),
         body: body.into(),
+        remembered: None,
     })
 }
 
