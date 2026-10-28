@@ -48,7 +48,7 @@ Write only facts that a later session would still need after this session is gon
 - decision: what was decided and why, and who decided it (the user or Claude). Always keep the reason.
 - preference: how the user wants work done.
 - pointer: where something lives in this repository, as a repo-relative path plus a symbol name. Never a line number, and never a path outside the repository (a home directory or an absolute path).
-- state: the status or next step of a ticket, PR, branch or release. Name it. A next step counts only when the user asked for it or agreed to it. A check planned for that ticket, PR, branch or release (in the user's ask, a PR body, a test plan or Claude's plan) is status: write its last result (passed, failed, or not run by the end of the transcript), and name the check in the session's own words.
+- state: the status or next step of a ticket, PR, branch or release. Name it. A next step counts only when the user asked for it or agreed to it. A check planned for that ticket, PR, branch or release (in the user's ask, a PR body, a test plan or Claude's plan) is status: always write its last result (passed, failed, or not run by the end of the transcript), and name the check in the session's own words, with the ticket ID when the session names one.
 - gotcha: surprising behavior someone discovered, with the condition that triggers it.
 
 Never write:
