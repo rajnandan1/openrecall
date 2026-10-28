@@ -668,11 +668,38 @@ def unranked(e, orhome, n=10):
     return [a for k, a in shared[:n] if k]
 
 
+def reconciles(events):
+    """Spec 4.3: each applied reconcile of a log with the address of its fact's stand-in, as the log holds no fact
+    text: the remembered memory, else the address of the fact's own decision (the new file, the replacement, or the
+    memory a skip names)."""
+    own, out = {}, []
+    for e in events:
+        if e.get("event") == "dedupe" and e.get("action") != "reconcile":
+            own[(e["session"], e["name"])] = e.get("address")
+        elif e.get("event") == "dedupe" and e.get("copy"):
+            out.append((e, e.get("remembered") or own.get((e["session"], e["name"]))))
+    return out
+
+
+def rewrite_check(e, fact, path_of, dedupe_fn):
+    """judge.dedupe_check on one reconcile: whether the fact's stand-in makes the `replaced/` copy out of date
+    (`supersede`), and whether the rewrite keeps every still-true detail of that copy (`kept`). None when a file is
+    gone."""
+    path = path_of(e["address"])
+    copy = os.path.join(os.path.dirname(path), "replaced", e["copy"])
+    if not (fact and os.path.isfile(path_of(fact)) and os.path.isfile(path) and os.path.isfile(copy)):
+        return None
+    old = memory_text(copy)
+    return dict(supersede=dedupe_fn(memory_text(path_of(fact)), [old], None)["supersede"][0],
+                kept=dedupe_fn(memory_text(path), [], old)["kept"])
+
+
 def extraction_lines(since, dedupe_fn=None, yes=0.7):
     """Tickets 17, 21 and 26 from the live log: extraction health, the facts written, Jev's check of each written fact
-    against its logged candidates and the unranked memories most like it (asked once, cached in dedupe.jsonl), store
-    size and the CLAUDE.md suggestions added since the last report. `dedupe_fn(fact, candidates, old)` returns
-    judge.dedupe_check's answer; None asks nothing."""
+    against its logged candidates and the unranked memories most like it, and of each applied reconcile against its
+    fact's stand-in (rewrite_check; each asked once, cached in dedupe.jsonl), store size and the CLAUDE.md suggestions
+    added since the last report. `dedupe_fn(fact, candidates, old)` returns judge.dedupe_check's answer; None asks
+    nothing."""
     orhome = os.path.dirname(EVAL)
     log = os.path.join(orhome, "log", "openrecall.jsonl")
     events = read(log) if os.path.exists(log) else []
@@ -691,15 +718,15 @@ def extraction_lines(since, dedupe_fn=None, yes=0.7):
     cost = sum(e.get("cost", 0) for e in runs)
 
     cache_path = os.path.join(EVAL, "dedupe.jsonl")
+    key = lambda e: (e["session"], e["name"], e["at"], e["action"], e["address"])
     # A row from before build step 7 was checked against the logged candidates alone: it is asked again, once.
-    cache = {(r["session"], r["name"], r["at"]): r for r in (read(cache_path) if os.path.exists(cache_path) else [])
-             if r.get("unranked")}
+    cache = {key(r): r for r in (read(cache_path) if os.path.exists(cache_path) else []) if r.get("unranked")}
     written = [e for e in events if e.get("event") == "dedupe" and e.get("action") in ("new", "replace")]
+    rewritten = reconciles(events)
     fresh = []
     for e in written:
-        key = (e["session"], e["name"], e["at"])
         path = address_path(e["address"], orhome)
-        if key in cache or dedupe_fn is None or not os.path.exists(path):
+        if key(e) in cache or dedupe_fn is None or not os.path.exists(path):
             continue
         cands = [c["address"] for c in e.get("candidates", []) if c["address"] != e["address"]
                  and os.path.exists(address_path(c["address"], orhome))] + unranked(e, orhome)
@@ -708,11 +735,20 @@ def extraction_lines(since, dedupe_fn=None, yes=0.7):
         got = dedupe_fn(memory_text(path), [memory_text(address_path(a, orhome)) for a in cands], old)
         fresh.append(dict(session=e["session"], name=e["name"], at=e["at"], address=e["address"], action=e["action"],
                           candidates=cands, unranked=True, **got))
+    for e, fact in rewritten:
+        got = None if key(e) in cache or dedupe_fn is None else rewrite_check(e, fact, lambda a: address_path(a, orhome),
+                                                                              dedupe_fn)
+        if got:
+            fresh.append(dict(session=e["session"], name=e["name"], at=e["at"], address=e["address"], action=e["action"],
+                              fact=fact, unranked=True, **got))
     if fresh:
         with open(cache_path, "a") as fh:
             fh.writelines(json.dumps(r) + "\n" for r in fresh)
-        cache.update({(r["session"], r["name"], r["at"]): r for r in fresh})
-    checked = [cache[k] for k in ((e["session"], e["name"], e["at"]) for e in written) if k in cache]
+        cache.update({key(r): r for r in fresh})
+    checked = [cache[key(e)] for e in written if key(e) in cache]
+    rechecked = [cache[key(e)] for e, _ in rewritten if key(e) in cache]
+    stale = [r["address"] for r in rechecked if r["supersede"] < yes]
+    thinned = [r["address"] for r in rechecked if r["kept"] < 0.5]
     flag = lambda kind, own: ["%s (%s)" % (r["address"], a) for r in checked if r["action"] == "new"
                               for a, p in zip(r["candidates"], r[kind]) if p >= yes and own(a)]
     repeats = flag("repeat", lambda a: True)
@@ -754,9 +790,11 @@ def extraction_lines(since, dedupe_fn=None, yes=0.7):
         "candidates and up to 10 unranked memories that share the most words with it. Repeats that got through: %d%s. "
         "Missed replaces of an own fact: %d%s. New facts that make a built-in file out of date: %d%s. "
         "Merges that lost old detail: %d of %d%s. Whether a merge kept the new fact's detail is not checked: the "
-        "proposed text is never stored." % (yes, len(checked), len(written), len(repeats), listed(repeats), len(missed),
-                                            listed(missed), len(builtin), listed(builtin), len(lost), len(merges),
-                                            listed(lost)),
+        "proposed text is never stored. Reconciles checked: %d of %d applied. Not out of date before the rewrite: %d%s. "
+        "Rewrites that lost old detail: %d%s." % (
+            yes, len(checked), len(written), len(repeats), listed(repeats), len(missed), listed(missed), len(builtin),
+            listed(builtin), len(lost), len(merges), listed(lost), len(rechecked), len(rewritten), len(stale),
+            listed(stale), len(thinned), listed(thinned)),
         "- Store size: %s." % (", ".join("%s %d" % kv for kv in sorted(sizes.items())) or "no OpenRecall facts yet"),
         "- CLAUDE.md suggestions added since the last report%s: %d%s." % (
             " (%s)" % since.strftime("%Y-%m-%d") if since else "", len(added), listed(added)),
@@ -1938,17 +1976,18 @@ def recalled(binary, env, queries):
     return [a for e in lines[-len(queries):] for a in e.get("addresses", [])]
 
 
-def replay_case(folder, runs=None, binary=BINARY, says=None):
+def replay_case(folder, runs=None, binary=BINARY, says=None, dedupe_fn=None):
     """Spec 3.12: a frozen case (load_case) `runs` times, each from a fresh copy in a scratch home, then its pass
     questions. The case's `home/` becomes the scratch home, its `.claude/projects/PROJECT` the project folder of a
     stand-in repo folder whose origin gives the case's `repo`; run files point `transcript` and `main` at the copies.
-    Each run's `.openrecall` (without the index) is kept in the case's `runs/<UTC time>/<n>/`. Returns the lines it
+    Each run's `.openrecall` (without the index) is kept in the case's `runs/<UTC time>/<n>/`, with `rewrites.json`:
+    rewrite_check of each applied reconcile (spec 4.3), whose rates over all runs it prints last. Returns the lines it
     prints."""
     c = load_case(folder)
     runs = runs or c["runs"]
     provider = real_provider() if c.get("provider") else None
     kept = os.path.join(folder, "runs", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%SZ"))
-    outcomes, cost = [], 0.0
+    outcomes, cost, rewrites = [], 0.0, []
     for n in range(1, runs + 1):
         tmp = scratch()
         try:
@@ -1987,15 +2026,27 @@ def replay_case(folder, runs=None, binary=BINARY, says=None):
                     hook_event_name="Stop", stop_hook_active=False, last_assistant_message="")).encode())
             seen = [[judge_check(check, c, home, binary, env, says) for check in q["checks"]] for q in c["questions"]]
             outcomes.append([all(ok for ok, _ in checks) for checks in seen])
-            cost += sum(e.get("cost") or 0 for e in logged(orhome) if e.get("event") == "extract")
+            events = logged(orhome)
+            cost += sum(e.get("cost") or 0 for e in events if e.get("event") == "extract")
+            rows = []
+            for e, fact in reconciles(events):
+                got = dedupe_fn and rewrite_check(e, fact, lambda a: scratch_path(a, home), dedupe_fn)
+                rows.append(dict(address=e["address"], copy=e["copy"], fact=fact, **(got or {})))
+            rewrites += rows
             shutil.copytree(orhome, os.path.join(kept, str(n)), ignore=shutil.ignore_patterns("index.db*"))
+            with open(os.path.join(kept, str(n), "rewrites.json"), "w") as fh:
+                json.dump(rows, fh, indent=1)
             with open(os.path.join(kept, str(n), "checks.json"), "w") as fh:
                 json.dump([dict(question=q["name"], checks=[dict(ok=ok, saw=saw) for ok, saw in checks])
                            for q, checks in zip(c["questions"], seen)], fh, indent=1)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
     lines = ["%s: %d run%s with %s, kept in %s" % (os.path.basename(folder), runs, "" if runs == 1 else "s", binary, kept)]
+    checked = [r for r in rewrites if "kept" in r]
     lines += shares([q["name"] for q in c["questions"]], outcomes) + ["Provider cost: $%.2f." % cost]
+    lines.append("Reconciles: %d applied over %d run%s, %d checked; supersede 0.7 or more: %s; kept 0.5 or more: %s." % (
+        len(rewrites), runs, "" if runs == 1 else "s", len(checked), rate(sum(r["supersede"] >= 0.7 for r in checked), len(checked)),
+        rate(sum(r["kept"] >= 0.5 for r in checked), len(checked))))
     print("\n".join(lines))
     return lines
 
@@ -2042,6 +2093,6 @@ if __name__ == "__main__":
         report_set(os.path.join(EVAL, rest[0]), set_args[0], judge.label_case, set_args[1])
     elif case_args:
         import judge
-        replay_case(os.path.join(EVAL, "replay", case_args[0]), case_args[1], case_args[2], judge.says)
+        replay_case(os.path.join(EVAL, "replay", case_args[0]), case_args[1], case_args[2], judge.says, judge.dedupe_check)
     else:
         sys.exit(__doc__)
