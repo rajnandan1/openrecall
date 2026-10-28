@@ -287,7 +287,7 @@ To check extraction:
 2. End the session.
 3. Read `~/.openrecall/log/openrecall.jsonl`. The worker logs each run there. If extraction is off, the worker logs the reason.
 
-The worker starts each time a session starts or ends. It takes each session that ended, or that was quiet for 30 minutes. Quiet means that the transcript of the session did not change. The worker reads only the turns that it did not read before. It sends the earlier turns too, but only as context. Only one worker runs at a time.
+The worker starts each time a session starts or ends, and after each turn. It takes each session that ended, or that is quiet. Quiet means that the last line of the session's transcript is 30 minutes old or older, by the line's `timestamp`. While a session has turns that the worker did not read, the worker checks again each minute. Then it stops. The worker reads only the turns that it did not read before. It sends the earlier turns too, but only as context. Only one worker runs at a time.
 
 The worker sends a short form of the session through `/usr/bin/curl`. The short form holds your prompts, Claude's text, and one line per tool call. It holds no tool output, and it leaves out calls to OpenRecall's own tools, `recall`, `remember`, `forget` and `stats`. OpenRecall replaces each secret in it with `[REDACTED:<rule-id>]` first. The worker gives the key to curl on stdin, never on a command line. If you use OpenRouter, turn on "deny data collection" in its privacy settings.
 

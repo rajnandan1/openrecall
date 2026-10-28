@@ -528,7 +528,8 @@ fn detach(args: &[&str], stdin: Stdio) -> Result<std::process::Child> {
         .spawn()?)
 }
 
-/// The detached writer: settle bookkeeping for the session, then the turn into its task's record. The secret scan
+/// The detached writer: settle bookkeeping for the session, then the turn into its task's record, then start the
+/// extraction worker, so a session that never ends is still taken once quiet (ticket 04). The secret scan
 /// compiles before the session lock, so a prompt that waits for the lock does not wait for the compile.
 fn capture_job() -> Result<()> {
     let job = read_input()?;
@@ -573,7 +574,9 @@ fn capture_job() -> Result<()> {
     if let (Some(repo), Some(scanner)) = (&repo, &scanner) {
         write_record(repo, &branch, &sid, &turn, scanner, &mut s)?;
     }
-    save_session(&sid, &s)
+    save_session(&sid, &s)?;
+    detach(&["extract", "--job"], Stdio::null())?;
+    Ok(())
 }
 
 /// A context window that has not seen an existing record (neither pushed nor created it) merges partially,

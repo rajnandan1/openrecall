@@ -6,13 +6,16 @@ use serde_json::{Value, json};
 use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
 
 const QUIET: Duration = Duration::from_secs(30 * 60);
+const POLL: Duration = Duration::from_secs(60);
+// ken: 1 MB tail, whole file past it; raise when a live check finds a worker slow on a long last line
+const TAIL: u64 = 1 << 20;
 const STRIKES: u32 = 3;
 /// Ticket 26 took the top 5 and set the switch to 10 for when a target showed up at ranks 6 to 10: the live test's
 /// repeated built-in file ranked 8th (build step 7).
@@ -147,7 +150,8 @@ pub fn mark_ended(sid: &str, ended: bool) -> crate::Result<()> {
     }
 }
 
-/// `openrecall extract --job`: one worker at a time takes every due session, oldest first, then exits (ticket 17).
+/// `openrecall extract --job`: one worker at a time takes every due session, oldest quiet clock first, and polls while
+/// a session can still become due (ticket 04). `OPENRECALL_POLL=0` exits after one pass.
 pub fn work() -> crate::Result<()> {
     let dir = crate::home().join("extract");
     fs::create_dir_all(&dir)?;
@@ -163,9 +167,18 @@ pub fn work() -> crate::Result<()> {
         }
     };
     let scanner = OnceCell::new();
-    let mut tried = HashSet::new();
-    while let Some((path, sid, mut e)) = next_due(&dir, &tried) {
-        tried.insert(sid.clone());
+    let poll = std::env::var("OPENRECALL_POLL").as_deref() != Ok("0");
+    let mut tried = HashMap::new();
+    loop {
+        let (due, waiting) = next_due(&dir, &tried);
+        let Some((path, sid, mut e, size)) = due else {
+            if !(waiting && poll) {
+                break;
+            }
+            std::thread::sleep(POLL);
+            continue;
+        };
+        tried.insert(sid.clone(), size);
         let started = crate::now_ms();
         match extract(&sid, &e, &settings, scanner.get_or_init(scan::Scanner::new)) {
             Ok(mut detail) => {
@@ -191,10 +204,13 @@ pub fn work() -> crate::Result<()> {
     Ok(())
 }
 
-/// The oldest session whose transcript grew past its cursor and that ended or went quiet for 30 minutes. An entry
-/// whose transcript is gone is deleted: its cursor is no longer needed (ticket 17).
-fn next_due(dir: &Path, tried: &HashSet<String>) -> Option<(PathBuf, String, Entry)> {
-    let mut due = vec![];
+/// The due session (ended or quiet) with the oldest quiet clock, and whether one can still become due: not failed,
+/// with bytes past its cursor and a size this worker has not tried. An entry whose transcript is gone is deleted.
+fn next_due(
+    dir: &Path,
+    tried: &HashMap<String, u64>,
+) -> (Option<(PathBuf, String, Entry, u64)>, bool) {
+    let (mut due, mut waiting) = (vec![], false);
     for item in fs::read_dir(dir).into_iter().flatten().flatten() {
         let path = item.path();
         let Some(sid) = path
@@ -204,7 +220,7 @@ fn next_due(dir: &Path, tried: &HashSet<String>) -> Option<(PathBuf, String, Ent
         else {
             continue;
         };
-        if path.extension().is_none_or(|x| x != "json") || tried.contains(&sid) {
+        if path.extension().is_none_or(|x| x != "json") {
             continue;
         }
         let Some(e) = load(&path).filter(|e| !e.failed) else {
@@ -218,15 +234,41 @@ fn next_due(dir: &Path, tried: &HashSet<String>) -> Option<(PathBuf, String, Ent
             }
             Err(_) => continue,
         };
-        let modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-        let quiet = modified.elapsed().is_ok_and(|age| age >= QUIET);
-        if meta.len() > e.cursor && (e.ended || quiet) {
-            due.push((modified, path, sid, e));
+        if meta.len() <= e.cursor || tried.get(&sid) == Some(&meta.len()) {
+            continue;
+        }
+        waiting = true;
+        let clock = quiet_clock(Path::new(&e.transcript), &meta);
+        if e.ended || crate::now_ms() as i64 - clock >= QUIET.as_millis() as i64 {
+            due.push((clock, path, sid, e, meta.len()));
         }
     }
-    due.into_iter()
+    let first = due
+        .into_iter()
         .min_by_key(|d| d.0)
-        .map(|(_, path, sid, e)| (path, sid, e))
+        .map(|(_, path, sid, e, size)| (path, sid, e, size));
+    (first, waiting)
+}
+
+/// When the session's last turn ended, in ms since 1970: `turn::last_time` over the transcript's tail, then over the
+/// whole file, then the mtime, which something outside OpenRecall touches in bulk.
+fn quiet_clock(transcript: &Path, meta: &fs::Metadata) -> i64 {
+    let last = |from: u64| {
+        let mut f = fs::File::open(transcript).ok()?;
+        f.seek(SeekFrom::Start(from)).ok()?;
+        let mut data = vec![];
+        f.read_to_end(&mut data).ok()?;
+        turn::last_time(&data)
+    };
+    let from = meta.len().saturating_sub(TAIL);
+    last(from)
+        .or_else(|| (from > 0).then(|| last(0)).flatten())
+        .unwrap_or_else(|| {
+            meta.modified()
+                .ok()
+                .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_millis() as i64)
+        })
 }
 
 /// Ticket 24's two failure classes: a strike is the session's fault; a stop is not (auth, network, money, a retired
