@@ -1408,7 +1408,7 @@ def daily(orhome):
         if e.get("event") == "recall":
             recalls[e.get("session")].append(e)
         days[datetime.fromtimestamp(e["at"] / 1000).date().isoformat()][e.get("event")].append(e)
-    picks = {e.get("prompt_id"): e for e in events if e.get("event") == "pick"}
+    picks = {(e.get("prompt_id"), e.get("memory")): e for e in events if e.get("event") == "pick"}
 
     def signal(s, t, idents, address):
         """The used signal of one memory given in turn t, or None when it is not judged."""
@@ -1439,7 +1439,7 @@ def daily(orhome):
         for e in by["deliver"]:
             s = by_sid.get(e.get("session"))
             t = next((t for t in s["turns"] if t["prompt_id"] == e.get("prompt_id")), None) if s else None
-            v = signal(s, t, picks.get(e.get("prompt_id"), {}).get("identifiers"), e.get("memory") or "")
+            v = signal(s, t, picks.get((e.get("prompt_id"), e.get("memory")), {}).get("identifiers"), e.get("memory") or "")
             picked["judged"] += v is not None
             picked["yes"] += bool(v)
         for e in by["pushed"]:
@@ -1589,7 +1589,8 @@ def freeze_set(out, since, until):
                     and x.get("skip") not in ("too_big", "cap"))
         c["state"] = dict(ledger=ledger, picks=calls)
         pick = next((x for x in by_session[sid] if x["event"] == "pick" and abs(x["at"] - x.get("ms", 0) - e["started_at"]) < 2000), None)
-        deliver = pick and next((x for x in by_session[sid] if x["event"] == "deliver" and x["prompt_id"] == pick["prompt_id"]), None)
+        deliver = pick and next((x for x in by_session[sid] if x["event"] == "deliver" and x["prompt_id"] == pick["prompt_id"]
+                                 and x.get("memory") == pick.get("memory")), None)
         c["live"] = dict(gate=[a for a in e["injected"] if a in (e.get("via") or {})], pick=pick and pick.get("memory"),
                          pick_skip=pick and pick.get("skip"), delivered=deliver and deliver.get("memory"))
     for sid, n in upto.items():

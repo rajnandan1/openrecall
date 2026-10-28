@@ -351,7 +351,7 @@ fn count(lines: &[&Value]) -> Row {
 /// a time.
 fn check_transcripts(lines: &[(String, Value)], rows: &mut BTreeMap<&str, Row>) {
     let mut recalls: HashMap<&str, Vec<&Value>> = HashMap::new();
-    let mut picks: HashMap<&str, &Value> = HashMap::new();
+    let mut picks: HashMap<(&str, &str), &Value> = HashMap::new();
     let mut checks: BTreeMap<&str, Vec<(&str, &Value)>> = BTreeMap::new();
     for (day, e) in lines {
         let sid = e["session"].as_str().unwrap_or("");
@@ -359,7 +359,7 @@ fn check_transcripts(lines: &[(String, Value)], rows: &mut BTreeMap<&str, Row>) 
         match event {
             "recall" => recalls.entry(sid).or_default().push(e),
             "pick" => {
-                picks.insert(e["prompt_id"].as_str().unwrap_or(""), e);
+                picks.insert((e["prompt_id"].as_str().unwrap_or(""), e["memory"].as_str().unwrap_or("")), e);
             }
             _ => {}
         }
@@ -396,15 +396,16 @@ fn check_transcripts(lines: &[(String, Value)], rows: &mut BTreeMap<&str, Row>) 
                 }
                 "deliver" => {
                     let id = e["prompt_id"].as_str().unwrap_or("");
+                    let memory = e["memory"].as_str().unwrap_or("");
                     let turn = s.turns.iter().find(|t| !id.is_empty() && t.prompt_id == id);
                     let Some(t) = turn.filter(|t| t.answered) else { continue };
-                    let ids = match picks.get(id).and_then(|p| p.get("identifiers")) {
+                    let ids = match picks.get(&(id, memory)).and_then(|p| p.get("identifiers")) {
                         Some(list) => Some(strings(list)),
-                        None => memory_idents(e["memory"].as_str().unwrap_or("")),
+                        None => memory_idents(memory),
                     };
                     if let Some(ids) = ids {
                         row.picks_used.judged += 1;
-                        row.picks_used.yes += u64::from(used(t, &ids, e["memory"].as_str().unwrap_or("")));
+                        row.picks_used.yes += u64::from(used(t, &ids, memory));
                     }
                 }
                 "pushed" => {
