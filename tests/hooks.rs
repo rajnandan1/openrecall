@@ -1271,29 +1271,35 @@ fn mcp_tools_remember_recall_and_forget() {
     names.sort();
     assert_eq!(names, ["forget", "recall", "remember", "stats"]);
 
-    let (text, err) = m.tool("remember", json!({"text": "The asana slug is hard-coded in src/slugs.py (ABC-1234): the vendor API rejects anything else.", "type": "decision", "scope": "repo", "name": "Asana slug"}));
+    let (text, err) = m.tool("remember", json!({"text": "The asana slug is hard-coded in src/slugs.py (ABC-1234): the vendor API rejects anything else.", "description": "The asana slug is hard-coded in src/slugs.py (ABC-1234)", "type": "decision", "scope": "repo", "name": "Asana slug"}));
     assert!(!err && text.starts_with("Stored as github.com/someone/app/asana-slug ("), "{text}");
     let file = fs::read_to_string(repo.join("asana-slug.md")).unwrap();
-    assert!(file.starts_with("---\nname: asana-slug\ndescription: The asana slug is hard-coded in src/slugs.py (ABC-1234): the vendor API rejects anything else.\nmetadata:\n  type: decision\nscope: github.com/someone/app\nsource: M 20"), "{file}");
+    assert!(file.starts_with("---\nname: asana-slug\ndescription: The asana slug is hard-coded in src/slugs.py (ABC-1234)\nmetadata:\n  type: decision\nscope: github.com/someone/app\nsource: M 20"), "{file}");
     assert!(file.ends_with("---\n\nThe asana slug is hard-coded in src/slugs.py (ABC-1234): the vendor API rejects anything else.\n") && !file.contains("expires"), "{file}");
-    let (text, _) = m.tool("remember", json!({"text": "ABC-1234 waits on the vendor's slug list; next: ask them.", "type": "state", "scope": "global"}));
+    let (text, _) = m.tool("remember", json!({"text": "ABC-1234 waits on the vendor's slug list; next: ask them.", "description": "ABC-1234 waits on the vendor's slug list", "type": "state", "scope": "global"}));
     assert!(text.starts_with("Stored as global/abc-1234-waits-on-the-vendor-s-slug-list-next-ask-them ("), "{text}");
     assert!(fs::read_to_string(w.home.join(".openrecall/global/abc-1234-waits-on-the-vendor-s-slug-list-next-ask-them.md")).unwrap().contains("\nexpires: 20"));
-    let (text, _) = m.tool("remember", json!({"text": "A second asana note.", "type": "gotcha", "scope": "repo", "name": "asana-slug"}));
+    let (text, _) = m.tool("remember", json!({"text": "A second asana note.", "description": "A second asana note", "type": "gotcha", "scope": "repo", "name": "asana-slug"}));
     assert!(text.starts_with("Stored as github.com/someone/app/asana-slug-2 ("), "a taken name gets -2: {text}");
+    let exact = format!("ABC-77 {}", "d".repeat(143));
+    let (text, err) = m.tool("remember", json!({"text": "Exports stop at 150 rows (ABC-77).", "description": exact, "type": "gotcha", "scope": "repo", "name": "export-cap"}));
+    assert!(!err && fs::read_to_string(repo.join("export-cap.md")).unwrap().contains(&format!("\ndescription: {exact}\n")), "{text}");
 
     let token = format!("ghp_{}", "Zq8Xw3Kp9Lm2Nv7Bc4Rt6Yh1Jd5Fg0Sa3Ew8");
-    let (text, err) = m.tool("remember", json!({"text": format!("The CI token is {token}"), "type": "gotcha", "scope": "repo"}));
+    let (text, err) = m.tool("remember", json!({"text": format!("The CI token is {token}"), "description": "The CI token", "type": "gotcha", "scope": "repo"}));
     assert!(err && text.contains("github-pat"), "{text}");
-    assert!(fs::read_dir(&repo).unwrap().flatten().all(|e| !fs::read_to_string(e.path()).unwrap_or_default().contains(&token)));
     for (args, what) in [
-        (json!({"text": "x", "type": "fact", "scope": "repo"}), "type must be one of"),
-        (json!({"text": "x", "type": "gotcha", "scope": "team"}), "scope must be"),
-        (json!({"text": "  ", "type": "gotcha", "scope": "repo"}), "text is empty"),
+        (json!({"text": "x", "description": "x", "type": "fact", "scope": "repo"}), "type must be one of"),
+        (json!({"text": "x", "description": "x", "type": "gotcha", "scope": "team"}), "scope must be"),
+        (json!({"text": "  ", "description": "x", "type": "gotcha", "scope": "repo"}), "text is empty"),
+        (json!({"text": "x", "description": " ", "type": "gotcha", "scope": "repo"}), "description is empty"),
+        (json!({"text": "x", "description": "d".repeat(151), "type": "gotcha", "scope": "repo"}), "151 characters"),
+        (json!({"text": "x", "description": format!("The CI token is {token}"), "type": "gotcha", "scope": "repo"}), "github-pat"),
     ] {
         let (text, err) = m.tool("remember", args);
         assert!(err && text.contains(what), "{text}");
     }
+    assert!(fs::read_dir(&repo).unwrap().flatten().all(|e| !fs::read_to_string(e.path()).unwrap_or_default().contains(&token)));
 
     let (text, err) = m.tool("recall", json!({"query": "why is the asana slug hard-coded", "k": 2}));
     assert!(!err, "{text}");
@@ -1949,7 +1955,7 @@ fn a_memory_remembered_in_the_new_turns_reconciles_others_at_the_next_run() {
     extracted_to_end(&w, "M");
     assert!(fs::read_to_string(repo.join("queue-batches.md")).unwrap().contains("\nsource: M 2026-10-26T16:05:00.250Z\n"));
 
-    let args = json!({"text": "The retry queue moved from src/queue.py to src/worker.py.", "type": "decision", "scope": "repo", "name": "queue-moved"});
+    let args = json!({"text": "The retry queue moved from src/queue.py to src/worker.py.", "description": "The retry queue moved to src/worker.py", "type": "decision", "scope": "repo", "name": "queue-moved"});
     let mut m = Mcp::start(&w);
     let (text, err) = m.tool("remember", args.clone());
     assert!(!err, "{text}");

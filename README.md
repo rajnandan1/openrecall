@@ -219,7 +219,7 @@ A hook cannot help here, because Claude cannot call a hook. Claude can call an M
 The plugin also starts an MCP server, `openrecall mcp`. The server is the same binary, and it reads the same `~/.openrecall/`. The plugin install configures the server, so you do nothing extra. The server gives Claude four tools:
 
 - `recall` takes an address or some words. With an address, it returns the whole memory. An injected line that OpenRecall cut to 200 characters still carries its address. So Claude calls `recall` to read the rest. With other words, `recall` finds the memories that match and skips the gate. It returns 5 memories, or up to 20 if Claude asks for more.
-- `remember` stores a new fact. Claude gives the fact a type and a scope. The type is `decision`, `preference`, `pointer`, `state` or `gotcha`. The scope is `repo` or `global`. `remember` refuses a text that holds a secret. Without [extraction](#extraction-optional), `remember` is the only way that OpenRecall gets new facts.
+- `remember` stores a new fact. Claude gives the fact a type, a scope and a description. The type is `decision`, `preference`, `pointer`, `state` or `gotcha`. The scope is `repo` or `global`. The description states the fact with its main identifier in at most 150 characters. A longer description gets an error that gives its length, and Claude writes a shorter one. `remember` refuses a description or text that holds a secret. Without [extraction](#extraction-optional), `remember` is the only way that OpenRecall gets new facts.
 - `forget` deletes one fact that OpenRecall wrote. Claude gives the address of the fact.
 - `stats` shows one row of counts per day. Ask Claude how OpenRecall did today or this week, and Claude answers from counts that stay on your machine.
 

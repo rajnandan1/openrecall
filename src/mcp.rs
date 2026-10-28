@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 const DEFAULT_K: usize = 5;
 const MAX_K: usize = 20;
+const DESCRIPTION_CHARS: usize = 150;
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct RecallParams {
@@ -22,6 +23,8 @@ struct RecallParams {
 struct RememberParams {
     /// The fact, in plain Markdown: what, why, when, and the identifiers it needs.
     text: String,
+    /// At most 150 characters: the fact itself, with its main identifier.
+    description: String,
     /// decision, preference, pointer, state or gotcha.
     #[serde(rename = "type")]
     kind: String,
@@ -93,7 +96,7 @@ impl Server {
     }
 
     #[tool(
-        description = "Store one fact for later sessions, as a Markdown memory file. Use it when the user says \"remember this\". A text that holds a secret is refused."
+        description = "Store one fact for later sessions, as a Markdown memory file. Use it when the user says \"remember this\". A description or text that holds a secret is refused."
     )]
     fn remember(&self, Parameters(p): Parameters<RememberParams>) -> Result<String, String> {
         if !index::KINDS.contains(&p.kind.as_str()) {
@@ -102,6 +105,14 @@ impl Server {
         let text = p.text.trim();
         if text.is_empty() {
             return Err("text is empty".into());
+        }
+        let description = p.description.split_whitespace().collect::<Vec<_>>().join(" ");
+        let n = description.chars().count();
+        if n == 0 {
+            return Err("description is empty".into());
+        }
+        if n > DESCRIPTION_CHARS {
+            return Err(format!("description is {n} characters; the limit is {DESCRIPTION_CHARS}"));
         }
         let (dir, scope) = match p.scope.as_str() {
             "global" => (self.home.join("global"), "global".to_string()),
@@ -112,11 +123,11 @@ impl Server {
             }
             _ => return Err("scope must be repo or global".into()),
         };
-        let (_, rules) = scan::Scanner::new().redact(text);
+        let (_, rules) = scan::Scanner::new().redact(&format!("{description}\n{text}"));
         if let Some(rule) = rules.first() {
             self.log("remember", json!({"dropped": rule}));
             return Err(format!(
-                "not stored: the text holds a secret (gitleaks rule {rule}); rotate it"
+                "not stored: the description or text holds a secret (gitleaks rule {rule}); rotate it"
             ));
         }
         let stem = index::free_stem(
@@ -131,7 +142,7 @@ impl Server {
         let now = crate::now_ms();
         let file = index::render(&index::Memory {
             name: stem.clone(),
-            description: description_of(text),
+            description,
             expires: if p.kind == "state" {
                 index::expires_from((now / 1000) as u64)
             } else {
@@ -307,22 +318,6 @@ fn replaced_copies(path: &Path, stem: &str) -> Vec<PathBuf> {
         .collect()
 }
 
-/// The first line, single-spaced and cut to the injection line's 200 characters.
-fn description_of(text: &str) -> String {
-    let first: Vec<&str> = text
-        .lines()
-        .next()
-        .unwrap_or("")
-        .split_whitespace()
-        .collect();
-    let line = first.join(" ");
-    if line.chars().count() <= 200 {
-        line
-    } else {
-        line.chars().take(199).chain(['…']).collect()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,11 +379,5 @@ mod tests {
         ] {
             assert!(file_of(bad, home, user).is_none(), "{bad}");
         }
-    }
-
-    #[test]
-    fn descriptions() {
-        assert_eq!(description_of("first  line\nsecond"), "first line");
-        assert_eq!(description_of(&"x".repeat(300)).chars().count(), 200);
     }
 }
