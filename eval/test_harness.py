@@ -165,6 +165,13 @@ class HarnessTest(unittest.TestCase):
         self.assertEqual(got["m1"][0], "useful")
         self.assertEqual((len(state["memories"]["m1"]), len(state["last_reply"])), (4096, 4000))
         self.assertTrue(state["last_reply"].endswith("2. skip empty rows."), "a long reply keeps its end")
+        texts = ["ABC-12 is open." + "x" * 5000] + ["memory %d" % i for i in range(6)]
+        with unittest.mock.patch.object(judge, "ask", side_effect=lambda state, q: {
+                k: dict(noul=0.9 if "open" in state["memories"][k] else 0.2) for k in q}) as ask:
+            self.assertEqual(judge.says("Does it say that ABC-12 is open?", texts), [0.9] + [0.2] * 6)
+        (first, questions), _ = ask.call_args_list[0]
+        self.assertEqual((ask.call_count, len(first["memories"]), len(first["memories"]["m1"])), (2, 5, 4096))
+        self.assertEqual(questions["m1"]["instructions"], "Read `memories.m1`. Does it say that ABC-12 is open?")
 
     def test_level_two_metrics(self):
         cases = [dict(id="C1", session="new", at="2026-01-05T10:40:00Z", prompt="check src/export.py again", repo="github.com/x/app"),
@@ -654,6 +661,128 @@ class HarnessTest(unittest.TestCase):
                              capture_output=True, text=True, check=True).stdout
         with open(os.path.join(copy, "expected.jsonl")) as fh:
             self.assertEqual(out.splitlines(), fh.read().splitlines())
+
+    def test_a_replay_case_and_its_pass_shares(self):
+        folder = os.path.join(harness.EVAL, "replay", "M9")
+        os.makedirs(folder)
+        case = dict(repo="github.com/acme/app", branch="feat/abc-12", provider=True, steps=[dict(run="extract")],
+                    questions=[dict(name="a memory names ABC-12", checks=[dict(grep="ABC-12", want="some")]),
+                               dict(name="the run reads to the end", checks=[dict(kind="cursor", session="S1", equals=900)])])
+        with open(os.path.join(folder, "case.json"), "w") as fh:
+            json.dump(case, fh)
+        self.assertEqual(harness.load_case(folder)["runs"], 3, "a case that calls the provider runs 3 times (spec 4.3)")
+        for wrong, named in ((dict(case, steps=[dict(run="stop")]), "stop"),
+                             (dict(case, questions=[dict(name="q", checks=[dict(kind="grep")])]), "grep"),
+                             (dict(case, questions=[dict(name="q", checks=[dict(want="most")])]), "most"),
+                             (dict(case, steps=[dict(run="capture", session="S1", branch="feat/abc-12")]), "bytes"),
+                             (dict(case, questions=[dict(name="q", checks=[dict(kind="log", event="extract")])]), "field"),
+                             (dict(case, questions=[dict(name="q", checks=[dict(kind="cursor", session="S1")])]),
+                              "equals, at_least or starts")):
+            with open(os.path.join(folder, "case.json"), "w") as fh:
+                json.dump(dict(wrong, provider=False), fh)
+            with self.assertRaises(SystemExit) as stop:
+                harness.load_case(folder)
+            self.assertIn(named, str(stop.exception))
+        self.assertEqual(harness.shares(["a memory names ABC-12", "the run reads to the end"],
+                                        [[True, False], [True, True], [True, False]]),
+                         ["1. a memory names ABC-12: 3/3", "2. the run reads to the end: 1/3"])
+        self.assertEqual(harness.replay_args(["R4"]), ("R4", None, harness.BINARY), "the case's own run count")
+        self.assertEqual(harness.replay_args(["M1", "--runs", "3", "--binary", "x/openrecall"]),
+                         ("M1", 3, os.path.abspath("x/openrecall")))
+        for wrong in ([], ["--runs", "3"], ["R4", "--runs"], ["R4", "--runs", "x"], ["R4", "--runs", "0"], ["R4", "--picks"]):
+            self.assertIsNone(harness.replay_args(wrong), wrong)
+
+    @unittest.skipUnless(os.path.exists(harness.BINARY), "needs cargo build --release")
+    def test_a_replay_case_through_the_binary(self):
+        folder = os.path.join(harness.EVAL, "replay", "R9")
+        project = os.path.join(folder, "home", ".claude", "projects", "PROJECT")
+        os.makedirs(project)
+        lines = [user("2026-01-05T10:00:00Z", "plan ABC-12", "feat/abc-12"),
+                 said("2026-01-05T10:01:00Z", "Plan: fix the export.", "feat/abc-12", "m1"),
+                 user("2026-01-05T10:10:00Z", "ship ABC-12 now", "feat/abc-12"),
+                 said("2026-01-05T10:11:00Z", "ABC-12 is shipped in PR #345.", "feat/abc-12", "m2")]
+        text = "".join(json.dumps(o) + "\n" for o in lines)
+        with open(os.path.join(project, "S1.jsonl"), "w") as fh:
+            fh.write(text)
+        turn_one = len("".join(json.dumps(o) + "\n" for o in lines[:2]).encode())
+        memory = lambda body, expires="": "---\nname: m\ndescription: %s\nmetadata:\n  type: state\n%s---\n\n%s\n" % (
+            body, "expires: %s\n" % expires if expires else "", body)
+        repo = os.path.join(folder, "home", ".openrecall", "repos", "github.com", "acme", "app")
+        for rel, body in (("abc-12-open.md", memory("ABC-12 is open.", "2099-01-01")),
+                          ("abc-12-older.md", memory("ABC-12 is open since January.", "2000-01-01")),
+                          ("replaced/abc-12-open.2026-01-01T000000Z.md", memory("ABC-12 is planned.")),
+                          ("../../../../global/deploy-days.md", memory("Deploys go out on Fridays.")),
+                          ("../../../../../.claude/projects/PROJECT/memory/abc-12-notes.md", memory("ABC-12 notes: rows.")),
+                          ("../../../../../.claude/projects/PROJECT/memory/MEMORY.md", "- ABC-12 notes")):
+            os.makedirs(os.path.dirname(os.path.join(repo, rel)), exist_ok=True)
+            with open(os.path.join(repo, rel), "w") as fh:
+                fh.write(body)
+        orhome = os.path.join(folder, "home", ".openrecall")
+        os.makedirs(os.path.join(orhome, "extract"))
+        with open(os.path.join(orhome, "extract", "S1.json"), "w") as fh:
+            json.dump(dict(transcript="/gone/S1.jsonl", identity="github.com/acme/app", main="/gone", cursor=120,
+                           ended=True), fh)
+        os.makedirs(os.path.join(orhome, "log"))
+        with open(os.path.join(orhome, "log", "openrecall.jsonl"), "w") as fh:
+            fh.write(json.dumps(dict(event="extract", session="S0", to=10, new=3, reconciled=2, cost=0.01, at=1767225600000)) + "\n")
+        case = dict(repo="github.com/acme/app", branch="feat/abc-12",
+                    steps=[dict(run="capture", session="S1", bytes=turn_one, branch="feat/abc-12"),
+                           dict(run="capture", session="S1", bytes=len(text.encode()), branch="feat/abc-12"),
+                           dict(run="extract")],
+                    questions=[dict(name="the record's last ask and answer", checks=[
+                        dict(kind="record", branch="feat/abc-12", section="Last ask", equals="ship ABC-12 now"),
+                        dict(kind="record", branch="feat/abc-12", section="Last answer", starts="ABC-12 is shipped")]),
+                               dict(name="no live memory says ABC-12 is open", checks=[
+                                   dict(grep="ABC-12", jev="Does it say that ABC-12 is open?", want="none")]),
+                               dict(name="the old text is in replaced/ and every memory is live", checks=[
+                                   dict(glob=".openrecall/repos/**/replaced/*.md", grep="planned", want="some"),
+                                   dict(jev="Is it live?", want="all")]),
+                               dict(name="reconciled 2, and the cursor stays", checks=[
+                                   dict(kind="log", event="extract", field="reconciled", at_least=2),
+                                   dict(kind="cursor", session="S1", equals=120)]),
+                               dict(name="stats --job and daily count the same new facts", checks=[
+                                   dict(kind="parity", field="new")]),
+                               dict(name="recall finds a memory that says ABC-12 is open", checks=[
+                                   dict(recall=[dict(query="ABC-12 rows", k=5), dict(query="ABC-12 open", k=5)],
+                                        jev="Does it say that ABC-12 is open?", want="some")])])
+        with open(os.path.join(folder, "case.json"), "w") as fh:
+            json.dump(case, fh)
+        asked = []
+
+        def says(question, texts):
+            asked.append((question, sorted(texts)))
+            return [0.9 if "is open" in t or question == "Is it live?" else 0.1 for t in texts]
+
+        lines = harness.replay_case(folder, binary=harness.BINARY, says=says)
+        self.assertEqual(lines[1:], ["1. the record's last ask and answer: 1/1", "2. no live memory says ABC-12 is open: 0/1",
+                                     "3. the old text is in replaced/ and every memory is live: 1/1",
+                                     "4. reconciled 2, and the cursor stays: 1/1",
+                                     "5. stats --job and daily count the same new facts: 1/1",
+                                     "6. recall finds a memory that says ABC-12 is open: 1/1", "Provider cost: $0.01."])
+        kept = os.path.join(lines[0].split(" kept in ")[1], "1")
+        with open(os.path.join(kept, "extract", "S1.json")) as fh:
+            entry = json.load(fh)
+        project = os.path.basename(os.path.dirname(entry["transcript"]))
+        self.assertEqual((project[-2:], entry["main"][-2:]), ("-w", "/w"), "the run file points at the copies")
+        with open(os.path.join(kept, "log", "openrecall.jsonl")) as fh:
+            self.assertIn('"off":"no extract.toml"', fh.read(), "a case without a provider runs the worker, off")
+        self.assertFalse(glob.glob(os.path.join(kept, "index.db*")))
+        with open(os.path.join(kept, "checks.json")) as fh:
+            checks = json.load(fh)
+        self.assertEqual(checks[1]["checks"][0]["saw"], {".openrecall/repos/github.com/acme/app/abc-12-open.md": 0.9,
+                                                         ".claude/projects/%s/memory/abc-12-notes.md" % project: 0.1})
+        self.assertEqual(checks[4]["checks"][0]["saw"], dict(binary=3, harness=3))
+        recalled = checks[5]["checks"][0]["saw"]
+        self.assertEqual((recalled[".openrecall/repos/github.com/acme/app/abc-12-open.md"],
+                          recalled[".claude/projects/%s/memory/abc-12-notes.md" % project]), (0.9, 0.1),
+                         "each memory both searches return is judged once, the built-in one in its scratch folder")
+        self.assertNotIn(".openrecall/global/deploy-days.md", recalled, "live, but no search returns it")
+        with open(os.path.join(kept, "log", "openrecall.jsonl")) as fh:
+            self.assertEqual([e["tool"] for e in map(json.loads, fh) if e["event"] == "mcp"], ["recall", "recall"])
+        self.assertEqual(asked[0], ("Does it say that ABC-12 is open?", ["ABC-12 is open.\n\nABC-12 is open.",
+                                                                         "ABC-12 notes: rows.\n\nABC-12 notes: rows."]),
+                         "the live memories that name ABC-12: no expired one, no copy in replaced/, no MEMORY.md")
+        self.assertEqual(len(asked[1][1]), 3, "the global memory is live too")
 
     def test_report_args(self):
         self.assertEqual(harness.report_args([]), (harness.BINARY, False), "picks are off by default")

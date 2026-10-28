@@ -6,6 +6,7 @@
     python3 eval/harness.py freeze-set FOLDER SINCE UNTIL     # a case set of the live prompts in a window
     python3 eval/harness.py report-set FOLDER [--binary PATH] [--picks]   # FOLDER/runs/<UTC time>/report.md
     python3 eval/harness.py daily [--home PATH]      # Daily stats: one row per local day of the home's log
+    python3 eval/harness.py replay-case CASE [--runs N] [--binary PATH]   # a frozen case of eval/replay/CASE
 
 Reads Claude Code transcripts under ~/.claude/projects and writes only under ~/.openrecall/eval/
 (OPENRECALL_HOME replaces ~/.openrecall). The first freeze needs appendix-a.jsonl there: one
@@ -15,6 +16,8 @@ scratch world, then every frozen case for level 2, labeled by Jev through judge.
 baseline alone. `--picks` also runs the pick job with the provider of extract.toml, about $1.60 a run.
 A case set (ticket 06) is every searched real prompt of the live recall log in a window, each with frozen copies of
 what its replay reads; FOLDER is under ~/.openrecall/eval/ and SINCE and UNTIL are ISO times.
+A replay case (spec 3.12) runs N times, each on a fresh scratch home, and prints each pass question's share of runs;
+its layout is in ~/.openrecall/eval/replay/README.md.
 """
 import glob
 import json
@@ -1784,6 +1787,230 @@ def report(now=None, binary=BINARY, label_fn=None, gate=None, dedupe_fn=None, pi
     print("\n".join(lines) + "\n\nwritten to %s/report.md" % out)
 
 
+def load_case(folder):
+    """A frozen replay case's `case.json` (spec 3.12), checked before any run spends on the provider. `runs` defaults
+    to spec 4.3's: 3 for a case that calls the provider, else 1."""
+    with open(os.path.join(folder, "case.json")) as fh:
+        c = json.load(fh)
+    steps = dict(extract=(), capture=("session", "bytes", "branch"))
+    kinds = dict(memories=(), log=("event", "field"), cursor=("session",), parity=("field",), record=("branch", "section"))
+    for step in c["steps"]:
+        if step.get("run") not in steps:
+            sys.exit("%s: unknown step %r" % (folder, step.get("run")))
+        if any(k not in step for k in steps[step["run"]]):
+            sys.exit("%s: a %s step needs %s" % (folder, step["run"], ", ".join(steps[step["run"]])))
+    for q in c["questions"]:
+        for check in q["checks"]:
+            kind = check.get("kind", "memories")
+            if kind not in kinds:
+                sys.exit("%s: question %r has an unknown check kind %r" % (folder, q["name"], kind))
+            need = list(kinds[kind]) + ([] if kind in ("memories", "parity") or {"equals", "at_least", "starts"} & set(check)
+                                        else ["equals, at_least or starts"])
+            if any(k not in check for k in need):
+                sys.exit("%s: question %r has a %s check that needs %s" % (folder, q["name"], kind, "; ".join(need)))
+            if check.get("want", "some") not in ("some", "none", "all"):
+                sys.exit("%s: question %r wants %r, not some, none or all" % (folder, q["name"], check.get("want")))
+    c.setdefault("runs", 3 if c.get("provider") else 1)
+    return c
+
+
+def shares(names, outcomes):
+    """One line per question: the runs it passed of the runs made. `outcomes` holds one list of booleans per run."""
+    return ["%d. %s: %d/%d" % (i, name, sum(run[i - 1] for run in outcomes), len(outcomes))
+            for i, name in enumerate(names, 1)]
+
+
+def section(path, heading):
+    """One section of a handoff record as `Record::parse` in src/record.rs reads it, or None."""
+    try:
+        with open(path) as fh:
+            text = fh.read()
+    except OSError:
+        return None
+    m = re.search(r"^## %s\n(.*?)(?=^## |\Z)" % re.escape(heading), text.partition("\n---\n")[2] or text, re.M | re.S)
+    return m.group(1).strip() if m else None
+
+
+def holds(value, check):
+    if "starts" in check:
+        return value is not None and value.startswith(check["starts"])
+    if "at_least" in check:
+        return value is not None and value >= check["at_least"]
+    return value == check["equals"]
+
+
+def live_memories(home, repo):
+    """Spec 4.2's live memories of a scratch home: the files at the top of the repo's folder under `repos/`, of
+    `global/` and of the built-in folder, with no `expires` or one after today, as `drop_reason` in src/main.rs."""
+    orhome, today = os.path.join(home, ".openrecall"), datetime.now(timezone.utc).date().isoformat()
+    files = (sorted(glob.glob(os.path.join(orhome, "repos", repo, "*.md"))) + sorted(glob.glob(os.path.join(orhome, "global", "*.md")))
+             + sorted(glob.glob(os.path.join(home, ".claude", "projects", "*", "memory", "*.md"))))
+    return [f for f in files if os.path.basename(f) not in ("MEMORY.md", "claude-md-suggestions.md")
+            and (front(f, "expires") or "9999-12-31") > today]
+
+
+def judge_check(check, c, home, binary, env, says, yes=0.7):
+    """One check of a pass question on a run's scratch home: whether it holds, and what it saw. A memories check
+    takes the live memories (or the files of `glob`), keeps those that match `grep`, and counts each as a yes, or as
+    a yes of `says` (judge.says) to `jev` at `yes` or more; it holds when `want` some, none or all of them say yes."""
+    orhome = env["OPENRECALL_HOME"]
+    kind = check.get("kind", "memories")
+    if kind == "record":
+        value = section(os.path.join(orhome, "repos", c["repo"], "handoffs", check["branch"].replace("/", "--") + ".md"),
+                        check["section"])
+        return holds(value, check), value
+    if kind == "log":
+        value = sum(e.get(check["field"]) or 0 for e in logged(orhome) if e.get("event") == check["event"])
+        return holds(value, check), value
+    if kind == "cursor":
+        try:
+            with open(os.path.join(orhome, "extract", check["session"] + ".json")) as fh:
+                value = json.load(fh)["cursor"]
+        except (OSError, ValueError, KeyError):
+            value = None
+        return holds(value, check), value
+    if kind == "parity":
+        shutil.rmtree(os.path.join(orhome, "stats"), ignore_errors=True)
+        subprocess.run([binary, "stats", "--job"], env=env, capture_output=True)
+        rows = os.path.join(orhome, "stats", "daily.jsonl")
+        ours = subprocess.run([sys.executable, os.path.abspath(__file__), "daily", "--home", orhome], env=env,
+                              capture_output=True, text=True).stdout
+        total = lambda rows: sum((r.get("facts") or {}).get(check["field"], 0) for r in rows)
+        saw = dict(binary=total(read(rows)) if os.path.exists(rows) else None,
+                   harness=total(json.loads(l) for l in ours.splitlines() if l.strip()))
+        return saw["binary"] == saw["harness"], saw
+    if "glob" in check:
+        files = sorted(glob.glob(os.path.join(home, check["glob"]), recursive=True))
+    elif "recall" in check:
+        files = [f for f in dict.fromkeys(scratch_path(a, home) for a in recalled(binary, env, check["recall"]))
+                 if os.path.isfile(f)]
+    else:
+        files = live_memories(home, c["repo"])
+    files = [f for f in files if re.search(check.get("grep", ""), read_text(f))]
+    probs = says(check["jev"], [memory_text(f) for f in files]) if "jev" in check else [1.0] * len(files)
+    hits = sum(p >= yes for p in probs)
+    ok = dict(some=hits > 0, none=hits == 0, all=bool(files) and hits == len(files))[check.get("want", "some")]
+    return ok, {os.path.relpath(f, home): p for f, p in zip(files, probs)}
+
+
+def read_text(path):
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        return fh.read()
+
+
+def logged(orhome):
+    log = os.path.join(orhome, "log", "openrecall.jsonl")
+    return read(log) if os.path.exists(log) else []
+
+
+def scratch_path(address, home):
+    parts = address.split("/")
+    if parts[0] == "builtin" and len(parts) == 3:
+        return os.path.join(home, ".claude", "projects", parts[1], "memory", parts[2] + ".md")
+    return address_path(address, os.path.join(home, ".openrecall"))
+
+
+def recalled(binary, env, queries):
+    """Spec 3.12: the addresses `openrecall mcp` returns for each `{query, k}`, called over stdio as Claude Code calls
+    it, read from the server's `mcp` log lines."""
+    mcp = subprocess.Popen([binary, "mcp"], env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+
+    def send(**msg):
+        mcp.stdin.write(json.dumps(dict(msg, jsonrpc="2.0")) + "\n")
+        mcp.stdin.flush()
+
+    def call(i, method, params):
+        send(id=i, method=method, params=params)
+        while json.loads(mcp.stdout.readline()).get("id") != i:
+            pass
+
+    try:
+        call(1, "initialize", dict(protocolVersion="2025-06-18", capabilities={}, clientInfo=dict(name="harness", version="0")))
+        send(method="notifications/initialized")
+        for i, q in enumerate(queries, 2):
+            call(i, "tools/call", dict(name="recall", arguments=q))
+    finally:
+        mcp.stdin.close()
+        mcp.wait(timeout=10)
+    lines = [e for e in logged(env["OPENRECALL_HOME"]) if e.get("event") == "mcp" and e.get("tool") == "recall"]
+    return [a for e in lines[-len(queries):] for a in e.get("addresses", [])]
+
+
+def replay_case(folder, runs=None, binary=BINARY, says=None):
+    """Spec 3.12: a frozen case (load_case) `runs` times, each from a fresh copy in a scratch home, then its pass
+    questions. The case's `home/` becomes the scratch home, its `.claude/projects/PROJECT` the project folder of a
+    stand-in repo folder whose origin gives the case's `repo`; run files point `transcript` and `main` at the copies.
+    Each run's `.openrecall` (without the index) is kept in the case's `runs/<UTC time>/<n>/`. Returns the lines it
+    prints."""
+    c = load_case(folder)
+    runs = runs or c["runs"]
+    provider = real_provider() if c.get("provider") else None
+    kept = os.path.join(folder, "runs", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%SZ"))
+    outcomes, cost = [], 0.0
+    for n in range(1, runs + 1):
+        tmp = scratch()
+        try:
+            home, work = os.path.join(tmp, "home"), os.path.join(tmp, "w")
+            orhome = os.path.join(home, ".openrecall")
+            shutil.copytree(os.path.join(folder, "home"), home, copy_function=shutil.copyfile)
+            for rel, mtime in c.get("mtimes", {}).items():
+                os.utime(os.path.join(home, rel), (mtime, mtime))
+            project = os.path.join(home, ".claude", "projects", slug(work))
+            os.rename(os.path.join(home, ".claude", "projects", "PROJECT"), project)
+            os.makedirs(os.path.join(work, ".git", "refs", "heads"))
+            with open(os.path.join(work, ".git", "config"), "w") as fh:
+                fh.write('[remote "origin"]\n\turl = https://%s\n' % re.sub(r"^local/", "local.invalid/", c["repo"]))
+            checkout(work, c["branch"])
+            for path in glob.glob(os.path.join(orhome, "extract", "*.json")):
+                with open(path) as fh:
+                    entry = json.load(fh)
+                entry.update(transcript=os.path.join(project, os.path.basename(entry["transcript"])), main=work)
+                with open(path, "w") as fh:
+                    json.dump(entry, fh)
+            if provider:
+                pick_home(orhome, *provider)
+            env = dict(HOME=home, OPENRECALL_HOME=orhome, CLAUDE_CODE_ENTRYPOINT="cli", CLAUDE_PROJECT_DIR=work,
+                       PATH="/usr/bin:/bin", OPENRECALL_POLL="0")
+            for step in c["steps"]:
+                if step["run"] == "extract":
+                    subprocess.run([binary, "extract", "--job"], env=env, capture_output=True)
+                    continue
+                copy = os.path.join(project, step["session"] + ".jsonl")
+                with open(os.path.join(folder, "home", ".claude", "projects", "PROJECT", step["session"] + ".jsonl"),
+                          "rb") as src, open(copy, "wb") as dst:
+                    dst.write(src.read(step["bytes"]))
+                checkout(work, step["branch"])
+                subprocess.run([binary, "capture", "--job"], env=env, capture_output=True, input=json.dumps(dict(
+                    session_id=step["session"], cwd=work, transcript_path=copy, transcript_len=step["bytes"],
+                    hook_event_name="Stop", stop_hook_active=False, last_assistant_message="")).encode())
+            seen = [[judge_check(check, c, home, binary, env, says) for check in q["checks"]] for q in c["questions"]]
+            outcomes.append([all(ok for ok, _ in checks) for checks in seen])
+            cost += sum(e.get("cost") or 0 for e in logged(orhome) if e.get("event") == "extract")
+            shutil.copytree(orhome, os.path.join(kept, str(n)), ignore=shutil.ignore_patterns("index.db*"))
+            with open(os.path.join(kept, str(n), "checks.json"), "w") as fh:
+                json.dump([dict(question=q["name"], checks=[dict(ok=ok, saw=saw) for ok, saw in checks])
+                           for q, checks in zip(c["questions"], seen)], fh, indent=1)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+    lines = ["%s: %d run%s with %s, kept in %s" % (os.path.basename(folder), runs, "" if runs == 1 else "s", binary, kept)]
+    lines += shares([q["name"] for q in c["questions"]], outcomes) + ["Provider cost: $%.2f." % cost]
+    print("\n".join(lines))
+    return lines
+
+
+def replay_args(args):
+    """`replay-case CASE [--runs N] [--binary PATH]`: (case, runs or None, binary), or None for any other arguments."""
+    if not args or args[0].startswith("-") or len(args) % 2 == 0:
+        return None
+    flags = dict(zip(args[1::2], args[2::2]))
+    if set(flags) - {"--runs", "--binary"} or len(flags) * 2 != len(args) - 1:
+        return None
+    runs = flags.get("--runs")
+    if runs is not None and not (runs.isdigit() and int(runs) > 0):
+        return None
+    return args[0], runs and int(runs), os.path.abspath(flags["--binary"]) if "--binary" in flags else BINARY
+
+
 def report_args(args):
     """`report [--binary PATH] [--picks]`: (binary, picks), or None for any other arguments."""
     picks = args[-1:] == ["--picks"]
@@ -1797,6 +2024,7 @@ if __name__ == "__main__":
     cmd, rest = (sys.argv[1] if len(sys.argv) > 1 else ""), sys.argv[2:]
     args = report_args(rest) if cmd == "report" else None
     set_args = report_args(rest[1:]) if cmd == "report-set" and rest else None
+    case_args = replay_args(rest) if cmd == "replay-case" else None
     if cmd == "freeze" and not rest:
         freeze()
     elif cmd == "freeze-set" and len(rest) == 3:
@@ -1810,5 +2038,8 @@ if __name__ == "__main__":
     elif set_args:
         import judge
         report_set(os.path.join(EVAL, rest[0]), set_args[0], judge.label_case, set_args[1])
+    elif case_args:
+        import judge
+        replay_case(os.path.join(EVAL, "replay", case_args[0]), case_args[1], case_args[2], judge.says)
     else:
         sys.exit(__doc__)
