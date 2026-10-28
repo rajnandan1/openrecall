@@ -176,7 +176,7 @@ If no memory passes the gate, OpenRecall injects nothing. OpenRecall also does n
 
 The score does not grow when the index grows. So one threshold works at every index size.
 
-Each injected memory is one line: `- <type> <date> <address>: <text>`. The address is a stable ID for the memory, such as `github.com/acme/exporter/windows-runner-timeout`. Claude can use the address to read the full memory or to forget it. The text is the whole memory if it fits in the space that the other lines leave in the 400 tokens. If not, OpenRecall cuts the text to at most 200 characters.
+Each injected memory is one line: `- <type> <date> <address>: <text>`. The address is a stable ID for the memory, such as `github.com/acme/exporter/windows-runner-timeout`. Claude can use the address to read the full memory or to forget it. The text is the whole memory if it fits in the space that the other lines leave in the 400 tokens. If not, the text is the memory's description, cut to at most 200 characters. When those 200 characters leave room, the line ends with `(also names: …)`: the paths, ticket IDs and other identifiers of the memory that the description lacks. This line is the recall line. A pick and a `recall` search show a memory in the same form.
 
 These limits are not settings. They are constants in `src/index.rs`:
 
