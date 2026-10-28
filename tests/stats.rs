@@ -264,7 +264,7 @@ fn each_local_day_with_log_lines_gets_one_row_of_counts() {
     assert_eq!(rows[2]["hook_ms"], json!({"median": 25, "p95": 25}));
 }
 
-/// Spec test 13 (ticket 12): an `extract` line's applied reconciles reach the row, and the `stats` tool shows them in a
+/// Spec test 13 (issue #37): an `extract` line's applied reconciles reach the row, and the `stats` tool shows them in a
 /// column of their own after the new and the replaced facts.
 #[test]
 fn an_extract_lines_reconciles_count_in_the_row_and_in_the_stats_text() {

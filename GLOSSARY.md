@@ -254,6 +254,10 @@ _Avoid_: test set, benchmark, fixtures
 One real prompt in the eval set, with the repo, branch and session it came from.
 _Avoid_: test case, example, sample
 
+**Replay case**:
+A frozen scenario for the merge checks: a copy of a home and its transcripts, the steps to run on it, and its pass questions. The harness command replay-case runs it.
+_Avoid_: case (that is one real prompt of the eval set), fixture
+
 **Case set**:
 The cases frozen together from one window of real prompts, with the memory text each case can show. The eval set holds one or more case sets.
 _Avoid_: dataset, split, suite
