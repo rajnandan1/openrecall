@@ -760,7 +760,8 @@ class HarnessTest(unittest.TestCase):
                              (dict(case, steps=[dict(run="capture", session="S1", branch="feat/abc-12")]), "bytes"),
                              (dict(case, questions=[dict(name="q", checks=[dict(kind="log", event="extract")])]), "field"),
                              (dict(case, questions=[dict(name="q", checks=[dict(kind="cursor", session="S1")])]),
-                              "equals, at_least or starts")):
+                              "equals, at_least or starts"),
+                             (dict(case, runs=0), "runs"), (dict(case, runs="3"), "runs")):
             with open(os.path.join(folder, "case.json"), "w") as fh:
                 json.dump(dict(wrong, provider=False), fh)
             with self.assertRaises(SystemExit) as stop:

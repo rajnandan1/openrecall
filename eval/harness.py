@@ -1848,6 +1848,8 @@ def load_case(folder):
             if check.get("want", "some") not in ("some", "none", "all"):
                 sys.exit("%s: question %r wants %r, not some, none or all" % (folder, q["name"], check.get("want")))
     c.setdefault("runs", 3 if c.get("provider") else 1)
+    if type(c["runs"]) is not int or c["runs"] < 1:
+        sys.exit("%s: runs must be a whole number of 1 or more, not %r" % (folder, c["runs"]))
     return c
 
 
@@ -1949,6 +1951,8 @@ def scratch_path(address, home):
 def recalled(binary, env, queries):
     """Spec 3.12: the addresses `openrecall mcp` returns for each `{query, k}`, called over stdio as Claude Code calls
     it, read from the server's `mcp` log lines."""
+    recalls = lambda: [e for e in logged(env["OPENRECALL_HOME"]) if e.get("event") == "mcp" and e.get("tool") == "recall"]
+    before = len(recalls())
     mcp = subprocess.Popen([binary, "mcp"], env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
 
     def send(**msg):
@@ -1968,8 +1972,10 @@ def recalled(binary, env, queries):
     finally:
         mcp.stdin.close()
         mcp.wait(timeout=10)
-    lines = [e for e in logged(env["OPENRECALL_HOME"]) if e.get("event") == "mcp" and e.get("tool") == "recall"]
-    return [a for e in lines[-len(queries):] for a in e.get("addresses", [])]
+    lines = recalls()[before:]
+    if len(lines) != len(queries):
+        raise RuntimeError("%d of %d recall calls logged a result" % (len(lines), len(queries)))
+    return [a for e in lines for a in e.get("addresses", [])]
 
 
 def replay_case(folder, runs=None, binary=BINARY, says=None, dedupe_fn=None):
