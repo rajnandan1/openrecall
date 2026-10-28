@@ -4,7 +4,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // macOS sets close-on-exec on a new pipe in a second step, so a parallel test's spawn can inherit it.
 static SPAWN: Mutex<()> = Mutex::new(());
@@ -16,6 +16,8 @@ struct World {
     folder: PathBuf,
     entrypoint: &'static str,
     plugin: Option<PathBuf>,
+    /// The extraction worker waits and checks again; off, it exits after one pass, so no test waits on a poll.
+    poll: bool,
 }
 
 impl World {
@@ -35,6 +37,7 @@ impl World {
             folder,
             entrypoint: "cli",
             plugin: None,
+            poll: false,
         }
     }
 
@@ -72,6 +75,9 @@ impl World {
             .stdout(Stdio::piped());
         if let Some(plugin) = &self.plugin {
             cmd.env("CLAUDE_PLUGIN_ROOT", plugin);
+        }
+        if !self.poll {
+            cmd.env("OPENRECALL_POLL", "0");
         }
         let guard = SPAWN.lock().unwrap();
         let child = cmd.spawn().unwrap();
@@ -593,6 +599,84 @@ fn keys_are_redacted_and_renames_move_the_record() {
         w.record("feat--y").is_some() && w.record("feat--z").is_some(),
         "a switch keeps the old record"
     );
+}
+
+#[test]
+fn a_notification_turn_changes_the_last_answer_and_keeps_the_last_ask() {
+    let w = World::new("notification");
+    w.branch("feat/x");
+    start(&w, "E");
+    turn(&w, "E", "merge ABC-12 and release it", "Merged. The release run is going.");
+    let answered_at = |w: &World| {
+        let rec = w.record("feat--x").unwrap();
+        rec.lines().find_map(|l| l.strip_prefix("answered_at: ")).unwrap().to_string()
+    };
+    let merged_at = answered_at(&w);
+    let note = "<task-notification><task-id>t1</task-id><status>completed</status></task-notification>";
+    turn(&w, "E", note, "The release run finished: ABC-12 is live in prod.");
+    let rec = w.record("feat--x").unwrap();
+    assert!(
+        rec.contains("## Last ask\nmerge ABC-12 and release it\n## Last answer\nThe release run finished: ABC-12 is live in prod.\n"),
+        "{rec}"
+    );
+    assert_ne!(answered_at(&w), merged_at);
+
+    w.turn("E", &[user(note)], "");
+    assert!(
+        w.record("feat--x").unwrap().contains("## Last answer\nThe release run finished: ABC-12 is live in prod.\n"),
+        "a notification with no text keeps the answer"
+    );
+}
+
+#[test]
+fn a_turn_that_ends_on_trunk_writes_the_record_of_the_branch_it_started_on() {
+    let w = World::new("trunk");
+    w.branch("feat/x");
+    start(&w, "E");
+    turn(&w, "E", "Build ABC-12 so exports stop failing on empty rows", "Built it.");
+    w.branch("main");
+    turn(&w, "E", "merge it into main", "Merged into main.");
+    assert!(w.record("feat--x").unwrap().contains("## Last ask\nmerge it into main\n## Last answer\nMerged into main.\n"));
+    turn(&w, "E", "release it", "Released from main.");
+    assert!(w.record("feat--x").unwrap().contains("## Last ask\nrelease it\n## Last answer\nReleased from main.\n"));
+    fs::write(w.folder.join(".git/HEAD"), "0123456789abcdef0123456789abcdef01234567\n").unwrap();
+    turn(&w, "E", "check out the tag", "Checked out the release tag.");
+    assert!(w.record("feat--x").unwrap().contains("## Last answer\nChecked out the release tag.\n"));
+    assert!(w.record("main").is_none());
+
+    w.branch("feat/x");
+    turn(&w, "E", "back to the branch", "Back.");
+    assert!(log_of(&w, "hop").is_empty(), "a turn on trunk is not a hop");
+    assert_eq!(log_of(&w, "settled").len(), 1, "the trunk turns keep the branch and its turns");
+    let trunk: Vec<Value> = log_of(&w, "trunk").into_iter().map(|e| json!([e["session"], e["branch"]])).collect();
+    assert_eq!(trunk, vec![json!(["E", "feat/x"]); 3]);
+
+    w.branch("main");
+    start(&w, "M");
+    turn(&w, "M", "a question on main", "An answer.");
+    turn(&w, "M", "another one", "Another answer.");
+    assert!(w.record("main").is_none() && log_of(&w, "trunk").len() == 3, "a session on trunk writes nothing");
+}
+
+#[test]
+fn a_turn_that_ends_on_trunk_in_another_repo_writes_nothing_there() {
+    let w = World::new("trunk-repos");
+    w.branch("feat/x");
+    start(&w, "E");
+    turn(&w, "E", "Build ABC-12 so exports stop failing on empty rows", "Built it.");
+    let api = w.repo("api", Some("git@github.com:someone/api.git"));
+    api.branch("main");
+    turn(&api, "E", "merge the api fix into main", "Merged into main.");
+    let handoffs = w.home.join(".openrecall/repos/github.com/someone/api/handoffs");
+    assert!(fs::read_dir(&handoffs).map_or(true, |mut d| d.next().is_none()), "nothing in {}", handoffs.display());
+    assert!(w.record("feat--x").unwrap().contains("## Last ask\nBuild ABC-12"));
+    assert!(log_of(&w, "trunk").is_empty());
+
+    put(&w.home.join(".openrecall/sessions/O.json"), &json!({"branch": "feat/x", "turns": 1, "ledger": []}).to_string());
+    w.branch("main");
+    turn(&w, "O", "merge it into main", "Merged into main.");
+    assert!(w.record("feat--x").unwrap().contains("## Last ask\nBuild ABC-12"), "a state from 0.10.1 keeps no branch");
+    assert!(log_of(&w, "trunk").is_empty());
 }
 
 #[test]
@@ -1261,7 +1345,7 @@ fn stats_row(day: &str, written_at: u64, extra: Value) -> Value {
         "picks": 3, "pick_skips": {}, "picks_delivered": 2, "pick_drops": {}, "picks_used": {"yes": 1, "judged": 2},
         "pick_cost": 0.31, "pick_ms": 3000, "pushes": {"settle": 2, "identifier": 1},
         "right_pushes": {"right": 2, "wrong": 1, "unjudged": 4}, "late_pushes": {"late": 1, "judged": 3},
-        "extraction_runs": 5, "facts": {"new": 7, "replaced": 1, "skipped": 0, "dropped": 0}, "suggestions": 0,
+        "extraction_runs": 5, "facts": {"new": 7, "replaced": 1, "reconciled": 2, "skipped": 0, "dropped": 0}, "suggestions": 0,
         "strikes": 1, "failed_sessions": 0, "stops": 0, "extraction_cost": 1.5, "extraction_ms": 20000, "redactions": 0,
         "own_tool_calls": {}, "update_check": {}, "errors": 0});
     row.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
@@ -1269,7 +1353,7 @@ fn stats_row(day: &str, written_at: u64, extra: Value) -> Value {
 }
 
 const STATS_HEADER: &str = "day versions sessions prompts injections used_signal picks_delivered picks_used pushes \
-    right_pushes late_pushes extraction_runs facts_new strikes cost_usd hook_ms errors";
+    right_pushes late_pushes extraction_runs facts_new facts_replaced facts_reconciled strikes cost_usd hook_ms errors";
 
 /// Spec test 11: the table shows the range's rows, `-` for a field a row lacks, and a totals line.
 #[test]
@@ -1298,9 +1382,9 @@ fn the_stats_tool_prints_the_ranges_rows_and_their_totals() {
     let (text, err) = m.tool("stats", range.clone());
     let table = format!(
         "{}: the newest row was written at 2026-01-16 05:30:00 local time.\n{STATS_HEADER}\n\
-         2026-01-09 0.8.0,0.9.0 3 12 4 2/4 1 - 1 1/1 0/1 2 3 0 0.33 35/90 1\n\
-         2026-01-10 0.9.0 2 10 3 1/3 2 1/2 3 2/3 1/3 5 7 1 1.81 40/70 0\n\
-         total - - 22 7 3/7 3 - 4 3/4 1/4 7 10 1 2.14 - 1",
+         2026-01-09 0.8.0,0.9.0 3 12 4 2/4 1 - 1 1/1 0/1 2 3 0 - 0 0.33 35/90 1\n\
+         2026-01-10 0.9.0 2 10 3 1/3 2 1/2 3 2/3 1/3 5 7 1 2 1 1.81 40/70 0\n\
+         total - - 22 7 3/7 3 - 4 3/4 1/4 7 10 1 - 1 2.14 - 1",
         rows.display()
     );
     assert!(!err);
@@ -1417,12 +1501,17 @@ struct Provider {
 
 impl Provider {
     fn start(replies: Vec<(u16, Value)>) -> Provider {
+        Provider::start_with(replies, |_| {})
+    }
+
+    /// `before(i)` runs once request `i` has arrived, before its reply goes out.
+    fn start_with(replies: Vec<(u16, Value)>, before: impl Fn(usize) + Send + 'static) -> Provider {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let seen = Arc::new(Mutex::new(vec![]));
         let kept = seen.clone();
         std::thread::spawn(move || {
-            for (status, reply) in replies {
+            for (i, (status, reply)) in replies.into_iter().enumerate() {
                 let Ok((mut stream, _)) = listener.accept() else {
                     return;
                 };
@@ -1446,6 +1535,7 @@ impl Provider {
                 let mut body = vec![0; len];
                 reader.read_exact(&mut body).unwrap();
                 kept.lock().unwrap().push((head, serde_json::from_slice(&body).unwrap()));
+                before(i);
                 let text = reply.to_string();
                 write!(stream, "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}", text.len()).unwrap();
             }
@@ -1538,7 +1628,7 @@ fn extraction_writes_dedupes_and_moves_the_cursor() {
     assert!(input.starts_with("Repository: github.com/someone/app\nSession date: 20") && input.contains("\n\nTranscript:\n[user] Build ABC-12"), "{input}");
     assert!(input.contains("[REDACTED:github-pat]") && !input.contains(&token) && input.contains("[tool] Edit ") && !input.contains("NEW TURNS"));
     let dedupe = reqs[1].1["messages"][1]["content"].as_str().unwrap();
-    assert!(dedupe.contains("\n\ngithub.com/someone/app/export-empty-rows [gotcha] 2026-01-01\nExports fail on empty rows\n"), "{dedupe}");
+    assert!(dedupe.contains("\n\ngithub.com/someone/app/export-empty-rows [gotcha] 2026-01-01T00:00:00Z\nExports fail on empty rows\n"), "{dedupe}");
     assert!(dedupe.contains("\n\nFact 0 [gotcha] export-empty-rows\n") && dedupe.contains("Looks like: github.com/someone/app/export-empty-rows"), "{dedupe}");
 
     let fact = fs::read_to_string(repo.join("export-empty-rows.md")).unwrap();
@@ -1625,6 +1715,450 @@ fn dedupe_sees_a_built_in_memory_past_the_top_five_and_past_its_start() {
     let dedupe = p.requests()[1].1["messages"][1]["content"].as_str().unwrap().to_string();
     assert!(dedupe.contains("/tools-build [project] ") && dedupe.contains(stated), "{dedupe}");
     assert!(log.contains("\"action\":\"skip\"") && log.contains("\"skipped\":1") && !repo.join("search-tool-fills-k.md").exists(), "{log}");
+}
+
+fn at(mut line: Value, time: &str) -> Value {
+    line["timestamp"] = json!(time);
+    line
+}
+
+/// Ends the session, then waits for the `extract` line of the run that read its whole transcript.
+fn extracted_to_end(w: &World, sid: &str) -> Value {
+    w.hook(&["extract"], sid, json!({}));
+    let len = fs::metadata(w.root.join(format!("{sid}.jsonl"))).unwrap().len();
+    let started = Instant::now();
+    loop {
+        if let Some(line) = log_of(w, "extract").into_iter().find(|e| e["session"] == sid && e["to"] == len) {
+            return line;
+        }
+        assert!(started.elapsed() < Duration::from_secs(20), "no extract line of {sid} to byte {len}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn dedupe_lines(w: &World, action: &str) -> Vec<Value> {
+    log_of(w, "dedupe").into_iter().filter(|e| e["action"] == action).collect()
+}
+
+const MERGE_SYSTEM: &str = r#"You keep a memory store free of near-copies. You get new facts just extracted from one Claude Code session, and the existing memories of the same repository that look most like them or name the same ticket ID, PR number or path. The input gives the time at which the session's last new turn ended, and each memory's last change, to the second. Decide each new fact:
+
+- skip: an existing memory already states it, so a later session that read that memory would learn nothing new from the fact. Give the address of that memory.
+- replace: the new fact is about the same thing as one existing memory whose address does not start with builtin/ or global/, and it changes that memory or adds to it. Give that memory's address, and write the replacement: a description and a body that hold everything in the old memory that is still true plus everything in the new fact. Where they disagree, the new fact wins, unless the memory changed after the session's last new turn ended: then the memory is newer and wins.
+- new: no existing memory states it, or the only memory about the same thing has an address that starts with builtin/ or global/. Leave address, description and body empty.
+
+When unsure between new, skip and replace, choose new. A memory that changed after the session's last new turn ended is newer than every new fact. Where it disagrees with a fact, it wins: a replacement or a rewrite keeps its version, and a fact that it shows to be out of date as a whole is skipped, with its address.
+
+Then add a reconcile decision for every other existing memory whose address does not start with builtin/ or global/ and that the fact makes wrong or out of date, for example a memory that says a ticket is open when the fact says it is closed. Give that memory's address and its rewrite: a description and a body that keep its subject and everything in it that is still true, with only the out-of-date part changed. Never reconcile a memory that changed after the session's last new turn ended. When unsure whether a memory is out of date, leave it.
+
+A fact marked remembered is already in the store. Decide it as new, and add its reconcile decisions as for any fact.
+
+Memories whose address starts with builtin/ or global/ are never replaced or reconciled. If two new facts change the same memory, put both into one rewrite: one replace or reconcile decision for that memory. A fact whose only change went into that rewrite is skipped.
+
+A replacement or a rewrite follows the store's rules: identifiers verbatim (paths, symbols, ticket IDs, PR numbers, commands), never a line number, a description of at most 150 characters that states what the memory itself says (for a rewrite, its own subject, not the new fact), a body in plain sentences.
+
+Answer with one JSON object and nothing else, one new, skip or replace decision per new fact plus its reconcile decisions, matching this JSON schema:
+"#;
+
+const APP: &str = "github.com/someone/app";
+const OLD: &str = "source: E0 2026-01-01T00:00:00.000Z\n";
+
+#[test]
+fn a_fact_reconciles_an_older_memory_that_names_its_ticket_only_in_the_body_past_the_bm25_top_ten() {
+    let w = World::new("reconcile");
+    w.branch("feat/x");
+    let home = w.home.join(".openrecall");
+    let repo = home.join("repos").join(APP);
+    w.fillers(&repo);
+    for i in 0..12 {
+        let text = format!("ABC-12 moved the export retry queue to drain on each deploy, note {i}.");
+        w.memory(&repo, &format!("export-queue-{i}"), "gotcha", OLD, &text, &text);
+    }
+    w.memory(&repo, "billing-cleanup", "gotcha", OLD, "Billing cleanup waits for a ticket", "Billing cleanup waits for ABC-12 to land.");
+    w.memory(&repo, "abc-12-was-open", "state", &format!("{OLD}expires: 2026-01-15\n"), "ABC-12 is open", "ABC-12 is open.");
+    w.memory(&repo, "abc-12-pending", "state", &format!("{OLD}expires: 2099-12-31\n"), "ABC-12 waits for review", "ABC-12 waits for review.");
+    let billing = fs::read_to_string(repo.join("billing-cleanup.md")).unwrap();
+    let p = Provider::start(vec![
+        answer(json!({"facts": [{"type": "state", "name": "abc-12-closed",
+            "description": "ABC-12 is closed: the export retry queue now drains on each deploy",
+            "body": "ABC-12 is closed. The export retry queue now drains on each deploy."}], "claude_md_rules": []})),
+        answer(json!({"decisions": [
+            {"fact": 0, "action": "reconcile", "address": format!("{APP}/billing-cleanup"),
+             "description": "Billing cleanup can land: ABC-12 is closed", "body": "Billing cleanup waited for ABC-12, which is now closed."},
+            {"fact": 0, "action": "new", "address": "", "description": "", "body": ""},
+            {"fact": 0, "action": "reconcile", "address": format!("{APP}/abc-12-pending"),
+             "description": "ABC-12 passed review and is closed", "body": "ABC-12 passed review and is closed."}]})),
+    ]);
+    extraction_on(&w, &p);
+    w.turn("S1", &[at(user("Close ABC-12 once the export queue drains"), "2026-10-26T16:20:00.000Z"),
+                   at(said("ABC-12 is closed.", None), "2026-10-26T16:22:47.500Z")], "");
+    let run = extracted_to_end(&w, "S1");
+
+    let system = p.requests()[1].1["messages"][0]["content"].as_str().unwrap().to_string();
+    let schema: Value = serde_json::from_str(system.strip_prefix(MERGE_SYSTEM).expect("the MERGE text of the spec")).unwrap();
+    assert_eq!(schema["properties"]["decisions"]["items"]["properties"]["action"]["enum"], json!(["new", "skip", "replace", "reconcile"]));
+    assert_eq!((run["new"].as_u64(), run["reconciled"].as_u64()), (Some(1), Some(2)), "{run}");
+    let fact = fs::read_to_string(repo.join("abc-12-closed.md")).unwrap();
+    let expires = fact.lines().find(|l| l.starts_with("expires: ")).unwrap();
+    let rewritten = fs::read_to_string(repo.join("billing-cleanup.md")).unwrap();
+    assert!(rewritten.contains("\ndescription: Billing cleanup can land: ABC-12 is closed\nmetadata:\n  type: gotcha\n"), "a reconcile keeps the memory's type: {rewritten}");
+    assert!(rewritten.contains(&format!("\n{OLD}updated: S1 ")) && !rewritten.contains("expires:"), "{rewritten}");
+    assert!(rewritten.ends_with("\n\nBilling cleanup waited for ABC-12, which is now closed.\n"), "{rewritten}");
+    let pending = fs::read_to_string(repo.join("abc-12-pending.md")).unwrap();
+    assert!(pending.contains("  type: state\n") && pending.contains(&format!("\n{expires}\n")), "a reconciled state memory gets a new 14-day expiry: {pending}");
+    let reconciles = dedupe_lines(&w, "reconcile");
+    assert_eq!(reconciles.len(), 2, "{reconciles:?}");
+    for r in &reconciles {
+        assert!(r["name"] == "abc-12-closed" && r["why"].is_null() && r["copy"].is_string(), "{r}");
+    }
+    let copy = repo.join("replaced").join(reconciles[0]["copy"].as_str().unwrap());
+    assert_eq!((reconciles[0]["address"].as_str(), fs::read_to_string(copy).unwrap()), (Some(&*format!("{APP}/billing-cleanup")), billing), "the old text lands in replaced/");
+
+    let line = &dedupe_lines(&w, "new")[0];
+    assert_eq!(line["address"], format!("{APP}/abc-12-closed"), "the fact's own decision is its first new, skip or replace one");
+    let listed: Vec<(&str, bool)> = line["candidates"].as_array().unwrap().iter()
+        .map(|c| (c["address"].as_str().unwrap(), c["ident"] == true)).collect();
+    let bm25 = listed.iter().take_while(|(_, ident)| !ident).count();
+    assert_eq!(bm25, 10, "the bm25 top 10 first: {listed:?}");
+    assert!(listed.contains(&(&format!("{APP}/billing-cleanup"), true)), "the body-only ticket joins by identifier: {listed:?}");
+    assert!(listed.len() <= 20 && listed[bm25..].iter().all(|(_, ident)| *ident), "{listed:?}");
+    assert!(!listed.iter().any(|(a, _)| a.ends_with("/abc-12-was-open")), "an expired state fact leaves both searches: {listed:?}");
+}
+
+#[test]
+fn a_dropped_reconcile_writes_nothing_and_a_secret_in_its_rewrite_logs_the_rule() {
+    let w = World::new("reconcile-drops");
+    w.branch("feat/x");
+    let home = w.home.join(".openrecall");
+    let repo = home.join("repos").join(APP);
+    w.memory(&repo, "export-notes", "gotcha", OLD, "Exports read src/export.py", "Exports read src/export.py.");
+    w.memory(&repo, "export-owner", "pointer", OLD, "src/export.py owns the export", "src/export.py owns the export.");
+    w.memory(&home.join("global"), "export-tip", "gotcha", OLD, "src/export.py is slow", "src/export.py is slow.");
+    let before = |name: &str| fs::read_to_string(repo.join(format!("{name}.md"))).unwrap();
+    let (owner, tip) = (before("export-owner"), fs::read_to_string(home.join("global/export-tip.md")).unwrap());
+    let token = format!("ghp_{}", "Zq8Xw3Kp9Lm2Nv7Bc4Rt6Yh1Jd5Fg0Sa3Ew8");
+    let rewrite = |fact: usize, address: &str, body: &str| {
+        json!({"fact": fact, "action": "reconcile", "address": address, "description": "src/export.py streams rows", "body": body})
+    };
+    let p = Provider::start(vec![
+        answer(json!({"facts": [
+            {"type": "gotcha", "name": "export-streams", "description": "src/export.py streams rows", "body": "src/export.py now streams rows."},
+            {"type": "decision", "name": "export-owner-team", "description": "The data team owns src/export.py", "body": "The data team owns src/export.py."}],
+            "claude_md_rules": []})),
+        answer(json!({"decisions": [
+            {"fact": 0, "action": "replace", "address": format!("{APP}/export-notes"), "description": "Exports stream rows from src/export.py", "body": "src/export.py streams rows."},
+            rewrite(0, &format!("{APP}/export-notes"), "src/export.py streams rows."),
+            rewrite(0, &format!("{APP}/no-such-memory"), "src/export.py streams rows."),
+            rewrite(0, "global/export-tip", "src/export.py streams rows."),
+            rewrite(0, &format!("{APP}/export-owner"), ""),
+            rewrite(1, &format!("{APP}/export-owner"), &format!("src/export.py pushes with {token}.")),
+            {"fact": 1, "action": "skip", "address": format!("{APP}/elsewhere"), "description": "", "body": ""}]})),
+    ]);
+    extraction_on(&w, &p);
+    w.turn("S1", &[at(user("Make src/export.py stream its rows"), "2026-10-26T16:20:00.000Z"),
+                   at(said("Done.", None), "2026-10-26T16:22:47.500Z")], "");
+    let run = extracted_to_end(&w, "S1");
+
+    let why: Vec<String> = dedupe_lines(&w, "reconcile").iter()
+        .map(|r| format!("{} {}", r["address"].as_str().unwrap().rsplit('/').next().unwrap(), r["why"].as_str().unwrap_or("")))
+        .collect();
+    assert_eq!(why, ["export-notes replaced twice", "no-such-memory not a candidate", "export-tip not own", "export-owner empty", "export-owner secret"]);
+    let secret = dedupe_lines(&w, "reconcile").pop().unwrap();
+    assert!(secret["rule"] == "github-pat" && secret["name"] == "export-owner-team" && secret["copy"].is_null(), "{secret}");
+    assert_eq!((run["reconciled"].as_u64(), run["secret_rules"].clone()), (Some(0), json!(["github-pat"])), "{run}");
+    assert_eq!((before("export-owner"), fs::read_to_string(home.join("global/export-tip.md")).unwrap()), (owner, tip));
+    let mut files: Vec<String> = fs::read_dir(&repo).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|f| f.ends_with(".md")).collect();
+    files.sort();
+    assert_eq!(files, ["export-notes.md", "export-owner.md"], "a dropped reconcile writes no new file");
+    assert_eq!(fs::read_dir(repo.join("replaced")).unwrap().count(), 1, "only the replace keeps a copy");
+    let skip = &dedupe_lines(&w, "skip")[0];
+    assert!(skip["address"] == format!("{APP}/elsewhere") && skip["why"] == "not a candidate" && run["skipped"] == 1, "{skip}");
+    let log = fs::read_to_string(home.join("log/openrecall.jsonl")).unwrap();
+    assert!(!log.contains(&token), "the log holds no text");
+}
+
+#[test]
+fn dedupe_sees_the_runs_time_and_each_candidates_to_the_second_and_writes_the_runs_time() {
+    let w = World::new("reconcile-times");
+    w.branch("feat/x");
+    let home = w.home.join(".openrecall");
+    let repo = home.join("repos").join(APP);
+    w.memory(&repo, "export-notes", "gotcha", &format!("{OLD}updated: E1 2026-10-26T17:05:09.123Z\n"), "Exports read src/export.py", "Exports read src/export.py.");
+    w.memory(&repo, "export-owner", "pointer", OLD, "src/export.py owns the export", "src/export.py owns the export.");
+    w.memory(&home.join("global"), "export-tip", "gotcha", "", "src/export.py is slow", "src/export.py is slow.");
+    w.memory(&w.builtin_dir(), "export-plan", "project", "", "The export plan", "src/export.py moves to a worker.");
+    let builtin = w.builtin_dir().join("export-plan.md");
+    let modified = std::time::UNIX_EPOCH + Duration::from_secs(1_793_032_515);
+    fs::File::options().write(true).open(&builtin).unwrap().set_modified(modified).unwrap();
+    let p = Provider::start(vec![
+        answer(json!({"facts": [
+            {"type": "gotcha", "name": "export-streams", "description": "src/export.py streams rows", "body": "src/export.py now streams rows."},
+            {"type": "pointer", "name": "export-owner-moved", "description": "src/export.py owns the streaming export", "body": "src/export.py owns the streaming export."}],
+            "claude_md_rules": []})),
+        answer(json!({"decisions": [
+            {"fact": 0, "action": "new", "address": "", "description": "", "body": ""},
+            {"fact": 0, "action": "reconcile", "address": format!("{APP}/export-notes"), "description": "Exports stream from src/export.py", "body": "Exports stream from src/export.py."},
+            {"fact": 1, "action": "replace", "address": format!("{APP}/export-owner"), "description": "src/export.py owns the streaming export", "body": "src/export.py owns the streaming export."}]})),
+    ]);
+    extraction_on(&w, &p);
+    w.turn("S1", &[at(user("Make src/export.py stream its rows"), "2026-10-26T16:20:00.000Z"),
+                   at(said("Done.", None), "2026-10-26T16:22:47.500Z"), said("A line with no time.", None)], "");
+    extracted_to_end(&w, "S1");
+
+    let input = p.requests()[1].1["messages"][1]["content"].as_str().unwrap().to_string();
+    assert!(input.starts_with(&format!("Repository: {APP}\nLast new turn ended: 2026-10-26T16:22:47Z\n\nExisting memories:\n\n")), "{input}");
+    for header in [
+        format!("\n{APP}/export-notes [gotcha] 2026-10-26T17:05:09Z\n"),
+        format!("\n{APP}/export-owner [pointer] 2026-01-01T00:00:00Z\n"),
+        "/export-plan [project] 2026-10-26T16:35:15Z\n".to_string(),
+        "\nglobal/export-tip [gotcha]\n".to_string(),
+    ] {
+        assert!(input.contains(&header), "{header}\n{input}");
+    }
+    let stamp = "S1 2026-10-26T16:22:47.500Z";
+    let new = fs::read_to_string(repo.join("export-streams.md")).unwrap();
+    assert!(new.contains(&format!("\nsource: {stamp}\n")), "a new memory's source is the run's time: {new}");
+    for name in ["export-notes", "export-owner"] {
+        let text = fs::read_to_string(repo.join(format!("{name}.md"))).unwrap();
+        assert!(text.contains(&format!("{OLD}updated: {stamp}\n")), "a replace and a reconcile record the run's time: {text}");
+    }
+}
+
+#[test]
+fn a_memory_remembered_in_the_new_turns_reconciles_others_at_the_next_run() {
+    let w = World::new("reconcile-remembered");
+    w.branch("feat/x");
+    let home = w.home.join(".openrecall");
+    let repo = home.join("repos").join(APP);
+    w.memory(&repo, "queue-owner", "pointer", OLD, "src/queue.py runs the retry queue", "src/queue.py runs the retry queue.");
+    w.memory(&repo, "queue-limits", "gotcha", OLD, "src/queue.py caps retries at 3", "src/queue.py caps retries at 3.");
+    let limits = fs::read_to_string(repo.join("queue-limits.md")).unwrap();
+    let p = Provider::start(vec![
+        answer(json!({"facts": [{"type": "gotcha", "name": "queue-batches", "description": "src/queue.py sends retries in batches",
+            "body": "src/queue.py sends retries in batches."}], "claude_md_rules": []})),
+        answer(json!({"decisions": [{"fact": 0, "action": "new", "address": "", "description": "", "body": ""}]})),
+        answer(json!({"facts": [], "claude_md_rules": []})),
+        answer(json!({"decisions": [
+            {"fact": 0, "action": "replace", "address": format!("{APP}/queue-limits"), "description": "Wrong", "body": "Wrong."},
+            {"fact": 0, "action": "reconcile", "address": format!("{APP}/queue-owner"), "description": "src/worker.py runs the retry queue",
+             "body": "The retry queue moved from src/queue.py to src/worker.py."}]})),
+    ]);
+    extraction_on(&w, &p);
+    w.turn("M", &[at(user("Batch the retries in src/queue.py"), "2026-10-26T16:00:00.000Z"),
+                  at(said("Batched.", None), "2026-10-26T16:05:00.250Z")], "");
+    extracted_to_end(&w, "M");
+    assert!(fs::read_to_string(repo.join("queue-batches.md")).unwrap().contains("\nsource: M 2026-10-26T16:05:00.250Z\n"));
+
+    let args = json!({"text": "The retry queue moved from src/queue.py to src/worker.py.", "type": "decision", "scope": "repo", "name": "queue-moved"});
+    let mut m = Mcp::start(&w);
+    let (text, err) = m.tool("remember", args.clone());
+    assert!(!err, "{text}");
+    m.close();
+    let moved = fs::read_to_string(repo.join("queue-moved.md")).unwrap();
+    let call = json!({"type": "tool_use", "id": "r1", "name": "mcp__plugin_openrecall_openrecall__remember", "input": args});
+    w.turn("M", &[at(user("Move the retry queue to src/worker.py"), "2026-10-26T16:40:00.000Z"),
+                  at(said("Moved.", Some(call)), "2026-10-26T16:45:00.000Z")], "");
+    let run = extracted_to_end(&w, "M");
+
+    let reqs = p.requests();
+    assert_eq!(reqs.len(), 4, "the merge call runs with no proposed fact");
+    let input = reqs[3].1["messages"][1]["content"].as_str().unwrap();
+    assert!(input.contains("\n\nFact 0 [decision, remembered] queue-moved\n") && !input.contains("Fact 1 "), "{input}");
+    assert!(input.contains(&format!("\n\n{APP}/queue-batches [gotcha] ")), "an earlier run's memory is a candidate, not a fact: {input}");
+    let owner = fs::read_to_string(repo.join("queue-owner.md")).unwrap();
+    assert!(owner.ends_with("\n\nThe retry queue moved from src/queue.py to src/worker.py.\n") && owner.contains("  type: pointer\n"), "{owner}");
+    assert_eq!(fs::read_to_string(repo.join("queue-limits.md")).unwrap(), limits, "the remembered fact's own decision is ignored");
+    assert_eq!(fs::read_to_string(repo.join("queue-moved.md")).unwrap(), moved);
+    assert!(!repo.join("queue-moved-2.md").exists());
+    assert_eq!((run["proposed"].as_u64(), run["new"].as_u64(), run["reconciled"].as_u64()), (Some(0), Some(0), Some(1)), "{run}");
+    let r = &dedupe_lines(&w, "reconcile")[0];
+    assert!(r["name"] == "queue-moved" && r["remembered"] == format!("{APP}/queue-moved") && r["why"].is_null(), "{r}");
+    assert_eq!(log_of(&w, "dedupe").len(), 2, "a remembered fact gets no line of its own");
+}
+
+#[test]
+fn a_memory_an_earlier_run_wrote_at_its_wall_clock_time_is_not_remembered_without_a_remember_call() {
+    let w = World::new("remembered-upgrade");
+    w.branch("feat/x");
+    let repo = w.home.join(".openrecall/repos").join(APP);
+    let p = Provider::start(vec![
+        answer(json!({"facts": [], "claude_md_rules": []})),
+        answer(json!({"facts": [{"type": "gotcha", "name": "queue-batch-size", "description": "src/queue.py sends retries in batches of 50",
+            "body": "src/queue.py sends retries in batches of 50."}], "claude_md_rules": []})),
+        answer(json!({"decisions": [{"fact": 0, "action": "replace", "address": format!("{APP}/queue-batches"),
+            "description": "src/queue.py sends retries in batches of 50", "body": "src/queue.py sends retries in batches of 50."}]})),
+    ]);
+    extraction_on(&w, &p);
+    w.turn("M", &[at(user("Batch the retries in src/queue.py"), "2026-10-26T16:00:00.000Z"),
+                  at(said("Batched.", None), "2026-10-26T16:05:00.250Z")], "");
+    extracted_to_end(&w, "M");
+    w.memory(&repo, "queue-batches", "gotcha", "source: M 2026-10-26T16:41:07.000Z\n", "src/queue.py sends retries in batches",
+             "src/queue.py sends retries in batches.");
+    w.turn("M", &[at(user("Set the retry batch size to 50"), "2026-10-26T17:20:00.000Z"),
+                  at(said("Set.", None), "2026-10-26T17:22:00.000Z")], "");
+    extracted_to_end(&w, "M");
+
+    let reqs = p.requests();
+    assert_eq!(reqs.len(), 3);
+    let input = reqs[2].1["messages"][1]["content"].as_str().unwrap();
+    assert!(!input.contains("remembered") && !input.contains("Fact 1 "), "{input}");
+    let batches = fs::read_to_string(repo.join("queue-batches.md")).unwrap();
+    assert!(batches.ends_with("\n\nsrc/queue.py sends retries in batches of 50.\n"), "the replace applies: {batches}");
+}
+
+/// Extraction on through the provider stand-in.
+fn extraction_on(w: &World, p: &Provider) {
+    let home = w.home.join(".openrecall");
+    put(&home.join("extract.toml"), &format!("base_url = \"http://127.0.0.1:{}/v1\"\nmodel = \"test/model\"\n", p.port));
+    put(&home.join("api-key"), "sk-test-123\n");
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(home.join("api-key"), fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+/// A transcript line with a `timestamp` `mins` minutes ago.
+fn ago(mins: u64, mut line: Value) -> Value {
+    let secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() - mins * 60;
+    let z = (secs / 86400) as i64 + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let (d, m) = (doy - (153 * mp + 2) / 5 + 1, if mp < 10 { mp + 3 } else { mp - 9 });
+    let (y, s) = (yoe + era * 400 + i64::from(m <= 2), secs % 86400);
+    line["timestamp"] = json!(format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.000Z", s / 3600, s % 3600 / 60, s % 60));
+    line
+}
+
+/// A session in the extraction queue as the capture writer leaves it, plus `extra` run-file fields, with no worker
+/// started.
+fn queue(w: &World, sid: &str, lines: &[Value], extra: Value) -> PathBuf {
+    transcript(w, sid, lines);
+    let path = w.root.join(format!("{sid}.jsonl"));
+    let mut run = json!({"transcript": path, "identity": "github.com/someone/app"});
+    run.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+    put(&w.home.join(format!(".openrecall/extract/{sid}.json")), &run.to_string());
+    path
+}
+
+/// The worker's `extract` lines of one session, once it has logged `n` of them.
+fn runs(w: &World, sid: &str, n: usize) -> Vec<Value> {
+    let started = Instant::now();
+    loop {
+        let lines: Vec<Value> = log_of(w, "extract").into_iter().filter(|e| e["session"] == sid).collect();
+        if lines.len() >= n {
+            return lines;
+        }
+        assert!(started.elapsed() < Duration::from_secs(20), "{n} runs of {sid}: {lines:?}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Waits for a running worker to exit: it holds `extract/lock` until then.
+fn worker_done(w: &World) {
+    let lock = fs::File::create(w.home.join(".openrecall/extract/lock")).unwrap();
+    while lock.try_lock().is_err() {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn a_stop_starts_the_worker_and_quiet_goes_by_the_last_line_not_the_mtime() {
+    let w = World::new("quiet");
+    w.branch("feat/x");
+    let none = || answer(json!({"facts": [], "claude_md_rules": []}));
+    let p = Provider::start(vec![none(), none()]);
+    extraction_on(&w, &p);
+    let recent = queue(&w, "B", &[ago(29, user("Rename the export job")), ago(29, said("Renamed.", None))], json!({}));
+    let old = SystemTime::now() - Duration::from_secs(2 * 3600);
+    fs::File::options().write(true).open(&recent).unwrap().set_modified(old).unwrap();
+
+    w.turn("A", &[ago(31, user("Fix the billing retries")), ago(31, said("Fixed.", None))], "");
+    runs(&w, "A", 1);
+    worker_done(&w);
+    let reqs = p.requests();
+    assert_eq!(reqs.len(), 1, "a last line 29 minutes old is not quiet, whatever the mtime");
+    assert!(reqs[0].1["messages"][1]["content"].as_str().unwrap().contains("[user] Fix the billing retries"));
+    assert!(runs(&w, "B", 0).is_empty());
+}
+
+#[test]
+fn the_worker_polls_only_while_a_session_can_still_become_due() {
+    let w = World::new("poll");
+    w.branch("feat/x");
+    let turn = |text: &str, mins: u64| [ago(mins, user(text)), ago(mins, said("Done.", None))];
+    let grows = w.root.join("G.jsonl");
+    let more: String = turn("Also note the retry limit", 35).iter().map(|l| format!("{l}\n")).collect();
+    let none = || answer(json!({"facts": [], "claude_md_rules": []}));
+    let too_long = (400, json!({"error": {"code": 400, "message": "too long", "metadata": {"error_type": "context_length_exceeded"}}}));
+    let grown = grows.clone();
+    let p = Provider::start_with(vec![too_long, none(), none(), none()], move |i| {
+        if i == 1 {
+            fs::OpenOptions::new().append(true).open(&grown).unwrap().write_all(more.as_bytes()).unwrap();
+        }
+    });
+    extraction_on(&w, &p);
+    queue(&w, "F", &turn("Ship the failed one", 50), json!({"failed": true}));
+    let read = turn("Ship the read one", 50);
+    let path = queue(&w, "D", &read, json!({}));
+    queue(&w, "D", &read, json!({"cursor": fs::metadata(&path).unwrap().len()}));
+    queue(&w, "X", &turn("Ship the struck one", 45), json!({}));
+    queue(&w, "G", &turn("Ship the growing one", 40), json!({}));
+    let first = fs::metadata(&grows).unwrap().len();
+
+    let mut worker = World { poll: true, ..w.clone() }.spawn(&["extract", "--job"]);
+    drop(worker.stdin.take());
+    let started = Instant::now();
+    while worker.try_wait().unwrap().is_none() {
+        if started.elapsed() > Duration::from_secs(20) {
+            worker.kill().unwrap();
+            panic!("the worker still polls: {:?}", log_of(&w, "extract"));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    assert_eq!(p.requests().len(), 3);
+    assert!(runs(&w, "F", 0).is_empty() && runs(&w, "D", 0).is_empty());
+    let struck = runs(&w, "X", 0);
+    assert_eq!((struck.len(), &struck[0]["strikes"]), (1, &json!(1)), "a struck session that did not grow is not taken again");
+    let taken: Vec<(u64, u64)> = runs(&w, "G", 0).iter().map(|e| (e["from"].as_u64().unwrap(), e["to"].as_u64().unwrap())).collect();
+    let end = fs::metadata(&grows).unwrap().len();
+    assert_eq!(taken, [(0, first), (first, end)], "a session that grew and went quiet again is taken again");
+}
+
+#[test]
+fn the_worker_sends_nothing_after_extraction_is_turned_off() {
+    let w = World::new("off-mid-run");
+    w.branch("feat/x");
+    let turn = |text: &str, mins: u64| [ago(mins, user(text)), ago(mins, said("Done.", None))];
+    let none = || answer(json!({"facts": [], "claude_md_rules": []}));
+    let toml = w.home.join(".openrecall/extract.toml");
+    let p = Provider::start_with(vec![none(), none()], move |_| {
+        let _ = fs::remove_file(&toml);
+    });
+    extraction_on(&w, &p);
+    queue(&w, "A", &turn("Ship the first one", 50), json!({}));
+    queue(&w, "B", &turn("Ship the second one", 40), json!({}));
+    w.run(&["extract", "--job"], "");
+    assert_eq!(p.requests().len(), 1, "no transcript goes out once extract.toml is gone");
+    assert!(log_of(&w, "extract").iter().any(|e| e["off"] == "no extract.toml"), "{:?}", log_of(&w, "extract"));
+}
+
+#[test]
+fn a_run_of_only_task_notification_turns_with_text_still_runs() {
+    let w = World::new("extract-notification");
+    w.branch("feat/x");
+    let home = w.home.join(".openrecall");
+    let p = Provider::start(vec![answer(json!({"facts": [], "claude_md_rules": []}))]);
+    extraction_on(&w, &p);
+    w.turn("S1", &[user("<task-notification><status>completed</status><summary>exit code 0</summary></task-notification>"),
+                   said("The deploy check for ABC-12 ended with 1 failed.", None)], "");
+    w.hook(&["extract"], "S1", json!({"hook_event_name": "SessionEnd"}));
+    wait_for(&home.join("log/openrecall.jsonl"), "\"event\":\"extract\",\"from\":0");
+    let reqs = p.requests();
+    assert_eq!(reqs.len(), 1, "the run calls the model");
+    let input = reqs[0].1["messages"][1]["content"].as_str().unwrap();
+    assert!(input.ends_with("Transcript:\n[task notification]\n[assistant] The deploy check for ABC-12 ended with 1 failed."), "{input}");
 }
 
 const PICK_SYSTEM: &str = "You pick memories for a coding assistant (Claude Code) that is about to act on the user's prompt. You get the list of memories (id, name and description), the session so far, newest turn first, and the prompt. Pick at most one memory, and only one that states a fact, decision, pointer or gotcha that the assistant needs to act on this prompt and that neither the prompt nor the session already contains. A memory about the same project but another task, or one that only repeats what the prompt or the session says, is a wrong pick. Most prompts need no memory: pick none unless you are sure. Return its id, or no id.";

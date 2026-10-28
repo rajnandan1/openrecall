@@ -65,6 +65,8 @@ pub struct Candidate {
     pub name: String,
     pub description: String,
     pub body: String,
+    /// The file's mtime in nanoseconds.
+    pub mtime: i64,
 }
 
 /// Ticket 11: the repo's facts, the repo's built-in topic files (read-only) and the global memories.
@@ -314,6 +316,18 @@ impl Index {
         scopes: &[Scope],
         limit: usize,
     ) -> rusqlite::Result<Vec<Candidate>> {
+        self.search_unexpired(terms, scopes, limit, "")
+    }
+
+    /// `search` without the memories whose `expires` is on or before `today` (YYYY-MM-DD), left out before the limit,
+    /// with the `<=` of the recall hook's `expired` drop. An empty `today` leaves none out.
+    pub fn search_unexpired(
+        &self,
+        terms: &[String],
+        scopes: &[Scope],
+        limit: usize,
+        today: &str,
+    ) -> rusqlite::Result<Vec<Candidate>> {
         if terms.is_empty() {
             return Ok(vec![]);
         }
@@ -323,16 +337,16 @@ impl Index {
             .collect::<Vec<_>>()
             .join(" OR ");
         let sql = format!(
-            "SELECT m.id, f.address, m.bm25, f.hash, f.kind, f.date, f.source, f.updated, f.expires, m.name, m.description, m.body
+            "SELECT m.id, f.address, m.bm25, f.hash, f.kind, f.date, f.source, f.updated, f.expires, m.name, m.description, m.body, f.mtime
              FROM (SELECT rowid AS id, -bm25(ft, {WEIGHTS}) / ?6 AS bm25, name, description, body FROM ft WHERE ft MATCH ?1) m
              JOIN files f ON f.id = m.id
-             WHERE f.dir IN (?2, ?3, ?4)
+             WHERE f.dir IN (?2, ?3, ?4) AND (f.expires = '' OR f.expires > ?7)
              ORDER BY m.bm25 DESC, f.date DESC LIMIT ?5"
         );
         self.conn
             .prepare(&sql)?
             .query_map(
-                params![query, dir(scopes, 0), dir(scopes, 1), dir(scopes, 2), limit as i64, (terms.len() as f64).sqrt()],
+                params![query, dir(scopes, 0), dir(scopes, 1), dir(scopes, 2), limit as i64, (terms.len() as f64).sqrt(), today],
                 candidate,
             )?
             .collect()
@@ -342,7 +356,7 @@ impl Index {
     pub fn all(&self, scopes: &[Scope]) -> rusqlite::Result<Vec<Candidate>> {
         self.conn
             .prepare(
-                "SELECT f.id, f.address, 0.0, f.hash, f.kind, f.date, f.source, f.updated, f.expires, m.name, m.description, m.body
+                "SELECT f.id, f.address, 0.0, f.hash, f.kind, f.date, f.source, f.updated, f.expires, m.name, m.description, m.body, f.mtime
                  FROM files f JOIN ft m ON m.rowid = f.id
                  WHERE f.dir IN (?1, ?2, ?3)
                  ORDER BY f.address",
@@ -419,6 +433,7 @@ fn candidate(r: &rusqlite::Row) -> rusqlite::Result<Candidate> {
         name: r.get(9)?,
         description: r.get(10)?,
         body: r.get(11)?,
+        mtime: r.get(12)?,
     })
 }
 
@@ -447,26 +462,24 @@ pub fn gate<'a>(kept: &'a [Candidate], scores: &[f64], size: i64, query: &str) -
     out.into_iter().map(|(c, _, via)| (c, via)).collect()
 }
 
-/// A shared ticket ID, PR number of 3 to 6 digits, or path; a path drops its line suffix and a leading `./`, and
-/// matches a path equal to it or ending in `/` plus it.
-fn shares_identifier(a: &str, b: &str) -> bool {
-    let prs = |t: &str| -> Vec<String> {
-        turn::prs_in(t).into_iter().map(|(_, p)| p).filter(|p| (3..=6).contains(&p.len())).collect()
-    };
-    let paths = |t: &str| -> Vec<String> {
-        turn::paths_in(t)
-            .into_iter()
-            .map(|p| {
-                let p = turn::LINE_SUFFIX.replace(p, "");
-                p.strip_prefix("./").unwrap_or(&p).to_string()
-            })
-            .collect()
-    };
-    let same = |x: &String, y: &String| x == y || x.ends_with(&format!("/{y}")) || y.ends_with(&format!("/{x}"));
-    let (tb, pb, xb) = (turn::tickets(b), prs(b), paths(b));
-    turn::tickets(a).iter().any(|t| tb.contains(t))
-        || prs(a).iter().any(|p| pb.contains(p))
-        || paths(a).iter().any(|x| xb.iter().any(|y| same(x, y)))
+/// The identifiers that `shares_identifier` compares: ticket IDs, PR numbers of 3 to 6 digits, and paths without
+/// their line suffix or a leading `./`.
+pub(crate) fn rule_identifiers(text: &str) -> Vec<String> {
+    let mut out = turn::tickets(text);
+    out.extend(turn::prs_in(text).into_iter().map(|(_, p)| p).filter(|p| (3..=6).contains(&p.len())));
+    out.extend(turn::paths_in(text).into_iter().map(|p| {
+        let p = turn::LINE_SUFFIX.replace(p, "");
+        p.strip_prefix("./").unwrap_or(&p).to_string()
+    }));
+    out
+}
+
+/// A shared ticket ID, PR number or path; a path matches a path equal to it or ending in `/` plus it.
+pub(crate) fn shares_identifier(a: &str, b: &str) -> bool {
+    let b = rule_identifiers(b);
+    rule_identifiers(a)
+        .iter()
+        .any(|x| b.iter().any(|y| x == y || x.ends_with(&format!("/{y}")) || y.ends_with(&format!("/{x}"))))
 }
 
 fn phrase(term: &str) -> String {
@@ -720,6 +733,7 @@ mod tests {
             name: String::new(),
             description: description.into(),
             body: body.into(),
+            mtime: 0,
         }
     }
 

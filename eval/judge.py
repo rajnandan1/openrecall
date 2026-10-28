@@ -108,6 +108,17 @@ def dedupe_check(fact, candidates, old=None):
     return dict(repeat=repeat, supersede=supersede, kept=kept)
 
 
+def says(question, texts):
+    """Spec 3.12's pass question over memories: Jev's yes probability that each memory text answers `question` yes."""
+    out = []
+    for at in range(0, len(texts), 5):
+        memories = {"m%d" % i: t[:BODY_CHARS] for i, t in enumerate(texts[at:at + 5], 1)}
+        answers = ask(dict(memories=memories), {k: dict(type="noul", instructions="Read `memories.%s`. %s" % (k, question))
+                                                for k in memories})
+        out += [answers.get(k, {}).get("noul", 0.0) for k in memories]
+    return out
+
+
 GOAL = {
     "task": "it states the feature, fix, question or ticket that most of `asks` and `next_prompts` work on",
     "step": "it is one step, follow-up, answer, side question or status check inside or beside that work",

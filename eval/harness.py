@@ -6,6 +6,7 @@
     python3 eval/harness.py freeze-set FOLDER SINCE UNTIL     # a case set of the live prompts in a window
     python3 eval/harness.py report-set FOLDER [--binary PATH] [--picks]   # FOLDER/runs/<UTC time>/report.md
     python3 eval/harness.py daily [--home PATH]      # Daily stats: one row per local day of the home's log
+    python3 eval/harness.py replay-case CASE [--runs N] [--binary PATH]   # a frozen case of eval/replay/CASE
 
 Reads Claude Code transcripts under ~/.claude/projects and writes only under ~/.openrecall/eval/
 (OPENRECALL_HOME replaces ~/.openrecall). The first freeze needs appendix-a.jsonl there: one
@@ -15,6 +16,8 @@ scratch world, then every frozen case for level 2, labeled by Jev through judge.
 baseline alone. `--picks` also runs the pick job with the provider of extract.toml, about $1.60 a run.
 A case set (ticket 06) is every searched real prompt of the live recall log in a window, each with frozen copies of
 what its replay reads; FOLDER is under ~/.openrecall/eval/ and SINCE and UNTIL are ISO times.
+A replay case (spec 3.12) runs N times, each on a fresh scratch home, and prints each pass question's share of runs;
+its layout is in ~/.openrecall/eval/replay/README.md.
 """
 import glob
 import json
@@ -665,11 +668,35 @@ def unranked(e, orhome, n=10):
     return [a for k, a in shared[:n] if k]
 
 
+def reconciles(events):
+    """Spec 4.3: each applied reconcile of a log, with its fact's stand-in, since the log holds no fact text: the
+    remembered memory, else the address that the fact's own new, replace or skip decision logged."""
+    own, out = {}, []
+    for e in events:
+        if e.get("event") == "dedupe" and e.get("action") != "reconcile":
+            own[(e["session"], e["name"])] = e.get("address")
+        elif e.get("event") == "dedupe" and e.get("copy"):
+            out.append((e, e.get("remembered") or own.get((e["session"], e["name"]))))
+    return out
+
+
+def rewrite_check(e, fact, path_of, dedupe_fn):
+    """judge.dedupe_check of one reconcile, its stand-in and rewrite as they stood when logged (fact_at): `supersede`
+    (the stand-in makes the `replaced/` copy out of date) and `kept` (the rewrite keeps its true detail), or None."""
+    when = datetime.fromtimestamp(e["at"] / 1000, timezone.utc)
+    path = path_of(e["address"])
+    copy = os.path.join(os.path.dirname(path), "replaced", e["copy"])
+    stand_in, rewrite = fact and fact_at(path_of(fact), when), fact_at(path, when)
+    if not (stand_in and os.path.isfile(stand_in) and os.path.isfile(rewrite) and os.path.isfile(copy)):
+        return None
+    old = memory_text(copy)
+    return dict(supersede=dedupe_fn(memory_text(stand_in), [old], None)["supersede"][0],
+                kept=dedupe_fn(memory_text(rewrite), [], old)["kept"])
+
+
 def extraction_lines(since, dedupe_fn=None, yes=0.7):
-    """Tickets 17, 21 and 26 from the live log: extraction health, the facts written, Jev's check of each written fact
-    against its logged candidates and the unranked memories most like it (asked once, cached in dedupe.jsonl), store
-    size and the CLAUDE.md suggestions added since the last report. `dedupe_fn(fact, candidates, old)` returns
-    judge.dedupe_check's answer; None asks nothing."""
+    """Tickets 17, 21 and 26 from the live log: health, facts, Jev's check (cached in dedupe.jsonl) of each written fact
+    and applied reconcile, store size, new CLAUDE.md suggestions. `dedupe_fn` is judge.dedupe_check; None asks nothing."""
     orhome = os.path.dirname(EVAL)
     log = os.path.join(orhome, "log", "openrecall.jsonl")
     events = read(log) if os.path.exists(log) else []
@@ -682,21 +709,21 @@ def extraction_lines(since, dedupe_fn=None, yes=0.7):
     total = Counter()
     dropped = Counter()
     for e in runs:
-        total.update({k: e.get(k, 0) for k in ("proposed", "new", "replaced", "skipped", "normalized", "suggestions",
-                                              "tokens_in", "tokens_out")})
+        total.update({k: e.get(k, 0) for k in ("proposed", "new", "replaced", "reconciled", "skipped", "normalized",
+                                              "suggestions", "tokens_in", "tokens_out")})
         dropped.update(e.get("dropped") or {})
     cost = sum(e.get("cost", 0) for e in runs)
 
     cache_path = os.path.join(EVAL, "dedupe.jsonl")
+    key = lambda e: (e["session"], e["name"], e["at"], e["action"], e["address"])
     # A row from before build step 7 was checked against the logged candidates alone: it is asked again, once.
-    cache = {(r["session"], r["name"], r["at"]): r for r in (read(cache_path) if os.path.exists(cache_path) else [])
-             if r.get("unranked")}
+    cache = {key(r): r for r in (read(cache_path) if os.path.exists(cache_path) else []) if r.get("unranked")}
     written = [e for e in events if e.get("event") == "dedupe" and e.get("action") in ("new", "replace")]
+    rewritten = reconciles(events)
     fresh = []
     for e in written:
-        key = (e["session"], e["name"], e["at"])
         path = address_path(e["address"], orhome)
-        if key in cache or dedupe_fn is None or not os.path.exists(path):
+        if key(e) in cache or dedupe_fn is None or not os.path.exists(path):
             continue
         cands = [c["address"] for c in e.get("candidates", []) if c["address"] != e["address"]
                  and os.path.exists(address_path(c["address"], orhome))] + unranked(e, orhome)
@@ -705,11 +732,20 @@ def extraction_lines(since, dedupe_fn=None, yes=0.7):
         got = dedupe_fn(memory_text(path), [memory_text(address_path(a, orhome)) for a in cands], old)
         fresh.append(dict(session=e["session"], name=e["name"], at=e["at"], address=e["address"], action=e["action"],
                           candidates=cands, unranked=True, **got))
+    for e, fact in rewritten:
+        got = None if key(e) in cache or dedupe_fn is None else rewrite_check(e, fact, lambda a: address_path(a, orhome),
+                                                                              dedupe_fn)
+        if got:
+            fresh.append(dict(session=e["session"], name=e["name"], at=e["at"], address=e["address"], action=e["action"],
+                              fact=fact, unranked=True, **got))
     if fresh:
         with open(cache_path, "a") as fh:
             fh.writelines(json.dumps(r) + "\n" for r in fresh)
-        cache.update({(r["session"], r["name"], r["at"]): r for r in fresh})
-    checked = [cache[k] for k in ((e["session"], e["name"], e["at"]) for e in written) if k in cache]
+        cache.update({key(r): r for r in fresh})
+    checked = [cache[key(e)] for e in written if key(e) in cache]
+    rechecked = [cache[key(e)] for e, _ in rewritten if key(e) in cache]
+    still_true = [r["address"] for r in rechecked if r["supersede"] < yes]
+    thinned = [r["address"] for r in rechecked if r["kept"] < 0.5]
     flag = lambda kind, own: ["%s (%s)" % (r["address"], a) for r in checked if r["action"] == "new"
                               for a, p in zip(r["candidates"], r[kind]) if p >= yes and own(a)]
     repeats = flag("repeat", lambda a: True)
@@ -742,17 +778,20 @@ def extraction_lines(since, dedupe_fn=None, yes=0.7):
             len(strikes), len(failed), listed(failed),
             "%s at %s" % (stops[-1]["stop"], when(stops[-1]["at"])) if stops else "none",
             "%s at %s" % (off[-1]["off"], when(off[-1]["at"])) if off else "none"),
-        "- Facts: proposed %d, new %d, replaced %d, skipped %d, dropped %d (%s); names normalized %d; tokens %d in, %d "
-        "out; cost $%.2f." % (total["proposed"], total["new"], total["replaced"], total["skipped"], sum(dropped.values()),
-                             ", ".join("%s %d" % kv for kv in sorted(dropped.items())) or "none", total["normalized"],
-                             total["tokens_in"], total["tokens_out"], cost),
+        "- Facts: proposed %d, new %d, replaced %d, reconciled %d, skipped %d, dropped %d (%s); names normalized %d; "
+        "tokens %d in, %d out; cost $%.2f." % (
+            total["proposed"], total["new"], total["replaced"], total["reconciled"], total["skipped"],
+            sum(dropped.values()), ", ".join("%s %d" % kv for kv in sorted(dropped.items())) or "none",
+            total["normalized"], total["tokens_in"], total["tokens_out"], cost),
         "- Dedupe check (ticket 26; Jev, yes at %.1f or more): %d of %d written facts checked, each against its logged "
         "candidates and up to 10 unranked memories that share the most words with it. Repeats that got through: %d%s. "
         "Missed replaces of an own fact: %d%s. New facts that make a built-in file out of date: %d%s. "
         "Merges that lost old detail: %d of %d%s. Whether a merge kept the new fact's detail is not checked: the "
-        "proposed text is never stored." % (yes, len(checked), len(written), len(repeats), listed(repeats), len(missed),
-                                            listed(missed), len(builtin), listed(builtin), len(lost), len(merges),
-                                            listed(lost)),
+        "proposed text is never stored. Reconciles checked: %d of %d applied. Not out of date before the rewrite: %d%s. "
+        "Rewrites that lost old detail: %d%s." % (
+            yes, len(checked), len(written), len(repeats), listed(repeats), len(missed), listed(missed), len(builtin),
+            listed(builtin), len(lost), len(merges), listed(lost), len(rechecked), len(rewritten), len(still_true),
+            listed(still_true), len(thinned), listed(thinned)),
         "- Store size: %s." % (", ".join("%s %d" % kv for kv in sorted(sizes.items())) or "no OpenRecall facts yet"),
         "- CLAUDE.md suggestions added since the last report%s: %d%s." % (
             " (%s)" % since.strftime("%Y-%m-%d") if since else "", len(added), listed(added)),
@@ -1429,7 +1468,8 @@ def daily(orhome):
             pushes=count(e.get("how") for e in by["pushed"]),
             right_pushes=dict(right=verdicts["right"], wrong=verdicts["wrong"], unjudged=verdicts["unjudged"]),
             late_pushes=dict(late=late["late"], judged=late["judged"]), extraction_runs=sum("to" in e for e in ex),
-            facts=dict(new=total(ex, "new"), replaced=total(ex, "replaced"), skipped=total(ex, "skipped"),
+            facts=dict(new=total(ex, "new"), replaced=total(ex, "replaced"), reconciled=total(ex, "reconciled"),
+                       skipped=total(ex, "skipped"),
                        dropped=sum(sum((e.get("dropped") or {}).values()) for e in ex)),
             suggestions=total(ex, "suggestions"), strikes=sum("strike" in e for e in ex),
             failed_sessions=sum(bool(e.get("failed")) for e in ex), stops=sum("stop" in e for e in ex),
@@ -1784,6 +1824,244 @@ def report(now=None, binary=BINARY, label_fn=None, gate=None, dedupe_fn=None, pi
     print("\n".join(lines) + "\n\nwritten to %s/report.md" % out)
 
 
+def load_case(folder):
+    """A frozen replay case's `case.json` (spec 3.12), checked before any run spends on the provider. `runs` defaults
+    to spec 4.3's: 3 for a case that calls the provider, else 1."""
+    with open(os.path.join(folder, "case.json")) as fh:
+        c = json.load(fh)
+    steps = dict(extract=(), capture=("session", "bytes", "branch"))
+    kinds = dict(memories=(), log=("event", "field"), cursor=("session",), parity=("field",), record=("branch", "section"))
+    for step in c["steps"]:
+        if step.get("run") not in steps:
+            sys.exit("%s: unknown step %r" % (folder, step.get("run")))
+        if any(k not in step for k in steps[step["run"]]):
+            sys.exit("%s: a %s step needs %s" % (folder, step["run"], ", ".join(steps[step["run"]])))
+    for q in c["questions"]:
+        for check in q["checks"]:
+            kind = check.get("kind", "memories")
+            if kind not in kinds:
+                sys.exit("%s: question %r has an unknown check kind %r" % (folder, q["name"], kind))
+            need = list(kinds[kind]) + ([] if kind in ("memories", "parity") or {"equals", "at_least", "starts"} & set(check)
+                                        else ["equals, at_least or starts"])
+            if any(k not in check for k in need):
+                sys.exit("%s: question %r has a %s check that needs %s" % (folder, q["name"], kind, "; ".join(need)))
+            if check.get("want", "some") not in ("some", "none", "all"):
+                sys.exit("%s: question %r wants %r, not some, none or all" % (folder, q["name"], check.get("want")))
+    c.setdefault("runs", 3 if c.get("provider") else 1)
+    if type(c["runs"]) is not int or c["runs"] < 1:
+        sys.exit("%s: runs must be a whole number of 1 or more, not %r" % (folder, c["runs"]))
+    return c
+
+
+def shares(names, outcomes):
+    """One line per question: the runs it passed of the runs made. `outcomes` holds one list of booleans per run."""
+    return ["%d. %s: %d/%d" % (i, name, sum(run[i - 1] for run in outcomes), len(outcomes))
+            for i, name in enumerate(names, 1)]
+
+
+def section(path, heading):
+    """One section of a handoff record as `Record::parse` in src/record.rs reads it, or None."""
+    try:
+        with open(path) as fh:
+            text = fh.read()
+    except OSError:
+        return None
+    m = re.search(r"^## %s\n(.*?)(?=^## |\Z)" % re.escape(heading), text.partition("\n---\n")[2] or text, re.M | re.S)
+    return m.group(1).strip() if m else None
+
+
+def holds(value, check):
+    if "starts" in check:
+        return value is not None and value.startswith(check["starts"])
+    if "at_least" in check:
+        return value is not None and value >= check["at_least"]
+    return value == check["equals"]
+
+
+def live_memories(home, repo):
+    """Spec 4.2's live memories of a scratch home: the files at the top of the repo's folder under `repos/`, of
+    `global/` and of the built-in folder, with no `expires` or one after today, as `drop_reason` in src/main.rs."""
+    orhome, today = os.path.join(home, ".openrecall"), datetime.now(timezone.utc).date().isoformat()
+    files = (sorted(glob.glob(os.path.join(orhome, "repos", repo, "*.md"))) + sorted(glob.glob(os.path.join(orhome, "global", "*.md")))
+             + sorted(glob.glob(os.path.join(home, ".claude", "projects", "*", "memory", "*.md"))))
+    return [f for f in files if os.path.basename(f) not in ("MEMORY.md", "claude-md-suggestions.md")
+            and (front(f, "expires") or "9999-12-31") > today]
+
+
+def judge_check(check, c, home, binary, env, says, yes=0.7):
+    """One check of a pass question on a run's scratch home: whether it holds, and what it saw. A memories check holds
+    when `want` some, none or all files that match `grep` say yes: by `says` to `jev` at `yes` or more, else always."""
+    orhome = env["OPENRECALL_HOME"]
+    kind = check.get("kind", "memories")
+    if kind == "record":
+        value = section(os.path.join(orhome, "repos", c["repo"], "handoffs", check["branch"].replace("/", "--") + ".md"),
+                        check["section"])
+        return holds(value, check), value
+    if kind == "log":
+        value = sum(e.get(check["field"]) or 0 for e in logged(orhome) if e.get("event") == check["event"])
+        return holds(value, check), value
+    if kind == "cursor":
+        try:
+            with open(os.path.join(orhome, "extract", check["session"] + ".json")) as fh:
+                value = json.load(fh)["cursor"]
+        except (OSError, ValueError, KeyError):
+            value = None
+        return holds(value, check), value
+    if kind == "parity":
+        shutil.rmtree(os.path.join(orhome, "stats"), ignore_errors=True)
+        subprocess.run([binary, "stats", "--job"], env=env, capture_output=True)
+        rows = os.path.join(orhome, "stats", "daily.jsonl")
+        ours = subprocess.run([sys.executable, os.path.abspath(__file__), "daily", "--home", orhome], env=env,
+                              capture_output=True, text=True).stdout
+        total = lambda rows: sum((r.get("facts") or {}).get(check["field"], 0) for r in rows)
+        saw = dict(binary=total(read(rows)) if os.path.exists(rows) else None,
+                   harness=total(json.loads(l) for l in ours.splitlines() if l.strip()))
+        return saw["binary"] == saw["harness"], saw
+    if "glob" in check:
+        files = sorted(glob.glob(os.path.join(home, check["glob"]), recursive=True))
+    elif "recall" in check:
+        files = [f for f in dict.fromkeys(scratch_path(a, home) for a in recalled(binary, env, check["recall"]))
+                 if os.path.isfile(f)]
+    else:
+        files = live_memories(home, c["repo"])
+    files = [f for f in files if re.search(check.get("grep", ""), read_text(f))]
+    probs = says(check["jev"], [memory_text(f) for f in files]) if "jev" in check else [1.0] * len(files)
+    hits = sum(p >= yes for p in probs)
+    ok = dict(some=hits > 0, none=hits == 0, all=bool(files) and hits == len(files))[check.get("want", "some")]
+    return ok, {os.path.relpath(f, home): p for f, p in zip(files, probs)}
+
+
+def read_text(path):
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        return fh.read()
+
+
+def logged(orhome):
+    log = os.path.join(orhome, "log", "openrecall.jsonl")
+    return read(log) if os.path.exists(log) else []
+
+
+def scratch_path(address, home):
+    parts = address.split("/")
+    if parts[0] == "builtin" and len(parts) == 3:
+        return os.path.join(home, ".claude", "projects", parts[1], "memory", parts[2] + ".md")
+    return address_path(address, os.path.join(home, ".openrecall"))
+
+
+def recalled(binary, env, queries):
+    """Spec 3.12: the addresses `openrecall mcp` returns for each `{query, k}`, called over stdio as Claude Code calls
+    it, read from the server's `mcp` log lines."""
+    recalls = lambda: [e for e in logged(env["OPENRECALL_HOME"]) if e.get("event") == "mcp" and e.get("tool") == "recall"]
+    before = len(recalls())
+    mcp = subprocess.Popen([binary, "mcp"], env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+
+    def send(**msg):
+        mcp.stdin.write(json.dumps(dict(msg, jsonrpc="2.0")) + "\n")
+        mcp.stdin.flush()
+
+    def call(i, method, params):
+        send(id=i, method=method, params=params)
+        while json.loads(mcp.stdout.readline()).get("id") != i:
+            pass
+
+    try:
+        call(1, "initialize", dict(protocolVersion="2025-06-18", capabilities={}, clientInfo=dict(name="harness", version="0")))
+        send(method="notifications/initialized")
+        for i, q in enumerate(queries, 2):
+            call(i, "tools/call", dict(name="recall", arguments=q))
+    finally:
+        mcp.stdin.close()
+        mcp.wait(timeout=10)
+    lines = recalls()[before:]
+    if len(lines) != len(queries):
+        raise RuntimeError("%d of %d recall calls logged a result" % (len(lines), len(queries)))
+    return [a for e in lines for a in e.get("addresses", [])]
+
+
+def replay_case(folder, runs=None, binary=BINARY, says=None, dedupe_fn=None):
+    """Spec 3.12: a replay case (load_case) `runs` times, each from a fresh copy in a scratch home, then its pass
+    questions and rewrite_check rates; each run's home goes in `runs/<UTC time>/<n>/`. Returns the lines it prints."""
+    c = load_case(folder)
+    runs = runs or c["runs"]
+    provider = real_provider() if c.get("provider") else None
+    saved = os.path.join(folder, "runs", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%SZ"))
+    outcomes, cost, rewrites = [], 0.0, []
+    for n in range(1, runs + 1):
+        tmp = scratch()
+        try:
+            home, work = os.path.join(tmp, "home"), os.path.join(tmp, "w")
+            orhome = os.path.join(home, ".openrecall")
+            shutil.copytree(os.path.join(folder, "home"), home, copy_function=shutil.copyfile)
+            for rel, mtime in c.get("mtimes", {}).items():
+                os.utime(os.path.join(home, rel), (mtime, mtime))
+            project = os.path.join(home, ".claude", "projects", slug(work))
+            os.rename(os.path.join(home, ".claude", "projects", "PROJECT"), project)
+            os.makedirs(os.path.join(work, ".git", "refs", "heads"))
+            with open(os.path.join(work, ".git", "config"), "w") as fh:
+                fh.write('[remote "origin"]\n\turl = https://%s\n' % re.sub(r"^local/", "local.invalid/", c["repo"]))
+            checkout(work, c["branch"])
+            for path in glob.glob(os.path.join(orhome, "extract", "*.json")):
+                with open(path) as fh:
+                    entry = json.load(fh)
+                entry.update(transcript=os.path.join(project, os.path.basename(entry["transcript"])), main=work)
+                with open(path, "w") as fh:
+                    json.dump(entry, fh)
+            if provider:
+                pick_home(orhome, *provider)
+            env = dict(HOME=home, OPENRECALL_HOME=orhome, CLAUDE_CODE_ENTRYPOINT="cli", CLAUDE_PROJECT_DIR=work,
+                       PATH="/usr/bin:/bin", OPENRECALL_POLL="0")
+            for step in c["steps"]:
+                if step["run"] == "extract":
+                    subprocess.run([binary, "extract", "--job"], env=env, capture_output=True)
+                    continue
+                copy = os.path.join(project, step["session"] + ".jsonl")
+                with open(os.path.join(folder, "home", ".claude", "projects", "PROJECT", step["session"] + ".jsonl"),
+                          "rb") as src, open(copy, "wb") as dst:
+                    dst.write(src.read(step["bytes"]))
+                checkout(work, step["branch"])
+                subprocess.run([binary, "capture", "--job"], env=env, capture_output=True, input=json.dumps(dict(
+                    session_id=step["session"], cwd=work, transcript_path=copy, transcript_len=step["bytes"],
+                    hook_event_name="Stop", stop_hook_active=False, last_assistant_message="")).encode())
+            seen = [[judge_check(check, c, home, binary, env, says) for check in q["checks"]] for q in c["questions"]]
+            outcomes.append([all(ok for ok, _ in checks) for checks in seen])
+            events = logged(orhome)
+            cost += sum(e.get("cost") or 0 for e in events if e.get("event") == "extract")
+            rows = []
+            for e, fact in reconciles(events):
+                got = dedupe_fn and rewrite_check(e, fact, lambda a: scratch_path(a, home), dedupe_fn)
+                rows.append(dict(address=e["address"], copy=e["copy"], fact=fact, **(got or {})))
+            rewrites += rows
+            shutil.copytree(orhome, os.path.join(saved, str(n)), ignore=shutil.ignore_patterns("index.db*"))
+            with open(os.path.join(saved, str(n), "rewrites.json"), "w") as fh:
+                json.dump(rows, fh, indent=1)
+            with open(os.path.join(saved, str(n), "checks.json"), "w") as fh:
+                json.dump([dict(question=q["name"], checks=[dict(ok=ok, saw=saw) for ok, saw in checks])
+                           for q, checks in zip(c["questions"], seen)], fh, indent=1)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+    lines = ["%s: %d run%s with %s, kept in %s" % (os.path.basename(folder), runs, "" if runs == 1 else "s", binary, saved)]
+    checked = [r for r in rewrites if "kept" in r]
+    lines += shares([q["name"] for q in c["questions"]], outcomes) + ["Provider cost: $%.2f." % cost]
+    lines.append("Reconciles: %d applied over %d run%s, %d checked; supersede 0.7 or more: %s; kept 0.5 or more: %s." % (
+        len(rewrites), runs, "" if runs == 1 else "s", len(checked), rate(sum(r["supersede"] >= 0.7 for r in checked), len(checked)),
+        rate(sum(r["kept"] >= 0.5 for r in checked), len(checked))))
+    print("\n".join(lines))
+    return lines
+
+
+def replay_args(args):
+    """`replay-case CASE [--runs N] [--binary PATH]`: (case, runs or None, binary), or None for any other arguments."""
+    if not args or args[0].startswith("-") or len(args) % 2 == 0:
+        return None
+    flags = dict(zip(args[1::2], args[2::2]))
+    if set(flags) - {"--runs", "--binary"} or len(flags) * 2 != len(args) - 1:
+        return None
+    runs = flags.get("--runs")
+    if runs is not None and not (runs.isdigit() and int(runs) > 0):
+        return None
+    return args[0], runs and int(runs), os.path.abspath(flags["--binary"]) if "--binary" in flags else BINARY
+
+
 def report_args(args):
     """`report [--binary PATH] [--picks]`: (binary, picks), or None for any other arguments."""
     picks = args[-1:] == ["--picks"]
@@ -1797,6 +2075,7 @@ if __name__ == "__main__":
     cmd, rest = (sys.argv[1] if len(sys.argv) > 1 else ""), sys.argv[2:]
     args = report_args(rest) if cmd == "report" else None
     set_args = report_args(rest[1:]) if cmd == "report-set" and rest else None
+    case_args = replay_args(rest) if cmd == "replay-case" else None
     if cmd == "freeze" and not rest:
         freeze()
     elif cmd == "freeze-set" and len(rest) == 3:
@@ -1810,5 +2089,8 @@ if __name__ == "__main__":
     elif set_args:
         import judge
         report_set(os.path.join(EVAL, rest[0]), set_args[0], judge.label_case, set_args[1])
+    elif case_args:
+        import judge
+        replay_case(os.path.join(EVAL, "replay", case_args[0]), case_args[1], case_args[2], judge.says, judge.dedupe_check)
     else:
         sys.exit(__doc__)

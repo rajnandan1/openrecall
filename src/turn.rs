@@ -210,11 +210,22 @@ pub fn turns(transcript: &[u8]) -> Vec<(Turn, usize)> {
 }
 
 /// An ISO 8601 UTC time such as `2026-01-10T08:00:01.250Z` in ms since 1970.
-fn ms_of(time: &str) -> Option<i64> {
+pub(crate) fn ms_of(time: &str) -> Option<i64> {
     let secs = crate::record::parse_iso(time)? as i64;
     let frac = time.get(19..).and_then(|f| f.strip_prefix('.')).unwrap_or("");
     let digits: String = frac.chars().take_while(char::is_ascii_digit).chain("000".chars()).take(3).collect();
     Some(secs * 1000 + digits.parse::<i64>().ok()?)
+}
+
+/// When a transcript's last turn ended: the `timestamp` of its last user or assistant line that has one, in ms since
+/// 1970. A cut first or last line does not parse and is passed over.
+pub fn last_time(transcript: &[u8]) -> Option<i64> {
+    transcript
+        .split(|&b| b == b'\n')
+        .rev()
+        .filter_map(|raw| serde_json::from_slice::<Value>(raw).ok())
+        .filter(|line| line["type"] == "user" || line["type"] == "assistant")
+        .find_map(|line| line["timestamp"].as_str().and_then(ms_of))
 }
 
 impl Turn {
@@ -699,6 +710,20 @@ mod tests {
         assert_eq!((t.at, t.branch.as_str(), t.prompt_id.as_str(), t.answered), (1_768_032_001_250, "feat/abc-12", "p1", true));
         let t = &all[1].0;
         assert_eq!((t.at, t.branch.as_str(), t.prompt_id.as_str(), t.answered), (1_768_032_300_000, "", "p2", false));
+    }
+
+    #[test]
+    fn the_last_time_is_the_last_user_or_assistant_line_with_a_timestamp() {
+        let mut data = lines(&[
+            json!({"type": "user", "timestamp": "2026-01-10T08:00:01.250Z", "message": {"content": "start"}}),
+            json!({"type": "assistant", "timestamp": "2026-01-10T08:00:09Z", "message": {"content": []}}),
+            json!({"type": "assistant", "message": {"content": []}}),
+            json!({"type": "system", "timestamp": "2026-01-10T09:00:00Z"}),
+        ]);
+        data.extend_from_slice(b"{\"type\": \"user\", \"timestamp\": \"2026-01-10T10:00:00Z\", \"mess");
+        assert_eq!(last_time(&data), Some(1_768_032_009_000));
+        assert_eq!(last_time(&data[30..]), Some(1_768_032_009_000), "a tail that starts inside a line");
+        assert_eq!(last_time(&lines(&[json!({"type": "user", "message": {"content": "x"}})])), None);
     }
 
     fn data_last_sidechain() -> Value {

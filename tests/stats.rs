@@ -1,8 +1,8 @@
 use serde_json::{Value, json};
 use std::fs;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 /// UTC+05:30 all year, so a line at 20:00 UTC counts on the next local day.
 const TZ: &str = "Asia/Kolkata";
@@ -82,6 +82,35 @@ impl Home {
 
     fn row(&self, day: &str) -> Value {
         self.rows().into_iter().find(|r| r["day"] == day).unwrap_or_else(|| panic!("no row for {day}"))
+    }
+
+    /// The `stats` tool's text for these arguments, from `openrecall mcp` over stdio.
+    fn stats_text(&self, args: Value) -> String {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_openrecall"))
+            .arg("mcp")
+            .env_clear()
+            .env("HOME", &self.root)
+            .env("OPENRECALL_HOME", self.path(".openrecall"))
+            .env("TZ", TZ)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        let mut out = BufReader::new(child.stdout.take().unwrap()).lines();
+        let mut reply = |id: u64| {
+            out.by_ref().map(|l| serde_json::from_str::<Value>(&l.unwrap()).unwrap()).find(|v| v["id"] == id).unwrap()
+        };
+        let hello = json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}});
+        writeln!(stdin, "{}", json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": hello})).unwrap();
+        reply(1);
+        writeln!(stdin, "{}", json!({"jsonrpc": "2.0", "method": "notifications/initialized"})).unwrap();
+        let call = json!({"name": "stats", "arguments": args});
+        writeln!(stdin, "{}", json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": call})).unwrap();
+        let text = reply(2)["result"]["content"][0]["text"].as_str().unwrap().to_string();
+        drop(stdin);
+        child.wait().unwrap();
+        text
     }
 }
 
@@ -212,7 +241,8 @@ fn each_local_day_with_log_lines_gets_one_row_of_counts() {
                "picks_used": {"yes": 0, "judged": 0}, "pick_cost": 0.875, "pick_ms": 2000,
                "pushes": {"settle": 1, "sibling": 1}, "right_pushes": {"right": 0, "wrong": 0, "unjudged": 0},
                "late_pushes": {"late": 0, "judged": 0}, "extraction_runs": 1,
-               "facts": {"new": 3, "replaced": 1, "skipped": 2, "dropped": 1}, "suggestions": 1, "strikes": 2,
+               "facts": {"new": 3, "replaced": 1, "reconciled": 0, "skipped": 2, "dropped": 1}, "suggestions": 1,
+               "strikes": 2,
                "failed_sessions": 1, "stops": 1, "extraction_cost": 0.5, "extraction_ms": 20000, "redactions": 1,
                "own_tool_calls": {"recall": 2, "forget": 1}, "update_check": {"binary_updated": 1, "plugin_updated": 1},
                "errors": 1})
@@ -225,13 +255,30 @@ fn each_local_day_with_log_lines_gets_one_row_of_counts() {
                "pick_jobs": 0, "picks": 0, "pick_skips": {}, "picks_delivered": 0, "pick_drops": {},
                "picks_used": {"yes": 0, "judged": 0}, "pick_cost": 0.0, "pick_ms": 0, "pushes": {},
                "right_pushes": {"right": 0, "wrong": 0, "unjudged": 0}, "late_pushes": {"late": 0, "judged": 0},
-               "extraction_runs": 0, "facts": {"new": 0, "replaced": 0, "skipped": 0, "dropped": 0},
+               "extraction_runs": 0, "facts": {"new": 0, "replaced": 0, "reconciled": 0, "skipped": 0, "dropped": 0},
                "suggestions": 0, "strikes": 0, "failed_sessions": 0, "stops": 0, "extraction_cost": 0.0,
                "extraction_ms": 0, "redactions": 0, "own_tool_calls": {}, "update_check": {}, "errors": 0}),
         "a day before any update line has no version"
     );
     assert_eq!(rows[2]["versions"], json!(["0.9.0"]), "a day with no update line takes the last version before it");
     assert_eq!(rows[2]["hook_ms"], json!({"median": 25, "p95": 25}));
+}
+
+/// Spec test 13 (issue #37): an `extract` line's applied reconciles reach the row, and the `stats` tool shows them in a
+/// column of their own after the new and the replaced facts.
+#[test]
+fn an_extract_lines_reconciles_count_in_the_row_and_in_the_stats_text() {
+    let h = Home::new("reconciled");
+    h.log(&[at("2026-01-10T06:00:00Z", json!({"event": "extract", "session": "A", "from": 0, "to": 100, "proposed": 4,
+        "new": 3, "replaced": 1, "reconciled": 2, "skipped": 0, "dropped": {}, "cost": 0.5}))]);
+    let text = h.stats_text(json!({"from": "2026-01-10", "to": "2026-01-10"}));
+    assert_eq!(h.row("2026-01-10")["facts"], json!({"new": 3, "replaced": 1, "reconciled": 2, "skipped": 0, "dropped": 0}));
+    let lines: Vec<Vec<&str>> = text.lines().skip(1).map(|l| l.split(' ').collect()).collect();
+    let (header, row) = (&lines[0], &lines[1]);
+    assert_eq!(header.len(), 19, "{text}");
+    let at = header.iter().position(|c| *c == "facts_new").unwrap();
+    assert_eq!(header[at..at + 3], ["facts_new", "facts_replaced", "facts_reconciled"], "{text}");
+    assert_eq!(row[at..at + 3], ["3", "1", "2"], "{text}");
 }
 
 /// Spec tests 4 and 5: the used signal reads the line's identifiers, else the memory file. No transcript, no turn or
