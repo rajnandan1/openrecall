@@ -401,11 +401,15 @@ fn extract(sid: &str, e: &Entry, s: &Settings, scanner: &scan::Scanner) -> Resul
     let scopes = index::scopes(&home, &crate::user_home(), Some(&e.identity), main);
     let mut ix = index::Index::open(&home)?;
     ix.sync(&scopes)?;
+    let remembers = turns[split..]
+        .iter()
+        .flat_map(|(t, _)| &t.events)
+        .any(|ev| matches!(ev, Event::Tool(name, _) if name.strip_prefix(OWN_TOOL) == Some("remember")));
     let since = match e.cursor {
         0 => Some(0),
         cursor => data.get(..cursor as usize).and_then(turn::last_time),
     };
-    if let Some(since) = since {
+    if remembers && let Some(since) = since {
         facts.extend(remembered(&ix, &scopes, &own, sid, since)?);
     }
     let today = &record::iso(crate::now_secs())[..10];
