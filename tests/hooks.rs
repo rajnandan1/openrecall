@@ -2593,7 +2593,7 @@ fn own_expired_rot_and_echo_drop_a_pick() {
     }
 }
 
-/// Spec 6.2 check 4 (issue #37): a built-in memory whose `metadata.originSessionId` is the session is its own, so
+/// Spec 6.2 check 4 (issue 37): a built-in memory whose `metadata.originSessionId` is the session is its own, so
 /// recall drops it there. Another session still gets it.
 #[test]
 fn a_built_in_memory_the_session_wrote_is_dropped_as_own() {

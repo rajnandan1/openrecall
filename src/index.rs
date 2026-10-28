@@ -641,9 +641,8 @@ fn symbol(token: &str) -> Option<&str> {
     (code && SYMBOL.is_match(bare)).then_some(last)
 }
 
-/// Tickets 19 and 21: `- <type> <date> <address>: <text>`, the body when it fits in 200 characters or the whole line
-/// fits in `room` characters, else the description plus the body's identifiers the description lacks, up to 200
-/// characters, then labelled `(also names: …)` outside that count (issue 37).
+/// Tickets 19 and 21: `- <type> <date> <address>: <text>`, the body when it fits in 200 characters or the line in
+/// `room`, else the description and, within the same 200, the body's identifiers it lacks, marked `(also names: …)`.
 pub fn line(c: &Candidate, room: usize) -> String {
     let prefix = prefix(c);
     let body = squash(&c.body);
@@ -704,7 +703,7 @@ fn head(s: &str, bytes: usize) -> &str {
     &s[..end]
 }
 
-fn squash(s: &str) -> String {
+pub(crate) fn squash(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 

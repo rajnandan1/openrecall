@@ -106,7 +106,7 @@ impl Server {
         if text.is_empty() {
             return Err("text is empty".into());
         }
-        let description = p.description.split_whitespace().collect::<Vec<_>>().join(" ");
+        let description = index::squash(&p.description);
         let n = description.chars().count();
         if n == 0 {
             return Err("description is empty".into());
