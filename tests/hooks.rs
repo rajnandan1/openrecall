@@ -2132,11 +2132,7 @@ fn a_run_of_only_task_notification_turns_with_text_still_runs() {
     w.branch("feat/x");
     let home = w.home.join(".openrecall");
     let p = Provider::start(vec![answer(json!({"facts": [], "claude_md_rules": []}))]);
-    fs::create_dir_all(&home).unwrap();
-    fs::write(home.join("extract.toml"), format!("base_url = \"http://127.0.0.1:{}/v1\"\nmodel = \"test/model\"\n", p.port)).unwrap();
-    fs::write(home.join("api-key"), "sk-test-123\n").unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(home.join("api-key"), fs::Permissions::from_mode(0o600)).unwrap();
+    extraction_on(&w, &p);
     w.turn("S1", &[user("<task-notification><status>completed</status><summary>exit code 0</summary></task-notification>"),
                    said("The deploy check for ABC-12 ended with 1 failed.", None)], "");
     w.hook(&["extract"], "S1", json!({"hook_event_name": "SessionEnd"}));
