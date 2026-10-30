@@ -9,7 +9,6 @@ use std::process::Stdio;
 
 /// 16,000 tokens at 2.0 characters a token, the system prompt included (spec 3.3).
 const MAX_INPUT: usize = 32_000;
-const MAX_CALLS: u64 = 10;
 /// Past this many memories, a request lists only those that best match the prompt and the newest turn (issue #23).
 const MAX_LISTED: usize = 50;
 /// `PICK_SYSTEM["strict"]` of ticket 07's prototype, quoted in spec 3.4.
@@ -36,10 +35,11 @@ const FILE_LED_WORDS: usize = 10;
 /// The prompt hook starts the job for a prompt that passed every skip rule, when picks are on, the prompt has a plain
 /// `prompt_id` and the session has calls left (spec 3.2). The hook never waits for the job.
 pub fn start(input: &Value, s: &Value) -> crate::Result<()> {
-    let Some(id) = prompt_id(input).filter(|_| extract::picks_on(&crate::home())) else {
+    let on = Settings::load(&crate::home()).ok().filter(|t| t.pick);
+    let Some((id, settings)) = prompt_id(input).zip(on) else {
         return Ok(());
     };
-    if s["picks"].as_u64().unwrap_or(0) >= MAX_CALLS {
+    if s["picks"].as_u64().unwrap_or(0) >= settings.pick_cap {
         crate::log(json!({"event": "pick", "session": crate::session_id(input)?, "prompt_id": id, "memory": null,
                           "skip": "cap"}));
         return Ok(());
@@ -121,7 +121,7 @@ fn pick(input: &Value, sid: &str, line: &mut Value) -> crate::Result<Option<Valu
     {
         let (_lock, mut s) = crate::load_session(sid)?;
         let picks = s["picks"].as_u64().unwrap_or(0);
-        if picks >= MAX_CALLS {
+        if picks >= settings.pick_cap {
             line["skip"] = json!("cap");
             return Ok(None);
         }
