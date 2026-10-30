@@ -943,11 +943,14 @@ pub fn picks_on(home: &Path) -> bool {
     Settings::load(home).is_ok_and(|s| s.pick)
 }
 
+const PICK_CAP: u64 = 10;
+
 pub struct Settings {
     base_url: String,
     pub model: String,
     key: String,
-    pick: bool,
+    pub pick: bool,
+    pub pick_cap: u64,
 }
 
 impl Settings {
@@ -965,6 +968,7 @@ impl Settings {
         let base_url = value("base_url").ok_or("no base_url in extract.toml")?;
         let model = value("model").ok_or("no model in extract.toml")?;
         let pick = value("pick").as_deref() == Some("true");
+        let pick_cap = value("pick_cap").and_then(|v| v.parse().ok()).unwrap_or(PICK_CAP);
         let path = home.join("api-key");
         let mode = fs::metadata(&path)
             .map_err(|_| "no api-key")?
@@ -983,6 +987,7 @@ impl Settings {
             model,
             key: key.into(),
             pick,
+            pick_cap,
         })
     }
 }

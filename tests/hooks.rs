@@ -2570,6 +2570,25 @@ fn a_prompt_makes_at_most_one_call_and_a_session_ten() {
 }
 
 #[test]
+fn pick_cap_in_extract_toml_sets_the_calls_a_session_makes() {
+    let w = World::new("pick-cap-set");
+    w.branch("feat/x");
+    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    w.memory(&repo, "walrus-header", "decision", "", "The walrus export puts the header row first", "The header row comes first.");
+    let p = Provider::start((0..3).map(|_| answer(json!({"ids": []}))).collect());
+    picks_on(&w, &p);
+    let toml = w.home.join(".openrecall/extract.toml");
+    fs::write(&toml, fs::read_to_string(&toml).unwrap() + "pick_cap = 2\n").unwrap();
+    transcript(&w, "S", &[]);
+    for id in ["p1", "p2", "p3"] {
+        prompt(&w, "S", id, "what changed in the walrus export header since yesterday");
+        pick_line(&w, id);
+    }
+    assert_eq!(p.requests().len(), 2, "pick_cap = 2 allows two calls");
+    assert_eq!(pick_line(&w, "p3")["skip"], "cap");
+}
+
+#[test]
 fn own_expired_rot_and_echo_drop_a_pick() {
     let w = World::new("pick-drop");
     w.branch("feat/x");

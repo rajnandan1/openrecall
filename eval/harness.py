@@ -54,7 +54,7 @@ GIT_COMMIT = re.compile(r"\bgit(?:\s+-C\s+\S+)?\s+commit\b")
 IDENT = re.compile(r"\b[A-Z]{2,5}-\d{2,5}\b|#\d{2,6}\b|/pull/\d+|\b[\w.-]+/[\w./-]+|`[^`\s]{3,}`|\b[0-9a-f]{7,40}\b|https?://\S+")
 GOAL = 0.67
 PICK_WAIT = 120
-PICK_CALLS = 10  # src/pick.rs MAX_CALLS: a session with this many calls starts no pick job
+PICK_CALLS = 10  # src/extract.rs PICK_CAP: a session with this many calls starts no pick job
 # Spec Appendix A, rows 0 to 13, in the order of appendix-a.jsonl (A00 to A13).
 HAND = ["useful", "useful", "useful", "partly", "partly", "useful", "noise", "noise", "useful", "partly", "noise",
         "noise", "noise", "noise"]
