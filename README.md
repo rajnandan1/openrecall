@@ -307,7 +307,7 @@ Sometimes the model finds a standing rule: a rule for every session in the repo,
 
 A pick is the one memory, or none, that an LLM chooses for your prompt. The LLM also reads the session so far, so a pick can find a memory that the words of the prompt do not match. Picks send your session text, and the text of a document that your prompt names, to the provider of extraction. The provider sees that text. Each pick also costs money. Picks are off until you turn them on.
 
-The prompt hook is the hook that Claude Code runs when you send a prompt. On each prompt that recall does not skip, the prompt hook starts a background job. The job sends one request to the provider. The request holds four parts:
+The prompt hook is the hook that Claude Code runs when you send a prompt. On each prompt that recall does not skip, and on a short prompt that recall skips, the prompt hook starts a background job. A short prompt such as `yes` or `merge it` gets a pick because the LLM reads the session. The job sends one request to the provider. The request holds four parts:
 
 - The memories that recall searches for this repo, one line each, with its name and its description. The list leaves out each memory that this context window already got. When there are 50 memories or fewer, the request holds all of them. When there are more, it holds the 50 that best match the words of your prompt and of the newest turn.
 - The text of each document that your prompt names, when the prompt has 10 words or fewer besides the paths: a `.md`, `.txt`, `.rst`, `.org` or `.adoc` file of 256 KB or less. OpenRecall replaces each secret in it with `[REDACTED:<rule-id>]` first. Then it cuts the texts to 8,000 characters in total.
