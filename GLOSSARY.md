@@ -139,7 +139,7 @@ A skip rule that turns off every hook and every write for a whole session, such 
 _Avoid_: disabled session, opt-out
 
 **Prompt skip**:
-A skip rule that drops recall for one prompt, such as a task notification or a prompt too short to search on. The skip is logged; a short prompt is still a turn.
+A skip rule that drops recall for one prompt, such as a task notification or a prompt too short to search on. The skip is logged; a short prompt is still a turn and still gets a pick.
 _Avoid_: ignored prompt, filtered prompt
 
 **Task notification**:

@@ -281,7 +281,7 @@ fn recall(started: u128) -> Result<()> {
             Err(e) => log(json!({"event": "error", "cmd": "recall search", "error": e.to_string()})),
         },
     }
-    if query.is_ok()
+    if query != Err("empty-args")
         && let Err(e) = pick::start(&input, &s)
     {
         log(json!({"event": "error", "cmd": "recall pick", "error": e.to_string()}));

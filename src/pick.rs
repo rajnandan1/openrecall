@@ -32,8 +32,9 @@ const NAMED_CHARS: usize = 8000;
 const MAX_DOC_BYTES: u64 = 262_144;
 const FILE_LED_WORDS: usize = 10;
 
-/// The prompt hook starts the job for a prompt that passed every skip rule, when picks are on, the prompt has a plain
-/// `prompt_id` and the session has calls left (spec 3.2). The hook never waits for the job.
+/// The prompt hook starts the job for a prompt that passed every skip rule or failed only the short rule, when picks
+/// are on, the prompt has a plain `prompt_id` and the session has calls left (spec 3.2). The hook never waits for the job.
+/// A short prompt gets a pick because the job reads the session: `yes` or `merge it` often starts the work.
 pub fn start(input: &Value, s: &Value) -> crate::Result<()> {
     let on = Settings::load(&crate::home()).ok().filter(|t| t.pick);
     let Some((id, settings)) = prompt_id(input).zip(on) else {
@@ -63,7 +64,7 @@ pub fn job(started: u128) -> crate::Result<()> {
     fs::write(&running, "")?;
     let mut line = json!({"event": "pick", "session": sid, "prompt_id": id, "tokens_in": 0, "tokens_out": 0,
                           "cost": 0.0, "memory": null, "skip": null, "named_docs": 0, "named_chars": 0,
-                          "named_sent": 0});
+                          "named_sent": 0, "short": index::query_of(input["prompt"].as_str().unwrap_or("")) == Err("short")});
     let result = pick(&input, &sid, &mut line).unwrap_or_else(|e| {
         line["skip"] = json!("error");
         line["error"] = json!(e.to_string());

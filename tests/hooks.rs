@@ -2558,6 +2558,25 @@ fn a_pick_lists_no_memory_that_the_session_ledger_holds() {
 }
 
 #[test]
+fn a_short_prompt_gets_a_pick_and_a_bare_slash_command_does_not() {
+    let w = World::new("pick-on-short");
+    w.branch("feat/x");
+    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    w.memory(&repo, "walrus-header", "decision", "", "The walrus export puts the header row first", "The header row comes first.");
+    let p = Provider::start(vec![answer(json!({"ids": ["m1"]}))]);
+    picks_on(&w, &p);
+    transcript(&w, "S", &[]);
+    prompt(&w, "S", "bare", "/bro");
+    prompt(&w, "S", "yes", "yes");
+    let line = pick_line(&w, "yes");
+    assert_eq!((&line["memory"], &line["short"]), (&json!("github.com/someone/app/walrus-header"), &json!(true)), "{line}");
+    assert_eq!(p.requests().len(), 1, "the bare slash command makes no call");
+    assert_eq!(log_of(&w, "pick").len(), 1);
+    let skips: Vec<Value> = log_of(&w, "skipped").iter().map(|e| e["reason"].clone()).collect();
+    assert_eq!(skips, [json!("empty-args"), json!("short")], "both prompts still skip the search");
+}
+
+#[test]
 fn a_prompt_makes_at_most_one_call_and_a_session_ten() {
     let w = World::new("pick-cap");
     w.branch("feat/x");
@@ -2685,7 +2704,7 @@ fn nothing_starts_with_picks_off_or_without_a_plain_prompt_id() {
     w.hook(&["recall"], "S", json!({"prompt": ask}));
     prompt(&w, "S", "../off3", ask);
     prompt(&w, "S", "off4", "<task-notification>done</task-notification>");
-    prompt(&w, "S", "off5", "fix it now");
+    prompt(&w, "S", "off5", "/bro");
     w.hook(&["recall"], "S", json!({"prompt": ask, "prompt_id": "off6", "agent_id": "a1"}));
 
     prompt(&w, "S", "on", ask);
