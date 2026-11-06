@@ -217,7 +217,7 @@ The step in extraction that compares each proposed fact with the existing memori
 _Avoid_: merge, consolidation, cleanup
 
 **Reconcile**:
-The part of dedupe that rewrites each other memory of the repo that a new fact makes out of date. A memory whose last change is later than the end of the session's last turn is newer than the fact and wins where they disagree.
+The part of dedupe that rewrites each other memory of the repo that a new fact makes out of date. It can reach the memories the session received, even when no fact looks like them. A memory whose last change is later than the end of the session's last turn is newer than the fact and wins where they disagree.
 _Avoid_: strike (that is a failed extraction run), update, sync
 
 **Provider**:
