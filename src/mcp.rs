@@ -4,12 +4,14 @@ use rmcp::{ServiceExt, schemars, tool, tool_router, transport::stdio};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
 const DEFAULT_K: usize = 5;
 const MAX_K: usize = 20;
 const DESCRIPTION_CHARS: usize = 150;
+const TAIL_BYTES: u64 = 64 * 1024;
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct RecallParams {
@@ -77,7 +79,7 @@ impl Server {
             self.log("recall", json!({"address": query}));
             return Ok(format!("{}\n\n{text}", path.display()));
         }
-        let repo = git::Repo::find(&self.cwd);
+        let repo = self.repo();
         let (ix, scopes) =
             index::open_for(&self.home, &self.user_home, repo.as_ref()).map_err(|e| e.to_string())?;
         let k = p.k.unwrap_or(DEFAULT_K).clamp(1, MAX_K);
@@ -117,8 +119,7 @@ impl Server {
         let (dir, scope) = match p.scope.as_str() {
             "global" => (self.home.join("global"), "global".to_string()),
             "repo" => {
-                let repo =
-                    git::Repo::find(&self.cwd).ok_or("no git repository here; use scope global")?;
+                let repo = self.repo().ok_or("no git repository here; use scope global")?;
                 (self.home.join("repos").join(&repo.identity), repo.identity)
             }
             _ => return Err("scope must be repo or global".into()),
@@ -230,6 +231,18 @@ impl Server {
         })
     }
 
+    // ken: the session ID is read once, so a server that outlives `/clear` reads the older transcript; re-read it when a stale ID is measured.
+    fn repo(&self) -> Option<git::Repo> {
+        git::Repo::find(&self.cwd).or_else(|| {
+            let transcript = self
+                .user_home
+                .join(".claude/projects")
+                .join(index::slug(Path::new(&self.cwd)))
+                .join(format!("{}.jsonl", self.session));
+            git::Repo::find(&last_cwd(&transcript)?)
+        })
+    }
+
     fn log(&self, tool: &str, detail: Value) {
         let mut event = json!({"event": "mcp", "tool": tool, "session": self.session});
         if let (Some(e), Some(d)) = (event.as_object_mut(), detail.as_object()) {
@@ -261,6 +274,19 @@ pub fn serve() -> crate::Result<()> {
             server.serve(stdio()).await?.waiting().await?;
             Ok(())
         })
+}
+
+/// The bytes `"cwd":"` cannot occur inside an escaped JSON string, so the last match is the last line's field.
+// ken: stops at the first `"`, so a `cwd` with a quote or a backslash stays global; parse the line when one is measured.
+fn last_cwd(transcript: &Path) -> Option<String> {
+    let mut f = fs::File::open(transcript).ok()?;
+    let from = f.metadata().ok()?.len().saturating_sub(TAIL_BYTES);
+    f.seek(SeekFrom::Start(from)).ok()?;
+    let mut tail = vec![];
+    f.read_to_end(&mut tail).ok()?;
+    let tail = String::from_utf8_lossy(&tail);
+    let (_, value) = tail.rsplit_once("\"cwd\":\"")?;
+    value.split_once('"').map(|(cwd, _)| cwd.to_string())
 }
 
 /// Ticket 19: an address is a path under its root, so the file is found by joining strings. `None` for anything
@@ -321,6 +347,96 @@ fn replaced_copies(path: &Path, stem: &str) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn world(name: &str) -> (PathBuf, Server) {
+        let tmp = std::env::temp_dir().join(format!("openrecall-mcp-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join("code")).unwrap();
+        let server = Server {
+            home: tmp.join("home"),
+            user_home: tmp.join("user"),
+            cwd: tmp.join("code").display().to_string(),
+            session: "s1".into(),
+        };
+        (tmp, server)
+    }
+
+    fn repo(tmp: &Path, name: &str) -> PathBuf {
+        let dir = tmp.join("code").join(name);
+        fs::create_dir_all(dir.join(".git")).unwrap();
+        fs::write(
+            dir.join(".git/config"),
+            format!("[remote \"origin\"]\n\turl = git@github.com:someone/{name}.git\n"),
+        )
+        .unwrap();
+        dir
+    }
+
+    fn transcript(server: &Server, text: &str) {
+        let dir = server
+            .user_home
+            .join(".claude/projects")
+            .join(index::slug(Path::new(&server.cwd)));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("s1.jsonl"), text).unwrap();
+    }
+
+    fn line(cwd: &Path) -> String {
+        format!("{}\n", json!({"type": "user", "cwd": cwd}))
+    }
+
+    fn identity(server: &Server) -> Option<String> {
+        server.repo().map(|r| r.identity)
+    }
+
+    #[test]
+    fn a_transcript_names_the_repo_and_its_last_cwd_wins() {
+        let (tmp, server) = world("last");
+        let (app, api) = (repo(&tmp, "app"), repo(&tmp, "api"));
+        transcript(&server, &line(&app));
+        assert_eq!(identity(&server).as_deref(), Some("github.com/someone/app"));
+        transcript(&server, &format!("{}{}", line(&app), line(&api)));
+        assert_eq!(identity(&server).as_deref(), Some("github.com/someone/api"));
+        transcript(&server, &format!("{}{}", line(&api), line(&app.join("src/deep"))));
+        assert_eq!(identity(&server).as_deref(), Some("github.com/someone/app"));
+        fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn anything_but_a_whole_cwd_in_a_repo_gives_no_repo() {
+        let (tmp, server) = world("none");
+        assert!(identity(&server).is_none());
+        transcript(&server, "{\"type\":\"user\"}\n");
+        assert!(identity(&server).is_none());
+        transcript(&server, &line(&tmp.join("code/loose")));
+        assert!(identity(&server).is_none());
+        let app = repo(&tmp, "app");
+        transcript(&server, &format!("{}{{\"cwd\":\"{}", line(&tmp), app.display()));
+        assert!(identity(&server).is_none());
+        fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn a_start_directory_in_a_repo_keeps_that_repo() {
+        let (tmp, mut server) = world("start");
+        let (app, api) = (repo(&tmp, "app"), repo(&tmp, "api"));
+        server.cwd = app.display().to_string();
+        transcript(&server, &line(&api));
+        assert_eq!(identity(&server).as_deref(), Some("github.com/someone/app"));
+        fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn only_the_last_64_kb_counts() {
+        let (tmp, server) = world("tail");
+        let app = repo(&tmp, "app");
+        let filler = "{\"type\":\"progress\"}\n".repeat(4000);
+        transcript(&server, &format!("{filler}{}", line(&app)));
+        assert_eq!(identity(&server).as_deref(), Some("github.com/someone/app"));
+        transcript(&server, &format!("{}{filler}", line(&app)));
+        assert!(identity(&server).is_none());
+        fs::remove_dir_all(tmp).unwrap();
+    }
 
     #[test]
     fn addresses_map_to_files() {

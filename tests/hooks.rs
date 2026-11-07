@@ -1348,6 +1348,36 @@ fn mcp_tools_remember_recall_and_forget() {
     assert!(!log.contains(&token));
 }
 
+fn moved_into(w: &World) -> World {
+    let start = World { folder: w.root.join("code"), ..w.clone() };
+    fs::create_dir_all(&start.folder).unwrap();
+    let transcript = start.builtin_dir().with_file_name("M.jsonl");
+    fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    fs::write(transcript, format!("{}\n", json!({"type": "user", "cwd": w.folder}))).unwrap();
+    start
+}
+
+#[test]
+fn remember_files_under_the_working_directorys_repo() {
+    let w = World::new("mcp-moved-remember");
+    let mut m = Mcp::start(&moved_into(&w));
+    let (text, err) = m.tool("remember", json!({"text": "The zebra job runs nightly.", "description": "The zebra job runs nightly.", "type": "gotcha", "scope": "repo", "name": "zebra-job"}));
+    assert!(!err && text.starts_with("Stored as github.com/someone/app/zebra-job ("), "{text}");
+    assert!(w.home.join(".openrecall/repos/github.com/someone/app/zebra-job.md").is_file());
+    m.close();
+}
+
+#[test]
+fn recall_finds_the_working_directorys_memories() {
+    let w = World::new("mcp-moved-recall");
+    let text = "The zebra job runs nightly.";
+    w.memory(&w.home.join(".openrecall/repos/github.com/someone/app"), "zebra-job", "gotcha", "", text, text);
+    let mut m = Mcp::start(&moved_into(&w));
+    let (answer, err) = m.tool("recall", json!({"query": "zebra"}));
+    assert!(!err && answer.contains("github.com/someone/app/zebra-job: "), "{answer}");
+    m.close();
+}
+
 /// A made-up daily stats row with every field, `extra` laid over it.
 fn stats_row(day: &str, written_at: u64, extra: Value) -> Value {
     let mut row = json!({"day": day, "written_at": written_at, "versions": ["0.9.0"], "sessions": 2, "prompts": 10,
