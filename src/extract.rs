@@ -109,6 +109,7 @@ struct Entry {
     identity: String,
     /// The main checkout, whose built-in memory files are dedupe candidates; the worktree may be gone by then.
     main: String,
+    folder: String,
     /// Bytes of the transcript already extracted.
     cursor: u64,
     ended: bool,
@@ -144,6 +145,7 @@ pub fn enqueue(sid: &str, transcript: &str, repo: &git::Repo) -> crate::Result<(
                 .main_checkout()
                 .map(|m| m.display().to_string())
                 .unwrap_or_default(),
+            folder: repo.folder.display().to_string(),
             ..Default::default()
         },
     )
@@ -302,6 +304,7 @@ impl From<rusqlite::Error> for Fail {
     }
 }
 
+#[derive(Clone)]
 struct Fact {
     kind: String,
     name: String,
@@ -311,6 +314,7 @@ struct Fact {
     remembered: Option<String>,
 }
 
+#[derive(Clone)]
 struct Decision {
     fact: usize,
     action: String,
@@ -470,6 +474,26 @@ fn extract(sid: &str, e: &Entry, s: &Settings, scanner: &scan::Scanner) -> Resul
         }
     };
     let secret = |d: &Decision| scanner.redact(&format!("{}\n{}", d.description, d.body)).1;
+    let (tracked, folder, user_home) = (OnceCell::new(), Path::new(&e.folder), crate::user_home());
+    let with_full_paths = |kind: &str, description: &str, body: &str, line: &mut Value| {
+        let rotted = kind == "pointer" && folder.is_dir() && index::rotted(body, Some(folder), &user_home);
+        let list = || tracked.get_or_init(|| git::tracked(folder));
+        match rotted.then(|| index::full_paths(description, body, folder, &user_home, list())).flatten() {
+            Some((description, body, paths)) => {
+                line["paths"] = json!(paths);
+                (description, body)
+            }
+            None => (description.to_string(), body.to_string()),
+        }
+    };
+    let new_fact = |f: &Fact, line: &mut Value| {
+        let (description, body) = with_full_paths(&f.kind, &f.description, &f.body, line);
+        write_new(&dir, &e.identity, &Fact { description, body, ..f.clone() }, &stamp, secs)
+    };
+    let rewrite = |path: &Path, kind: &str, d: &Decision, line: &mut Value| {
+        let (description, body) = with_full_paths(kind, &d.description, &d.body, line);
+        replace(path, &e.identity, kind, &Decision { description, body, ..d.clone() }, &stamp, secs)
+    };
     let written = facts.iter().zip(&found).enumerate().filter(|(_, (f, _))| f.remembered.is_none());
     for (i, (f, cands)) in written {
         let shown: Vec<Value> = cands
@@ -497,7 +521,7 @@ fn extract(sid: &str, e: &Entry, s: &Settings, scanner: &scan::Scanner) -> Resul
                 let why = if listed(d) { refused(d, &changed) } else { Some("not a candidate") };
                 if let Some(why) = why {
                     line["why"] = json!(why);
-                    line["address"] = json!(write_new(&dir, &e.identity, f, &stamp, secs)?);
+                    line["address"] = json!(new_fact(f, &mut line)?);
                     "new"
                 } else if let hits @ [rule, ..] = secret(d).as_slice() {
                     line["address"] = json!(d.address);
@@ -507,14 +531,14 @@ fn extract(sid: &str, e: &Entry, s: &Settings, scanner: &scan::Scanner) -> Resul
                     "dropped"
                 } else {
                     let path = home.join("repos").join(format!("{}.md", d.address));
-                    line["copy"] = json!(replace(&path, &e.identity, &f.kind, d, &stamp, secs)?);
+                    line["copy"] = json!(rewrite(&path, &f.kind, d, &mut line)?);
                     line["address"] = json!(d.address);
                     changed.insert(&d.address);
                     "replace"
                 }
             }
             _ => {
-                line["address"] = json!(write_new(&dir, &e.identity, f, &stamp, secs)?);
+                line["address"] = json!(new_fact(f, &mut line)?);
                 "new"
             }
         };
@@ -545,7 +569,7 @@ fn extract(sid: &str, e: &Entry, s: &Settings, scanner: &scan::Scanner) -> Resul
                 secrets.extend_from_slice(hits);
             } else if let Some(c) = target {
                 let path = home.join("repos").join(format!("{}.md", d.address));
-                line["copy"] = json!(replace(&path, &e.identity, &c.kind, d, &stamp, secs)?);
+                line["copy"] = json!(rewrite(&path, &c.kind, d, &mut line)?);
                 changed.insert(&d.address);
                 reconciled += 1;
             }
