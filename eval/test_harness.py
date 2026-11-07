@@ -520,7 +520,7 @@ class HarnessTest(unittest.TestCase):
         self.assertEqual((results[0]["pick"]["memory"], results[0]["pick"]["cost"]), (address + "filler-0", 0.01))
         self.assertEqual(results[0]["injected"], [address + "export-empty-rows"])
         self.assertEqual(results[1]["picked"], [], "recall injected the picked memory first")
-        self.assertEqual((results[1]["pick"]["skip"], results[1]["pick"]["reason"]), (None, "ledger"))
+        self.assertEqual((results[1]["pick"]["skip"], results[1]["pick"]["memory"]), (None, None), "the list leaves the ledger's memories out")
         self.assertIsNone(results[2].get("pick"), "a skipped prompt starts no job")
         self.assertEqual(len(sent), 2)
         self.assertIn("## Session so far, newest turn first\n[user] plan the export fix for the empty rows\n"
@@ -616,7 +616,7 @@ class HarnessTest(unittest.TestCase):
         with open(os.path.join(tmp, "docs", "plan.md")) as fh:
             self.assertEqual(fh.read(), "Plan: rewritten after the freeze.\n", "the checkout is never written")
         self.assertNotIn("Edited after the freeze", harness.memory_text(results[0]["memories"][address + "export-empty-rows"]))
-        self.assertEqual((results[0]["pick"]["reason"], results[0]["picked"]), ("ledger", []), "the frozen ledger holds it")
+        self.assertEqual((results[0]["pick"]["memory"], results[0]["picked"]), (None, []), "the frozen ledger holds it, so the list leaves it out")
         self.assertNotIn(address + "filler-2", [x["address"] for x in results[0]["candidates"]])
         self.assertIsNone(results[1].get("pick"), "the session has used its 10 calls")
         self.assertEqual(len(sent), 1)
