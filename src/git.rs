@@ -90,6 +90,21 @@ pub fn owner(identity: &str) -> Option<&str> {
     identity.rsplit_once('/').map(|(owner, _)| owner)
 }
 
+/// The files `git` tracks in the folder, or an empty list when `git` fails.
+pub fn tracked(folder: &Path) -> Vec<String> {
+    let out = std::process::Command::new("git")
+        .args(["ls-files", "-z"])
+        .current_dir(folder)
+        .output();
+    out.ok().filter(|o| o.status.success()).map_or(vec![], |o| {
+        String::from_utf8_lossy(&o.stdout)
+            .split('\0')
+            .filter(|p| !p.is_empty())
+            .map(str::to_string)
+            .collect()
+    })
+}
+
 fn origin(common: &Path) -> Option<String> {
     let config = fs::read_to_string(common.join("config")).ok();
     let parsed = config.as_deref().and_then(|c| {
@@ -158,6 +173,21 @@ mod tests {
         assert_eq!(owner("gitlab.com/acme/ui/web"), Some("gitlab.com/acme/ui"));
         assert_eq!(owner("local/Users/me/loose/one"), None);
         assert_eq!(owner("web"), None);
+    }
+
+    #[test]
+    fn tracked_lists_the_folders_files_and_is_empty_when_git_fails() {
+        let tmp = std::env::temp_dir().join(format!("openrecall-tracked-{}", std::process::id()));
+        fs::create_dir_all(tmp.join("src")).unwrap();
+        fs::write(tmp.join("src/é b.py"), "").unwrap();
+        fs::write(tmp.join("untracked.py"), "").unwrap();
+        assert!(tracked(&tmp).is_empty(), "not a repo");
+        for args in [&["init", "-q"][..], &["add", "src"]] {
+            assert!(std::process::Command::new("git").args(args).current_dir(&tmp).status().unwrap().success());
+        }
+        assert_eq!(tracked(&tmp), ["src/é b.py"]);
+        assert!(tracked(&tmp.join("gone")).is_empty());
+        fs::remove_dir_all(tmp).unwrap();
     }
 
     #[test]

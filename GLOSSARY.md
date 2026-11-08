@@ -22,6 +22,10 @@ _Avoid_: reference, citation, location
 The state of a pointer whose cited path no longer exists, or whose code symbol none of its cited source files still contains. A rotted pointer is never injected.
 _Avoid_: stale, broken link, drift
 
+**False rot**:
+The state of a pointer that rot hides although what it cites still exists.
+_Avoid_: short path, broken pointer, moved file
+
 **State**:
 A fact about the current status or next step of a ticket, PR, branch or release. It expires.
 _Avoid_: progress, status note
@@ -333,6 +337,10 @@ _Avoid_: correct push, hit, good push
 **Late push**:
 A handoff record push that arrives after a turn on its branch already edited a file or made a commit.
 _Avoid_: slow push, missed push
+
+**No-harm change**:
+A change that cannot make a session worse by design. It never removes or rewrites what a session gets today, unless a mechanical check proves the old thing broken. It adds no time on the prompt path and no LLM call, and it can be undone. A memory that loses a slot to a higher score is not harm.
+_Avoid_: safe change, sure win, absolute improvement
 
 **Daily stats**:
 One row of counts per day that the binary keeps in the home, so Claude can say how OpenRecall performed. The counts come from the log and the transcripts by mechanical checks only, never from a judge.

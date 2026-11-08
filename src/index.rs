@@ -628,6 +628,50 @@ pub fn rotted(body: &str, folder: Option<&Path>, home: &Path) -> bool {
             .any(|s| !sources.iter().any(|code| code.contains(s)))
 }
 
+/// Each missing relative path with one suffix match in `tracked` becomes that file, in the body and the
+/// description, when the new body no longer reads rotted. Returns the description, the body and the map of paths.
+pub fn full_paths(
+    description: &str,
+    body: &str,
+    folder: &Path,
+    user_home: &Path,
+    tracked: &[String],
+) -> Option<(String, String, HashMap<String, String>)> {
+    let (folder_s, user_home_s) = (folder.to_string_lossy(), user_home.to_string_lossy());
+    let mut map = HashMap::new();
+    for p in turn::paths_in(&URL.replace_all(body, " "))
+        .into_iter()
+        .filter_map(|p| turn::norm_path(p, &folder_s, &user_home_s))
+    {
+        if p.starts_with('/') || p.starts_with("~/") || folder.join(&p).exists() {
+            continue;
+        }
+        let end = format!("/{p}");
+        // ken: scans the tracked list once per missing path; index by file name if a large repo slows the job.
+        let mut matches = tracked.iter().filter(|t| t.ends_with(&end));
+        if let (Some(full), None) = (matches.next(), matches.next()) {
+            map.insert(p, full.clone());
+        }
+    }
+    let swap = |text: &str| {
+        let blank = URL.replace_all(text, |c: &regex::Captures| " ".repeat(c[0].len()));
+        let mut out = text.to_string();
+        for token in turn::paths_in(&blank).into_iter().rev() {
+            if let Some(full) = turn::norm_path(token, &folder_s, &user_home_s).and_then(|p| map.get(&p)) {
+                let at = token.as_ptr() as usize - blank.as_ptr() as usize;
+                let end = turn::LINE_SUFFIX.find(token).map_or(token.len(), |m| m.start());
+                out.replace_range(at..at + end, full);
+            }
+        }
+        out
+    };
+    let new_body = swap(body);
+    if map.is_empty() || rotted(&new_body, Some(folder), user_home) {
+        return None;
+    }
+    Some((swap(description), new_body, map))
+}
+
 /// The name a backticked token looks up, when the token is shaped like code: `snake_case`, `camelCase`, `Type::item`
 /// or `call()`. A plain word such as `curl` is often a command, not a symbol, so it is never checked.
 fn symbol(token: &str) -> Option<&str> {
@@ -913,6 +957,87 @@ mod tests {
         assert!(!rotted("`ANTHROPIC_API_KEY` is never in src/b.toml", Some(&tmp), &tmp));
         assert!(!rotted("`run_import` is named, no file cited", Some(&tmp), &tmp));
         fs::remove_dir_all(tmp).unwrap();
+    }
+
+    fn rewritten(case: &str, description: &str, body: &str) -> Option<(String, String, HashMap<String, String>)> {
+        let tmp = std::env::temp_dir().join(format!("openrecall-rewritten-{case}-{}", std::process::id()));
+        let tracked = ["pkg/app/src/export.py", "pkg/app/src/report.py", "svc/a/src/util.py", "svc/b/src/util.py", "pkg/~/notes/a.py"].map(String::from);
+        for file in &tracked {
+            fs::create_dir_all(tmp.join(file).parent().unwrap()).unwrap();
+            fs::write(tmp.join(file), "def run_export():\n").unwrap();
+        }
+        let out = full_paths(description, body, &tmp, Path::new("/made-up-home"), &tracked);
+        fs::remove_dir_all(tmp).unwrap();
+        out
+    }
+
+    fn export_map() -> HashMap<String, String> {
+        HashMap::from([("src/export.py".to_string(), "pkg/app/src/export.py".to_string())])
+    }
+
+    #[test]
+    fn a_short_path_with_one_suffix_match_becomes_the_full_path() {
+        assert_eq!(
+            rewritten("unique", "d", "`run_export` lives in src/export.py."),
+            Some(("d".into(), "`run_export` lives in pkg/app/src/export.py.".into(), export_map()))
+        );
+    }
+
+    #[test]
+    fn two_suffix_matches_leave_the_path_alone() {
+        assert_eq!(rewritten("two", "d", "see src/util.py"), None);
+    }
+
+    #[test]
+    fn no_suffix_match_leaves_the_path_alone() {
+        assert_eq!(rewritten("none", "d", "see src/gone.py"), None);
+    }
+
+    #[test]
+    fn a_home_path_is_not_a_relative_path() {
+        assert_eq!(rewritten("home", "d", "see ~/notes/a.py"), None);
+    }
+
+    #[test]
+    fn a_line_suffix_stays_on_the_full_path() {
+        let (_, body, map) = rewritten("line", "d", "see src/export.py:12 and src/export.py:3-9.").unwrap();
+        assert_eq!(body, "see pkg/app/src/export.py:12 and pkg/app/src/export.py:3-9.");
+        assert_eq!(map, export_map());
+    }
+
+    #[test]
+    fn a_path_inside_a_longer_path_stays() {
+        let (_, body, _) = rewritten("longer", "d", "src/export.py is pkg/app/src/export.py").unwrap();
+        assert_eq!(body, "pkg/app/src/export.py is pkg/app/src/export.py");
+    }
+
+    #[test]
+    fn a_url_that_holds_the_path_stays_and_keeps_the_positions_after_it() {
+        let body = "https://example.com/é?file=src/export.py then src/export.py";
+        assert_eq!(rewritten("url", "d", body).unwrap().1, "https://example.com/é?file=src/export.py then pkg/app/src/export.py");
+    }
+
+    #[test]
+    fn a_pointer_with_one_fixable_path_and_one_gone_path_stays_as_it_came() {
+        assert_eq!(rewritten("gone", "d", "src/export.py calls src/gone.py"), None);
+    }
+
+    #[test]
+    fn a_new_body_that_still_reads_rotted_stays_as_it_came() {
+        assert_eq!(rewritten("symbol", "d", "`run_import` lives in src/export.py"), None);
+    }
+
+    #[test]
+    fn the_map_also_rewrites_the_description() {
+        let (description, _, _) = rewritten("description", "src/export.py and src/report.py: `run_export`", "see src/export.py").unwrap();
+        assert_eq!(description, "pkg/app/src/export.py and src/report.py: `run_export`", "only a path on the body's map moves");
+    }
+
+    #[test]
+    fn every_path_of_a_body_moves_from_the_last_match_to_the_first() {
+        let (_, body, map) = rewritten("two-paths", "d", "`run_export` in src/export.py, called from src/report.py").unwrap();
+        assert_eq!(body, "`run_export` in pkg/app/src/export.py, called from pkg/app/src/report.py");
+        assert_eq!(map.len(), 2);
     }
 
     #[test]

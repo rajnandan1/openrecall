@@ -18,6 +18,7 @@ struct World {
     plugin: Option<PathBuf>,
     /// The extraction worker waits and checks again; off, it exits after one pass, so no test waits on a poll.
     poll: bool,
+    path: Option<PathBuf>,
 }
 
 impl World {
@@ -38,6 +39,7 @@ impl World {
             entrypoint: "cli",
             plugin: None,
             poll: false,
+            path: None,
         }
     }
 
@@ -78,6 +80,9 @@ impl World {
         }
         if !self.poll {
             cmd.env("OPENRECALL_POLL", "0");
+        }
+        if let Some(path) = &self.path {
+            cmd.env("PATH", path);
         }
         let guard = SPAWN.lock().unwrap();
         let child = cmd.spawn().unwrap();
@@ -1341,6 +1346,36 @@ fn mcp_tools_remember_recall_and_forget() {
         assert!(log.contains(event), "{event}\n{log}");
     }
     assert!(!log.contains(&token));
+}
+
+fn moved_into(w: &World) -> World {
+    let start = World { folder: w.root.join("code"), ..w.clone() };
+    fs::create_dir_all(&start.folder).unwrap();
+    let transcript = start.builtin_dir().with_file_name("M.jsonl");
+    fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    fs::write(transcript, format!("{}\n", json!({"type": "user", "cwd": w.folder}))).unwrap();
+    start
+}
+
+#[test]
+fn remember_files_under_the_working_directorys_repo() {
+    let w = World::new("mcp-moved-remember");
+    let mut m = Mcp::start(&moved_into(&w));
+    let (text, err) = m.tool("remember", json!({"text": "The zebra job runs nightly.", "description": "The zebra job runs nightly.", "type": "gotcha", "scope": "repo", "name": "zebra-job"}));
+    assert!(!err && text.starts_with("Stored as github.com/someone/app/zebra-job ("), "{text}");
+    assert!(w.home.join(".openrecall/repos/github.com/someone/app/zebra-job.md").is_file());
+    m.close();
+}
+
+#[test]
+fn recall_finds_the_working_directorys_memories() {
+    let w = World::new("mcp-moved-recall");
+    let text = "The zebra job runs nightly.";
+    w.memory(&w.home.join(".openrecall/repos/github.com/someone/app"), "zebra-job", "gotcha", "", text, text);
+    let mut m = Mcp::start(&moved_into(&w));
+    let (answer, err) = m.tool("recall", json!({"query": "zebra"}));
+    assert!(!err && answer.contains("github.com/someone/app/zebra-job: "), "{answer}");
+    m.close();
 }
 
 /// A made-up daily stats row with every field, `extra` laid over it.
@@ -2897,4 +2932,161 @@ fn the_log_keeps_the_identifiers_given_to_claude_and_the_pushed_records_branch_a
     transcript(&w, "S", &[]);
     prompt(&w, "S", "p1", "why does the walrus export drop the header row today");
     assert_eq!(pick_line(&w, "p1")["identifiers"], json!(["src/walrus.rs", "WAL-42"]));
+}
+
+fn git_repo(w: &World, files: &[&str]) {
+    for file in files {
+        put(&w.folder.join(file), "def run_export():\n");
+    }
+    for args in [&["init", "-q"][..], &["add", "-A"]] {
+        assert!(Command::new("git").args(args).current_dir(&w.folder).status().unwrap().success());
+    }
+}
+
+fn counted_git(w: &World) -> (World, PathBuf) {
+    let (bin, calls) = (w.root.join("bin"), w.root.join("git-calls"));
+    let real = std::env::var("PATH").unwrap();
+    put(&bin.join("git"), &format!("#!/bin/sh\necho \"$@\" >> '{}'\nPATH='{real}' exec git \"$@\"\n", calls.display()));
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(bin.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
+    (World { path: Some(bin), ..w.clone() }, calls)
+}
+
+fn fact(kind: &str, name: &str, description: &str, body: &str) -> Value {
+    json!({"type": kind, "name": name, "description": description, "body": body})
+}
+
+#[test]
+fn a_new_fact_a_replace_and_a_reconcile_write_the_full_path_and_log_paths() {
+    let w = World::new("full-paths");
+    w.branch("feat/x");
+    git_repo(&w, &["pkg/app/src/export.py"]);
+    let repo = w.home.join(".openrecall/repos").join(APP);
+    w.memory(&repo, "export-entry", "pointer", OLD, "The export entry point", "The export entry point lives in lib/entry.py.");
+    w.memory(&repo, "export-owner", "pointer", OLD, "The export owner", "The export owner is named in lib/owner.py.");
+    let (entry, owner) = (fs::read_to_string(repo.join("export-entry.md")).unwrap(), fs::read_to_string(repo.join("export-owner.md")).unwrap());
+    let p = Provider::start(vec![
+        answer(json!({"facts": [
+            fact("pointer", "export-writer", "The export writer is src/export.py", "The export writer is `run_export` in src/export.py:12."),
+            fact("pointer", "export-reader", "The export reader sits beside it", "The export reader is src/export.py."),
+            fact("pointer", "export-entry-moved", "The export entry point moved", "The export entry point moved.")], "claude_md_rules": []})),
+        answer(json!({"decisions": [
+            {"fact": 0, "action": "new", "address": "", "description": "", "body": ""},
+            {"fact": 1, "action": "replace", "address": format!("{APP}/no-such-memory"), "description": "d", "body": "b"},
+            {"fact": 2, "action": "replace", "address": format!("{APP}/export-entry"),
+             "description": "The export entry point is src/export.py", "body": "The export entry point moved to src/export.py."},
+            {"fact": 2, "action": "reconcile", "address": format!("{APP}/export-owner"),
+             "description": "The export owner", "body": "The export owner is named in src/export.py."}]})),
+    ]);
+    extraction_on(&w, &p);
+    w.turn("S1", &[user("Where does the export job live?"), said("In src/export.py.", None)], "");
+    let run = extracted_to_end(&w, "S1");
+    assert_eq!((run["new"].as_u64(), run["replaced"].as_u64(), run["reconciled"].as_u64()), (Some(2), Some(1), Some(1)), "{run}");
+
+    let text = |stem: &str| fs::read_to_string(repo.join(format!("{stem}.md"))).unwrap();
+    assert!(text("export-writer").contains("\ndescription: The export writer is pkg/app/src/export.py\n"), "{}", text("export-writer"));
+    assert!(text("export-writer").ends_with("\n\nThe export writer is `run_export` in pkg/app/src/export.py:12.\n"), "{}", text("export-writer"));
+    assert!(text("export-reader").ends_with("\n\nThe export reader is pkg/app/src/export.py.\n"), "a refused replace writes new: {}", text("export-reader"));
+    assert!(text("export-entry").contains("\ndescription: The export entry point is pkg/app/src/export.py\n"), "{}", text("export-entry"));
+    assert!(text("export-entry").ends_with("\n\nThe export entry point moved to pkg/app/src/export.py.\n"), "{}", text("export-entry"));
+    assert!(text("export-owner").ends_with("\n\nThe export owner is named in pkg/app/src/export.py.\n"), "{}", text("export-owner"));
+
+    let map = json!({"src/export.py": "pkg/app/src/export.py"});
+    let (new, replaced, reconciled) = (dedupe_lines(&w, "new"), dedupe_lines(&w, "replace"), dedupe_lines(&w, "reconcile"));
+    assert_eq!((new.len(), replaced.len(), reconciled.len()), (2, 1, 1));
+    for line in [&new[0], &new[1], &replaced[0], &reconciled[0]] {
+        assert_eq!(line["paths"], map, "{line}");
+    }
+    let copy = |line: &Value| fs::read_to_string(repo.join("replaced").join(line["copy"].as_str().unwrap())).unwrap();
+    assert_eq!((copy(&replaced[0]), copy(&reconciled[0])), (entry, owner), "the old text lands in replaced/");
+}
+
+#[test]
+fn git_runs_once_per_run_and_only_when_a_written_pointer_reads_rotted() {
+    let w = World::new("git-once");
+    w.branch("feat/x");
+    git_repo(&w, &["pkg/app/src/export.py", "pkg/app/src/report.py"]);
+    let (w, calls) = counted_git(&w);
+    let repo = w.home.join(".openrecall/repos").join(APP);
+    let note = "The retry note names src/export.py.";
+    let p = Provider::start(vec![
+        answer(json!({"facts": [
+            fact("pointer", "sound-pointer", "The sound one", "The writer is pkg/app/src/export.py."),
+            fact("gotcha", "retry-note", note, note)], "claude_md_rules": []})),
+        answer(json!({"facts": [
+            fact("pointer", "export-writer", "The writer", "The writer is src/export.py."),
+            fact("pointer", "report-writer", "The report", "The report is src/report.py."),
+            fact("decision", "keep-the-name", note, note)], "claude_md_rules": []})),
+        answer(json!({"decisions": []})),
+    ]);
+    extraction_on(&w, &p);
+    let lines = [user("Where does the export job live?"), said("In the package.", None)];
+
+    queue(&w, "A", &lines, json!({"folder": w.folder, "ended": true}));
+    w.run(&["extract", "--job"], "");
+    runs(&w, "A", 1);
+    assert!(!calls.exists(), "no written pointer reads rotted: {:?}", fs::read_to_string(&calls));
+
+    queue(&w, "B", &lines, json!({"folder": w.folder, "ended": true}));
+    w.run(&["extract", "--job"], "");
+    runs(&w, "B", 1);
+    assert_eq!(fs::read_to_string(&calls).unwrap(), "ls-files -z\n", "two rotted pointers read the list once");
+    let text = |stem: &str| fs::read_to_string(repo.join(format!("{stem}.md"))).unwrap();
+    assert!(text("export-writer").ends_with("\n\nThe writer is pkg/app/src/export.py.\n"), "{}", text("export-writer"));
+    assert!(text("report-writer").ends_with("\n\nThe report is pkg/app/src/report.py.\n"), "{}", text("report-writer"));
+    for stem in ["retry-note", "keep-the-name"] {
+        assert!(text(stem).contains(&format!("\ndescription: {note}\n")) && text(stem).ends_with(&format!("\n\n{note}\n")), "a fact of another type stays: {}", text(stem));
+    }
+    let paths: Vec<bool> = dedupe_lines(&w, "new").iter().map(|l| l["paths"].is_object()).collect();
+    assert_eq!(paths, [false, false, true, true, false], "only the two rewritten pointers log paths");
+}
+
+#[test]
+fn an_entry_with_no_folder_or_a_gone_folder_keeps_the_text_as_it_came() {
+    for (case, folder) in [("no-folder", None), ("gone-folder", Some("/made-up/gone"))] {
+        let w = World::new(case);
+        w.branch("feat/x");
+        git_repo(&w, &["pkg/app/src/export.py"]);
+        let (w, calls) = counted_git(&w);
+        let p = Provider::start(vec![answer(json!({"facts": [
+            fact("pointer", "export-writer", "The writer is src/export.py", "The writer is src/export.py.")], "claude_md_rules": []}))]);
+        extraction_on(&w, &p);
+        let mut entry = json!({"ended": true, "main": w.folder});
+        if let Some(folder) = folder {
+            entry["folder"] = json!(folder);
+        }
+        queue(&w, "S", &[user("Where does the export job live?"), said("In the package.", None)], entry);
+        w.run(&["extract", "--job"], "");
+        runs(&w, "S", 1);
+        let text = fs::read_to_string(w.home.join(".openrecall/repos").join(APP).join("export-writer.md")).unwrap();
+        assert!(text.contains("\ndescription: The writer is src/export.py\n") && text.ends_with("\n\nThe writer is src/export.py.\n"), "{text}");
+        assert!(dedupe_lines(&w, "new")[0]["paths"].is_null() && !calls.exists(), "{case}");
+    }
+}
+
+#[test]
+fn a_reconcile_goes_by_the_memorys_type_and_a_replace_by_the_facts() {
+    let w = World::new("full-paths-kinds");
+    w.branch("feat/x");
+    git_repo(&w, &["pkg/app/src/export.py"]);
+    let repo = w.home.join(".openrecall/repos").join(APP);
+    w.memory(&repo, "export-owner", "pointer", OLD, "The export owner", "The export owner is named in lib/owner.py.");
+    w.memory(&repo, "export-rule", "gotcha", OLD, "The export rule", "The export rule was in lib/rule.py.");
+    w.memory(&repo, "export-note", "pointer", OLD, "The export note", "The export note was in lib/note.py.");
+    let decide = |action: &str, stem: &str, body: &str| {
+        json!({"fact": 0, "action": action, "address": format!("{APP}/{stem}"), "description": body, "body": body})
+    };
+    let (owner, rule, note) = ("The owner is src/export.py.", "The rule is src/export.py.", "The note is src/export.py.");
+    let p = Provider::start(vec![
+        answer(json!({"facts": [fact("gotcha", "export-moved", "The export job moved", "The export job moved.")], "claude_md_rules": []})),
+        answer(json!({"decisions": [decide("replace", "export-note", note), decide("reconcile", "export-owner", owner), decide("reconcile", "export-rule", rule)]})),
+    ]);
+    extraction_on(&w, &p);
+    w.turn("S1", &[user("Where does the export job live?"), said("In src/export.py.", None)], "");
+    extracted_to_end(&w, "S1");
+    let text = |stem: &str| fs::read_to_string(repo.join(format!("{stem}.md"))).unwrap();
+    assert!(text("export-owner").ends_with("\n\nThe owner is pkg/app/src/export.py.\n"), "{}", text("export-owner"));
+    assert!(text("export-rule").ends_with(&format!("\n\n{rule}\n")), "{}", text("export-rule"));
+    assert!(text("export-note").ends_with(&format!("\n\n{note}\n")), "{}", text("export-note"));
+    assert!(text("export-note").contains("\n  type: gotcha\n"), "a replace stores the fact's type: {}", text("export-note"));
 }
