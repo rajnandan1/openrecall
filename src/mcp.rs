@@ -234,11 +234,14 @@ impl Server {
     // ken: the session ID is read once, so a server that outlives `/clear` reads the older transcript; re-read it when a stale ID is measured.
     fn repo(&self) -> Option<git::Repo> {
         git::Repo::find(&self.cwd).or_else(|| {
-            let transcript = self
-                .user_home
-                .join(".claude/projects")
-                .join(index::slug(Path::new(&self.cwd)))
-                .join(format!("{}.jsonl", self.session));
+            let projects = self.user_home.join(".claude/projects");
+            let name = format!("{}.jsonl", self.session);
+            let at_slug = projects.join(index::slug(Path::new(&self.cwd))).join(&name);
+            // Claude Code caps a long slug with a hash suffix, so the session ID finds the folder then.
+            let transcript = match at_slug.is_file() {
+                true => at_slug,
+                false => fs::read_dir(&projects).ok()?.flatten().map(|e| e.path().join(&name)).find(|p| p.is_file())?,
+            };
             git::Repo::find(&last_cwd(&transcript)?)
         })
     }
@@ -277,7 +280,6 @@ pub fn serve() -> crate::Result<()> {
 }
 
 /// The bytes `"cwd":"` cannot occur inside an escaped JSON string, so the last match is the last line's field.
-// ken: stops at the first `"`, so a `cwd` with a quote or a backslash stays global; parse the line when one is measured.
 fn last_cwd(transcript: &Path) -> Option<String> {
     let mut f = fs::File::open(transcript).ok()?;
     let from = f.metadata().ok()?.len().saturating_sub(TAIL_BYTES);
@@ -285,8 +287,8 @@ fn last_cwd(transcript: &Path) -> Option<String> {
     let mut tail = vec![];
     f.read_to_end(&mut tail).ok()?;
     let tail = String::from_utf8_lossy(&tail);
-    let (_, value) = tail.rsplit_once("\"cwd\":\"")?;
-    value.split_once('"').map(|(cwd, _)| cwd.to_string())
+    let (_, value) = tail.rsplit_once("\"cwd\":")?;
+    serde_json::Deserializer::from_str(value).into_iter::<String>().next()?.ok()
 }
 
 /// Ticket 19: an address is a path under its root, so the file is found by joining strings. `None` for anything
@@ -413,6 +415,27 @@ mod tests {
         let app = repo(&tmp, "app");
         transcript(&server, &format!("{}{{\"cwd\":\"{}", line(&tmp), app.display()));
         assert!(identity(&server).is_none());
+        fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn a_cwd_with_a_quote_and_a_backslash_is_decoded() {
+        let (tmp, server) = world("escaped");
+        repo(&tmp, "outer");
+        let app = repo(&tmp, "outer/we\"ird\\dir/app");
+        transcript(&server, &line(&app));
+        assert_eq!(identity(&server).as_deref(), Some("github.com/someone/outer/we\"ird\\dir/app"));
+        fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn a_transcript_under_another_project_folder_is_found_by_its_session() {
+        let (tmp, server) = world("capped");
+        let app = repo(&tmp, "app");
+        let dir = server.user_home.join(".claude/projects/-capped-slug-1a2b3c");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("s1.jsonl"), line(&app)).unwrap();
+        assert_eq!(identity(&server).as_deref(), Some("github.com/someone/app"));
         fs::remove_dir_all(tmp).unwrap();
     }
 

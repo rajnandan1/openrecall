@@ -3072,7 +3072,7 @@ fn a_reconcile_goes_by_the_memorys_type_and_a_replace_by_the_facts() {
     let repo = w.home.join(".openrecall/repos").join(APP);
     w.memory(&repo, "export-owner", "pointer", OLD, "The export owner", "The export owner is named in lib/owner.py.");
     w.memory(&repo, "export-rule", "gotcha", OLD, "The export rule", "The export rule was in lib/rule.py.");
-    w.memory(&repo, "export-note", "gotcha", OLD, "The export note", "The export note was in lib/note.py.");
+    w.memory(&repo, "export-note", "pointer", OLD, "The export note", "The export note was in lib/note.py.");
     let decide = |action: &str, stem: &str, body: &str| {
         json!({"fact": 0, "action": action, "address": format!("{APP}/{stem}"), "description": body, "body": body})
     };
