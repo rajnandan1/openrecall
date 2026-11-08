@@ -3088,4 +3088,5 @@ fn a_reconcile_goes_by_the_memorys_type_and_a_replace_by_the_facts() {
     assert!(text("export-owner").ends_with("\n\nThe owner is pkg/app/src/export.py.\n"), "{}", text("export-owner"));
     assert!(text("export-rule").ends_with(&format!("\n\n{rule}\n")), "{}", text("export-rule"));
     assert!(text("export-note").ends_with(&format!("\n\n{note}\n")), "{}", text("export-note"));
+    assert!(text("export-note").contains("\n  type: gotcha\n"), "a replace stores the fact's type: {}", text("export-note"));
 }

@@ -279,7 +279,6 @@ pub fn serve() -> crate::Result<()> {
         })
 }
 
-/// The bytes `"cwd":"` cannot occur inside an escaped JSON string, so the last match is the last line's field.
 fn last_cwd(transcript: &Path) -> Option<String> {
     let mut f = fs::File::open(transcript).ok()?;
     let from = f.metadata().ok()?.len().saturating_sub(TAIL_BYTES);
@@ -287,8 +286,9 @@ fn last_cwd(transcript: &Path) -> Option<String> {
     let mut tail = vec![];
     f.read_to_end(&mut tail).ok()?;
     let tail = String::from_utf8_lossy(&tail);
-    let (_, value) = tail.rsplit_once("\"cwd\":")?;
-    serde_json::Deserializer::from_str(value).into_iter::<String>().next()?.ok()
+    tail.lines()
+        .rev()
+        .find_map(|l| serde_json::from_str::<Value>(l).ok()?.get("cwd")?.as_str().map(str::to_string))
 }
 
 /// Ticket 19: an address is a path under its root, so the file is found by joining strings. `None` for anything
@@ -425,6 +425,16 @@ mod tests {
         let app = repo(&tmp, "outer/we\"ird\\dir/app");
         transcript(&server, &line(&app));
         assert_eq!(identity(&server).as_deref(), Some("github.com/someone/outer/we\"ird\\dir/app"));
+        fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn a_cwd_inside_a_tool_input_does_not_count() {
+        let (tmp, server) = world("nested");
+        let (app, api) = (repo(&tmp, "app"), repo(&tmp, "api"));
+        let entry = json!({"cwd": app, "message": {"content": [{"type": "tool_use", "input": {"cwd": api}}]}});
+        transcript(&server, &format!("{entry}\n"));
+        assert_eq!(identity(&server).as_deref(), Some("github.com/someone/app"));
         fs::remove_dir_all(tmp).unwrap();
     }
 
