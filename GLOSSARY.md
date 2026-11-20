@@ -322,6 +322,10 @@ _Avoid_: baseline (that is built-in memory alone), control
 Running a past case or handoff pair through OpenRecall after the fact, seeing only the memories that existed at the time.
 _Avoid_: simulation, backtest, rerun
 
+**Extraction replay**:
+Extraction runs again on past sessions in time order with one binary, and the later cases then replay against the store it built. Two binaries that differ only in what extraction writes are judged this way, by how later prompts use what each wrote.
+_Avoid_: write-side replay, offline extraction, re-extraction run
+
 **Final state**:
 The identifiers in an earlier session's last five assistant messages before a handoff. Carry-over is measured against it.
 _Avoid_: end state, last state
