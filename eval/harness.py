@@ -40,6 +40,7 @@ HOME = os.path.expanduser("~")
 CASES = 100
 WINDOW = timedelta(days=7)
 QUIET = timedelta(minutes=30)
+QUEUED_MS = 3000
 CLASSES = ("tickets", "prs", "commits", "paths")
 TRUNK = {"", "main", "master", "HEAD"}
 TICKET = re.compile(r"\b[A-Z]{2,5}-\d{2,5}\b")
@@ -95,7 +96,7 @@ def prompt_of(o):
 def scan(path, until=None):
     """One transcript: its turns (a prompt, then the assistant messages, tool calls and branch after it)."""
     s = dict(sid=os.path.basename(path)[:-6], path=path, entrypoint=None, first=None, last=None, cwd=None, turns=[],
-             instructions=None, recalled=0, end_line=0, compacts=[])
+             instructions=None, recalled=0, end_line=0, compacts=[], queued=[])
     tools, groups, cur = {}, {}, None
     with open(path, encoding="utf-8", errors="replace") as fh:
         for n, line in enumerate(fh):
@@ -114,6 +115,10 @@ def scan(path, until=None):
             s["entrypoint"] = s["entrypoint"] or o.get("entrypoint")
             s["cwd"] = s["cwd"] or o.get("cwd")
             typ, branch = o.get("type"), o.get("gitBranch")
+            if typ == "queue-operation":
+                if o.get("operation") == "enqueue":
+                    s["queued"].append(t.timestamp() * 1000)
+                continue
             if typ == "attachment":
                 a = o.get("attachment") or {}
                 s["recalled"] += str(a.get("type")).startswith("relevant_memor")
@@ -1100,15 +1105,19 @@ def blob_hash(path):
         return fnv(fh.read())
 
 
-def turn_of(e, turns, near_ms=15000):
+def turn_of(e, turns, near_ms=15000, queued=()):
     """The turn a logged prompt came from: the turn with its hash nearest in time, else the turn nearest in time
     within `near_ms`. The transcript rewrites some prompts the hook saw: a skill typed by its short name gets its
-    plugin name, and spaces after a command are trimmed. Its line is written up to about 10 s after the hook runs."""
+    plugin name, and spaces after a command are trimmed. Its line is written up to about 10 s after the hook runs.
+    A prompt queued while a turn ran (typed mid-turn, or a Code Mode script result in Claude Code 2.1.327 and 2.1.328)
+    has no user line, so a hash miss within QUEUED_MS of a `queued` time (ms, from `scan`) has no turn."""
     at = e.get("started_at", e.get("at"))
     gap = lambda t: abs(t["start"].timestamp() * 1000 - at) if at is not None else 0
     same = [t for t in turns if fnv(t["ask"]) == e.get("prompt_hash")]
     if same or at is None:
         return min(same, key=gap, default=None)
+    if any(abs(q - at) <= QUEUED_MS for q in queued):
+        return None
     near = min(turns, key=gap, default=None)
     return near if near and gap(near) <= near_ms else None
 
@@ -1122,7 +1131,7 @@ def live_expansions(by_sid):
         if e.get("event") != "recall" or not e.get("injected"):
             continue
         s = by_sid.get(e.get("session"))
-        t = turn_of(e, s["turns"]) if s else None
+        t = turn_of(e, s["turns"], queued=s["queued"]) if s else None
         if not t:
             continue
         prompts += 1
@@ -1144,7 +1153,7 @@ def live_pr_urls(by_sid, label_fn=None, version="0.4.0"):
     cases, results = [], []
     for e in events:
         s = by_sid.get(e.get("session")) if e.get("event") == "recall" and e.get("at", 0) >= start else None
-        t = turn_of(e, s["real"]) if s else None
+        t = turn_of(e, s["real"], queued=s["queued"]) if s else None
         if not t or not PR_URL.search(t["ask"]):
             continue
         injected = [x for x in e.get("candidates", []) if x["address"] in e.get("injected", [])]
@@ -1434,7 +1443,7 @@ def daily(orhome):
         gate = [(e, a) for e in rec for a in e.get("injected") or [] if a in {c["address"] for c in e.get("candidates") or []}]
         for e, a in gate:
             s = by_sid.get(e.get("session"))
-            v = signal(s, turn_of(e, s["turns"]) if s else None, e["identifiers"].get(a, []) if "identifiers" in e else None, a)
+            v = signal(s, turn_of(e, s["turns"], queued=s["queued"]) if s else None, e["identifiers"].get(a, []) if "identifiers" in e else None, a)
             used["judged"] += v is not None
             used["yes"] += bool(v)
         for e in by["deliver"]:
@@ -1446,7 +1455,7 @@ def daily(orhome):
         for e in by["pushed"]:
             s = by_sid.get(e.get("session"))
             r = next((r for r in recalls[e.get("session")] if r.get("started_at", 0) <= e["at"] <= r.get("ended_at", 0)), None)
-            t = turn_of(r, s["turns"]) if s and r else None
+            t = turn_of(r, s["turns"], queued=s["queued"]) if s and r else None
             push = dict(branch=e["branch"], aliases=set(e["aliases"])) if "branch" in e else record_of(e.get("address") or "", orhome)
             if not (t and push):
                 continue
@@ -1545,7 +1554,7 @@ def freeze_set(out, since, until):
         sid = e["session"]
         if sid not in scanned:
             scanned[sid] = scan(paths[sid]) if sid in paths else None
-        t = turn_of(e, scanned[sid]["turns"]) if scanned[sid] else None
+        t = turn_of(e, scanned[sid]["turns"], queued=scanned[sid]["queued"]) if scanned[sid] else None
         if not (t and t["real"]):
             unjoined += 1
         elif (sid, t["line"]) not in taken:

@@ -255,6 +255,24 @@ class HarnessTest(unittest.TestCase):
         self.assertIsNone(harness.turn_of(event("/wayfinder plan it", "2026-01-08T08:00:00Z"), turns))
         self.assertIs(harness.turn_of(event("yes", "2026-01-08T09:40:00Z"), turns), turns[2])
         self.assertIs(harness.turn_of(dict(prompt_hash=harness.fnv("yes")), turns), turns[1])
+        queued = event('<event kind="repl-eval">done</event>', "2026-01-08T09:40:02Z")
+        self.assertIs(harness.turn_of(queued, turns), turns[2], "a hash miss falls back to the nearest turn")
+        self.assertIsNone(harness.turn_of(queued, turns, queued=[ms("2026-01-08T09:40:01Z")]),
+                          "a prompt queued mid-turn has no turn of its own")
+        self.assertIs(harness.turn_of(event("yes", "2026-01-08T09:40:00Z"), turns, queued=[ms("2026-01-08T09:40:01Z")]),
+                      turns[2], "a hash match wins over a queued line")
+
+    def test_scan_keeps_queued_times_out_of_the_turns(self):
+        path = os.path.join(tempfile.mkdtemp(), "q.jsonl")
+        with open(path, "w") as fh:
+            fh.writelines(json.dumps(o) + "\n" for o in (
+                user("2026-01-08T09:00:00Z", "fix the export", "feat-a"),
+                dict(type="queue-operation", operation="enqueue", timestamp="2026-01-08T09:00:30Z", content="also add a test"),
+                dict(type="queue-operation", operation="dequeue", timestamp="2026-01-08T09:00:31Z"),
+                said("2026-01-08T09:01:00Z", "Done.", "feat-a", "m1")))
+        s = harness.scan(path)
+        self.assertEqual([t["ask"] for t in s["turns"]], ["fix the export"])
+        self.assertEqual(s["queued"], [harness.ts_of("2026-01-08T09:00:30Z").timestamp() * 1000])
 
     def test_live_pr_urls(self):
         start = int(datetime(2026, 1, 8, 8, tzinfo=timezone.utc).timestamp() * 1000)
