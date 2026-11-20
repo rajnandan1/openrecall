@@ -872,6 +872,158 @@ class HarnessTest(unittest.TestCase):
                          "the live memories that name ABC-12: no expired one, no copy in replaced/, no MEMORY.md")
         self.assertEqual(len(asked[1][1]), 3, "the global memory is live too")
 
+    def xr_live(self):
+        """A made-up live home: four sessions' transcripts, queue entries and extract log lines around a window from
+        2026-01-08 to 2026-01-15."""
+        live = os.path.dirname(harness.EVAL)
+        os.makedirs(os.path.join(live, "extract"))
+        os.makedirs(os.path.join(live, "log"))
+        cuts = {}
+        for sid, day in (("late", 12), ("early", 10), ("struck", 11), ("before", 6)):
+            lines = [user("2026-01-%02dT09:00:00Z" % day, "work on the exports", "feat-a"),
+                     said("2026-01-%02dT09:05:00Z" % day, "Done.", "feat-a", sid),
+                     user("2026-01-%02dT18:00:00Z" % day, "one more thing", "feat-a")]
+            text = "".join(json.dumps(o) + "\n" for o in lines)
+            cuts[sid] = len(text) - len(json.dumps(lines[-1]) + "\n")
+            path = os.path.join(harness.PROJECTS, "-w-app", sid + ".jsonl")
+            with open(path, "w") as fh:
+                fh.write(text)
+            with open(os.path.join(live, "extract", sid + ".json"), "w") as fh:
+                json.dump(dict(transcript="/gone/%s.jsonl" % sid if sid == "late" else path, identity="github.com/someone/app",
+                               main="/w/app", cursor=0, ended=True, strikes=0, failed=False), fh)
+        ms = lambda day, hour=12: int(datetime(2026, 1, day, hour, tzinfo=timezone.utc).timestamp() * 1000)
+        log = [dict(event="extract", session="late", at=ms(5), to=40),
+               dict(event="extract", session="late", at=ms(7), to=90),
+               dict(event="extract", session="late", at=ms(12), to=120),
+               dict(event="extract", session="late", at=ms(12, 20), to=cuts["late"]),
+               dict(event="extract", session="early", at=ms(10, 20), to=cuts["early"]),
+               dict(event="extract", session="struck", at=ms(11, 20), strike="invalid json"),
+               dict(event="extract", session="before", at=ms(6), to=cuts["before"]),
+               dict(event="extract", session="late", at=ms(16), to=999)]
+        with open(os.path.join(live, "log", "openrecall.jsonl"), "w") as fh:
+            fh.writelines(json.dumps(e) + "\n" for e in log)
+        return live, cuts
+
+    def test_extraction_replay_plan(self):
+        live, cuts = self.xr_live()
+        start, end = datetime(2026, 1, 8, tzinfo=timezone.utc), datetime(2026, 1, 15, tzinfo=timezone.utc)
+        plan = harness.xr_plan(live, start, end)
+        self.assertEqual([s["session"] for s in plan], ["early", "late"], "session-end order; no successful run in the window, no session")
+        self.assertEqual([(s["cut"], s["cursor"]) for s in plan], [(cuts["early"], 0), (cuts["late"], 90)],
+                         "the largest cut in the window, the largest before it")
+        self.assertEqual(plan[0]["time"], datetime(2026, 1, 10, 9, 5, tzinfo=timezone.utc), "the last turn before the cut")
+        self.assertEqual(plan[1]["path"], os.path.join(harness.PROJECTS, "-w-app", "late.jsonl"), "found by session when the path is gone")
+
+    def test_extraction_replay_window(self):
+        cases = [dict(at="2026-01-12T10:00:00Z"), dict(at="2026-01-10T10:00:00Z"), dict(at="2026-01-16T09:59:59Z")]
+        self.assertEqual(harness.xr_window(cases), (datetime(2026, 1, 3, 10, tzinfo=timezone.utc),
+                                                    datetime(2026, 1, 16, 9, 59, 59, tzinfo=timezone.utc)))
+        with self.assertRaises(SystemExit):
+            harness.xr_window(cases + [dict(at="2026-01-17T10:00:00Z")])
+
+    def test_extraction_replay_start_store_and_expiry(self):
+        live, orhome = os.path.dirname(harness.EVAL), os.path.join(harness.EVAL, "run", "home", ".openrecall")
+        repo = os.path.join(live, "repos", "github.com", "someone", "app")
+        os.makedirs(os.path.join(repo, "replaced"))
+        fact = lambda source, body, expires="": "---\nname: n\nsource: S %s\n%s---\n\n%s\n" % (
+            source, expires and "expires: %s\n" % expires, body)
+        for name, text in (("deploy.md", fact("2026-01-01T00:00:00Z", "Deploy is frozen.", "2026-01-12")),
+                           ("rule.md", fact("2026-01-02T00:00:00Z", "Deploy on Fridays.")),
+                           ("later.md", fact("2026-01-09T00:00:00Z", "Born in the window.")),
+                           ("replaced/rule.2026-01-09T000000Z.md", fact("2026-01-02T00:00:00Z", "Deploy on Mondays."))):
+            with open(os.path.join(repo, name), "w") as fh:
+                fh.write(text)
+        tracked = harness.xr_start_store(live, orhome, datetime(2026, 1, 8, tzinfo=timezone.utc))
+        copy = os.path.join(orhome, "repos", "github.com", "someone", "app")
+        self.assertEqual(sorted(os.listdir(copy)), ["deploy.md", "rule.md"], "born before the start, no replaced/")
+        self.assertIn("Deploy on Mondays.", harness.read_text(os.path.join(copy, "rule.md")), "the version at the start")
+        self.assertEqual(os.stat(os.path.join(copy, "rule.md")).st_mtime, datetime(2026, 1, 2, tzinfo=timezone.utc).timestamp())
+        self.assertEqual(list(tracked), [os.path.join(copy, "deploy.md")])
+        at = lambda day: datetime(2026, 1, day, 9, tzinfo=timezone.utc)
+        has = lambda: "expires: 2026-01-12" in harness.read_text(os.path.join(copy, "deploy.md"))
+        for day, want in ((11, False), (12, True), (13, True), (10, False)):
+            harness.xr_expiry(tracked, at(day))
+            self.assertEqual(has(), want, "day %d" % day)
+        with open(os.path.join(copy, "deploy.md"), "w") as fh:
+            fh.write(fact("2026-01-01T00:00:00Z", "Deploy is open.", "2026-02-01"))
+        harness.xr_expiry(tracked, at(11))
+        self.assertEqual(tracked, {}, "a fact the replay rewrote leaves the list")
+        self.assertIn("expires: 2026-02-01", harness.read_text(os.path.join(copy, "deploy.md")))
+
+    def test_extraction_replay_retries_a_failed_session_once(self):
+        orhome = os.path.join(harness.EVAL, "home")
+        os.makedirs(os.path.join(orhome, "extract"))
+        s = dict(session="s1", cut=500, cursor=40, identity="github.com/someone/app", main="/w/app")
+        entry = os.path.join(orhome, "extract", "s1.json")
+
+        def job(results):
+            def run():
+                with open(entry) as fh:
+                    e = json.load(fh)
+                self.assertEqual((e["cursor"], e["strikes"], e["failed"]), (40, 0, False), "a fresh entry each time")
+                e.update(results.pop(0))
+                with open(entry, "w") as fh:
+                    json.dump(e, fh)
+            return run
+
+        self.assertEqual(harness.xr_session(s, "/t.jsonl", orhome, job([dict(failed=True), dict(cursor=500)]))[:2], (2, True))
+        tries, retried, e = harness.xr_session(s, "/t.jsonl", orhome, job([dict(failed=True), dict(failed=True)]))
+        self.assertEqual((tries, retried, e["failed"]), (2, True, True), "failed twice is recorded as failed")
+        tries, retried, e = harness.xr_session(s, "/t.jsonl", orhome, job([dict(failed=False)] * 8))
+        self.assertEqual((tries, retried, e["failed"]), (8, False, False), "at most 8 tries")
+
+    def test_extraction_replay_after_the_last_session(self):
+        orhome = os.path.join(harness.EVAL, "home")
+        repo = os.path.join(orhome, "repos", "github.com", "someone", "app")
+        os.makedirs(os.path.join(repo, "replaced"))
+        files = {"deploy.md": "---\nname: deploy\nsource: S0 2026-01-01T00:00:00Z\nupdated: s1 2026-01-10T08:30:00Z\n"
+                              "expires: 2026-03-02\n---\n\nDeploy is frozen.\n",
+                 "replaced/deploy.2026-02-16T101010Z.md": "---\nname: deploy\nsource: S0 2026-01-01T00:00:00Z\n---\n\nOld.\n",
+                 "new.md": "---\nname: new\nsource: s1 2026-01-10T09:00:00Z\nexpires: 2026-03-02\n---\n\nNew.\n",
+                 "old.md": "---\nname: old\nsource: S0 2026-01-01T00:00:00Z\nexpires: 2026-01-05\n---\n\nOld.\n",
+                 "kept.md": "---\nname: kept\nsource: S0 2026-01-01T00:00:00Z\nexpires: 2026-03-30\n---\n\nKept.\n"}
+        for name, text in files.items():
+            with open(os.path.join(repo, name), "w") as fh:
+                fh.write(text)
+        s = dict(session="s1", identity="github.com/someone/app", time=datetime(2026, 1, 10, 12, tzinfo=timezone.utc))
+        renamed = set()
+        harness.xr_rename(orhome, s, renamed)
+        self.assertEqual(os.listdir(os.path.join(repo, "replaced")), ["deploy.2026-01-10T090000Z.md"],
+                         "named for the latest time the session wrote")
+        kept = os.path.join(repo, "kept.md")
+        tracked = {kept: (files["kept.md"], files["kept.md"].replace("expires: 2026-03-30\n", ""), "2026-03-30")}
+        with open(kept, "w") as fh:
+            fh.write(tracked[kept][1])
+        harness.xr_after(orhome, tracked, "2026-02-16")
+        expires = lambda name: harness.front(os.path.join(repo, name), "expires")
+        self.assertEqual([expires(n) for n in ("deploy.md", "new.md", "old.md", "kept.md")],
+                         ["2026-01-24", "2026-01-24", "2026-01-05", "2026-03-30"],
+                         "updated or source + 14 days; an old one stays; a start-store one gets its line back")
+
+    def test_extraction_replay_outcome(self):
+        row = lambda useful, precision, failed=(): dict(useful=useful, precision=precision, shown=100, gate_shown=50,
+                                                        gate_useful=25, origins=dict(builtin=[1, 1], remember=[0, 0], start=[2, 1], extract=[3, 1]),
+                                                        gotcha_shown=4, gotcha_useful=2, facts=9, strikes=1, failed=list(failed), cost=1.5)
+        runs = lambda *rows: dict(zip(harness.XR_RUNS, rows))
+        outcome = lambda done: harness.xr_outcome(done)["outcome"]
+        self.assertEqual(outcome(runs(row(56, .5), row(64, .5), row(58, .5), row(57, .5), row(55, .5), row(65, .5))), "Build",
+                         "chg2 is one lower pair, against ref2")
+        self.assertEqual(outcome(runs(row(56, .5), row(64, .5), row(58, .5), row(56, .5), row(55, .5), row(65, .5))),
+                         "Do-not-build, gain not shown")
+        self.assertEqual(outcome(runs(row(56, .5), row(54, .5), row(63, .45))), "Do-not-build, gain not shown, stopped early")
+        self.assertEqual(outcome(runs(row(56, .5), row(46, .5), row(60, .5))), "Do-not-build, harm", "the gap is past the spread")
+        self.assertEqual(outcome(runs(row(56, .5), row(70, .3), row(60, .45))), "Do-not-build, harm", "the guard fails")
+        self.assertEqual(outcome(runs(row(0, None), row(0, None), row(0, None))), "Do-not-build, gain not shown, stopped early")
+        done = runs(row(56, .5), row(54, .5, ["abcdef123456"]), row(63, .45))
+        self.assertEqual(harness.xr_lower(done), [("chg1", "ref1"), ("chg1", "ref2")])
+        lines, _ = harness.xr_report("cand", "/sets/week", dict(ref="/b/ref", chg="/b/chg"), done,
+                                     datetime(2026, 1, 20, tzinfo=timezone.utc))
+        report = "\n".join(lines)
+        for part in ("| chg1 | 100 | 54 | 50.0% | 50/25 | 1/1 | 0/0 | 2/1 | 3/1 | 4/2 | 9 | 1 | abcdef12 | $1.50 |",
+                     "2 of 2: chg1 with ref1, chg1 with ref2.", "minus the reference spread 5.0 points",
+                     "is -5.5 rows, against a reference spread of 7 rows.", "**Do-not-build, gain not shown, stopped early**"):
+            self.assertIn(part, report)
+
     def test_report_args(self):
         self.assertEqual(harness.report_args([]), (harness.BINARY, False), "picks are off by default")
         self.assertEqual(harness.report_args(["--picks"]), (harness.BINARY, True))

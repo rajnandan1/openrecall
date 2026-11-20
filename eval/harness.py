@@ -7,6 +7,7 @@
     python3 eval/harness.py report-set FOLDER [--binary PATH] [--picks]   # FOLDER/runs/<UTC time>/report.md
     python3 eval/harness.py daily [--home PATH]      # Daily stats: one row per local day of the home's log
     python3 eval/harness.py replay-case CASE [--runs N] [--binary PATH]   # a frozen case of eval/replay/CASE
+    python3 eval/harness.py extract-replay NAME SET REF_BINARY CHANGED_BINARY   # Extraction replay of case set SET
 
 Reads Claude Code transcripts under ~/.claude/projects and writes only under ~/.openrecall/eval/
 (OPENRECALL_HOME replaces ~/.openrecall). The first freeze needs appendix-a.jsonl there: one
@@ -2052,6 +2053,384 @@ def replay_case(folder, runs=None, binary=BINARY, says=None, dedupe_fn=None):
     return lines
 
 
+XR_RUNS = ("ref1", "chg1", "ref2", "chg2", "ref3", "chg3")
+XR_TRIES = 8
+XR_STOPS = 6
+XR_STOP_WAIT = 30
+XR_LIFE = timedelta(days=14)  # src/index.rs expires_from: a state fact the binary writes expires 14 days on
+EXPIRES = re.compile(r"^expires: (\d{4}-\d{2}-\d{2})\n", re.M)
+
+
+def xr_window(cases):
+    """Extraction replay's window: from 7 days before the set's earliest case to its latest case. Refused at 14 days
+    or more, because a state fact the binary writes expires 14 days after today and would stay live too long."""
+    ats = [ts_of(c["at"]) for c in cases]
+    start, end = min(ats) - timedelta(days=7), max(ats)
+    if end - start >= XR_LIFE:
+        sys.exit("the window from %s to %s is 14 days or more" % (start.isoformat(), end.isoformat()))
+    return start, end
+
+
+def last_turn(path, cut):
+    """The last timestamp in the transcript's first `cut` bytes."""
+    with open(path, "rb") as fh:
+        data = fh.read(cut)
+    last = None
+    for line in data.split(b"\n"):
+        try:
+            last = json.loads(line).get("timestamp") or last
+        except (ValueError, AttributeError):
+            continue
+    return ts_of(last)
+
+
+def xr_plan(live, start, end):
+    """Every session with a successful live `extract` run in the window, oldest last turn first: cut at its largest
+    `to` there, resumed at its largest `to` before the window (0 without one)."""
+    lo, hi = start.timestamp() * 1000, end.timestamp() * 1000
+    runs, before = {}, {}
+    for e in read(os.path.join(live, "log", "openrecall.jsonl")):
+        if e.get("event") == "extract" and e.get("to") and e["at"] <= hi:
+            into = runs if e["at"] >= lo else before
+            into[e["session"]] = max(into.get(e["session"], 0), e["to"])
+    out = []
+    for sid, cut in runs.items():
+        with open(os.path.join(live, "extract", sid + ".json")) as fh:
+            entry = json.load(fh)
+        path = entry["transcript"] if os.path.exists(entry["transcript"]) else glob.glob(os.path.join(PROJECTS, "*", sid + ".jsonl"))[0]
+        out.append(dict(session=sid, cut=cut, cursor=before.get(sid, 0), path=path, time=last_turn(path, cut),
+                        identity=entry["identity"], main=entry["main"]))
+    return sorted(out, key=lambda s: s["time"])
+
+
+def xr_remembers(live, start, end):
+    """The `remember` calls of the window, oldest first: (time, address, live file)."""
+    lo, hi = start.timestamp() * 1000, end.timestamp() * 1000
+    out = []
+    for e in read(os.path.join(live, "log", "openrecall.jsonl")):
+        if e.get("event") == "mcp" and e.get("tool") == "remember" and e.get("address") and lo <= e["at"] <= hi:
+            path = address_path(e["address"], live)
+            if os.path.exists(path):
+                out.append((datetime.fromtimestamp(e["at"] / 1000, timezone.utc), e["address"], path))
+    return sorted(out)
+
+
+def fact_time(path):
+    """A fact's last change: the time in its `updated`, else in its `source`."""
+    return ts_of((front(path, "updated") or front(path, "source")).split()[-1])
+
+
+def or_facts(orhome):
+    return glob.glob(os.path.join(orhome, "repos", "**", "*.md"), recursive=True) + glob.glob(os.path.join(orhome, "global", "*.md"))
+
+
+def xr_start_store(live, orhome, start):
+    """The live facts as they stood at `start`, copied into `orhome` with their mtime set to their last change.
+    Returns each state fact's copy as (text with its expires line, text without it, the expires date)."""
+    tracked = {}
+    for f in or_facts(live):
+        rel = os.path.relpath(f, live)
+        if {"replaced", "handoffs"} & set(rel.split(os.sep)):
+            continue
+        version = fact_at(f, start)
+        d = fact_date(version)
+        if not d or d >= start:
+            continue
+        dst = os.path.join(orhome, rel)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copyfile(version, dst)
+        at = fact_time(version).timestamp()
+        os.utime(dst, (at, at))
+        text = read_text(dst)
+        m = EXPIRES.search(text)
+        if m:
+            tracked[dst] = (text, text.replace(m.group(0), "", 1), m.group(1))
+    return tracked
+
+
+def xr_expiry(tracked, at):
+    """Dedupe drops a fact whose expires is on or before the binary's today, so a start-store state fact keeps its
+    expires line only once the replayed session is at or past that date. A fact the replay rewrote leaves the list."""
+    for dst, (full, bare, day) in list(tracked.items()):
+        cur = read_text(dst) if os.path.exists(dst) else None
+        if cur not in (full, bare):
+            del tracked[dst]
+            continue
+        want = bare if day > at.date().isoformat() else full
+        if cur != want:
+            with open(dst, "w") as fh:
+                fh.write(want)
+
+
+def xr_session(s, copy, orhome, job):
+    """Runs `job` (one `extract --job`) on the session's queue entry until its cursor reaches the cut or the entry
+    fails, at most 8 times. A failed entry is reset once and run again. Returns (tries, retried, entry)."""
+    path, log = os.path.join(orhome, "extract", s["session"] + ".json"), os.path.join(orhome, "log", "openrecall.jsonl")
+    tries = stops = 0
+    for retried in (False, True):
+        with open(path, "w") as fh:
+            json.dump(dict(transcript=copy, identity=s["identity"], main=s["main"], folder="", cursor=s["cursor"],
+                           ended=True, strikes=0, failed=False), fh)
+        for _ in range(XR_TRIES):
+            job()
+            tries += 1
+            with open(path) as fh:
+                entry = json.load(fh)
+            if entry["cursor"] >= s["cut"] or entry["failed"]:
+                break
+            last = read(log)[-1:] if os.path.exists(log) else []
+            if last and "stop" in last[0]:
+                stops += 1
+                if stops >= XR_STOPS:
+                    sys.exit("stopped: %s" % last[0]["stop"])
+                time.sleep(XR_STOP_WAIT)
+        if not entry["failed"]:
+            break
+    return tries, retried, entry
+
+
+def xr_rename(orhome, s, renamed):
+    """Names each `replaced/` copy not in `renamed` for the latest `updated` or `source` time the session wrote
+    (its own time when it wrote none), so fact_at picks versions by session time; the binary names them by today."""
+    own = [front(f, k) for f in glob.glob(os.path.join(orhome, "repos", s["identity"], "*.md")) for k in ("updated", "source")]
+    own = [ts_of(v.split()[1]) for v in own if v.startswith(s["session"] + " ")]
+    stem = max(own, default=s["time"]).strftime("%Y-%m-%dT%H%M%SZ")
+    for f in sorted(set(glob.glob(os.path.join(orhome, "repos", "**", "replaced", "*.md"), recursive=True)) - renamed):
+        new = "%s.%s.md" % (re.match(r"(.*)\.\d{4}-\d{2}-\d{2}T\d{6}Z\.md$", f).group(1), stem)
+        os.rename(f, new)
+        renamed.add(new)
+
+
+def xr_after(orhome, tracked, today):
+    """After the last session: each unchanged start-store state fact gets its expires line back, and every other fact
+    that expires after `today` expires 14 days after its last change instead, as it would have then."""
+    restored = set()
+    for dst, (full, bare, _) in tracked.items():
+        if os.path.exists(dst) and read_text(dst) in (full, bare):
+            with open(dst, "w") as fh:
+                fh.write(full)
+            restored.add(dst)
+    for f in set(or_facts(orhome)) - restored:
+        text = read_text(f)
+        m = EXPIRES.search(text)
+        if m and m.group(1) > today:
+            new = text.replace(m.group(0), "expires: %s\n" % (fact_time(f) + XR_LIFE).date().isoformat(), 1)
+            with open(f, "w") as fh:
+                fh.write(new)
+
+
+def xr_freeze(run, orhome, folder, labels):
+    """The set's cases with its frozen built-in memories and named documents, and OpenRecall's memories as they stood
+    at each case in the run's store, in `run/set/`. The set's transcripts and blobs are linked, not copied."""
+    fz = os.path.join(run, "set")
+    os.makedirs(os.path.join(fz, "blobs"), exist_ok=True)
+    for name, src in (("transcripts", os.path.join(folder, "transcripts")), ("labels.jsonl", labels)):
+        if not os.path.lexists(os.path.join(fz, name)):
+            os.symlink(src, os.path.join(fz, name))
+
+    def link(h):
+        if not os.path.lexists(os.path.join(fz, "blobs", h)):
+            os.symlink(os.path.join(folder, "blobs", h), os.path.join(fz, "blobs", h))
+
+    cases = read(os.path.join(folder, "cases.jsonl"))
+    for c in cases:
+        mem = {a: v for a, v in c["memories"].items() if a.startswith("builtin/")}
+        for h, _ in mem.values():
+            link(h)
+        for _, _, h in c["docs"]:
+            link(h)
+        for a, f in memories_at(c, None, ts_of(c["at"]), orhome).items():
+            h = blob_hash(f)
+            if not os.path.exists(os.path.join(fz, "blobs", h)):
+                shutil.copyfile(f, os.path.join(fz, "blobs", h))
+            mem[a] = [h, os.stat(f).st_mtime]
+        c["memories"] = mem
+    with open(os.path.join(fz, "cases.jsonl"), "w") as fh:
+        fh.writelines(json.dumps(c) + "\n" for c in cases)
+    return fz
+
+
+def xr_summary(run, start, remembered):
+    """One run's report row: what its replay showed and what its extraction cost and wrote."""
+    fz = os.path.join(run, "set")
+    cases = read(os.path.join(fz, "cases.jsonl"))
+    results = read(os.path.join(sorted(glob.glob(os.path.join(fz, "runs", "*")))[-1], "results.jsonl"))
+    labels = load_labels(os.path.join(fz, "labels.jsonl"))
+    m, g = gate_metrics(cases, results, labels, picks=True), gate_metrics(cases, results, labels)
+    origins = {o: [0, 0] for o in ("builtin", "remember", "start", "extract")}
+    for c, r in zip(cases, results):
+        for x in [x for x in r["candidates"] if x["address"] in r["injected"]] + r.get("picked", []):
+            a = x["address"]
+            blob = a in c["memories"] and os.path.join(fz, "blobs", c["memories"][a][0])
+            origin = ("builtin" if a.startswith("builtin/") else "remember" if a in remembered
+                      else "start" if blob and fact_time(blob) < start else "extract")
+            origins[origin][0] += 1
+            origins[origin][1] += labels.get((c["id"], a, x["text_hash"])) == "useful"
+    log = read(os.path.join(run, "home", ".openrecall", "log", "openrecall.jsonl"))
+    ex = [e for e in log if e.get("event") == "extract"]
+    extract_cost = sum(e.get("cost") or 0 for e in ex)
+    pick_cost = sum((r.get("pick") or {}).get("cost") or 0 for r in results)
+    return dict(cases=len(cases), shown=m["injections"], useful=m["useful"], unlabeled=m["unlabeled"],
+                precision=round(m["useful"] / m["injections"], 3) if m["injections"] else None,
+                gate_shown=g["injections"], gate_useful=g["useful"], origins=origins,
+                gotcha_shown=m["kinds"]["gotcha"], gotcha_useful=m["kinds_useful"]["gotcha"],
+                facts=sum(1 for e in log if e.get("event") == "dedupe" and e.get("action") == "new"),
+                strikes=sum(1 for e in ex if "strike" in e),
+                failed=[x["session"] for x in read(os.path.join(run, "sessions.jsonl")) if x["failed"]],
+                extract_cost=round(extract_cost, 2), pick_cost=round(pick_cost, 2), cost=round(extract_cost + pick_cost, 2))
+
+
+def xr_lower(done):
+    """The (changed run, reference run) pairs where the changed run has the same or fewer useful rows."""
+    return [(c, r) for c in done if c.startswith("chg") for r in done if r.startswith("ref")
+            if done[c]["useful"] <= done[r]["useful"]]
+
+
+def xr_outcome(done):
+    """The comparison's outcome from the finished runs' summaries by run name, with the numbers behind it."""
+    mean = lambda xs: sum(xs) / len(xs)
+    side = lambda p, k: [done[n][k] or 0 for n in XR_RUNS if n in done and n.startswith(p)]
+    ref, chg = side("ref", "useful"), side("chg", "useful")
+    o = dict(lower=xr_lower(done), pairs=len(ref) * len(chg), gap=mean(chg) - mean(ref), spread=max(ref) - min(ref),
+             chg_precision=mean(side("chg", "precision")), ref_precision=mean(side("ref", "precision")),
+             p_spread=max(side("ref", "precision")) - min(side("ref", "precision")))
+    o["guard"] = o["chg_precision"] >= o["ref_precision"] - o["p_spread"]
+    if not o["guard"] or o["gap"] < -o["spread"]:
+        o["outcome"] = "Do-not-build, harm"
+    elif len(done) == len(XR_RUNS) and len(o["lower"]) <= 1:
+        o["outcome"] = "Build"
+    else:
+        o["outcome"] = "Do-not-build, gain not shown" + (", stopped early" if len(done) < len(XR_RUNS) else "")
+    return o
+
+
+def xr_report(name, folder, binaries, done, now):
+    """report.md: one row per run, then the lower pairs, the guard, the gap and the outcome."""
+    o = xr_outcome(done)
+    pct = lambda p: "n/a" if p is None else "%.1f%%" % (100 * p)
+    pair = lambda xs: "%d/%d" % tuple(xs)
+    lines = ["# Extraction replay %s, %s" % (name, now.strftime("%Y-%m-%d %H:%M UTC")), "",
+             "`%s` re-extracted with the reference binary `%s` and the changed binary `%s`; the cells from Gate to Gotcha "
+             "are shown/useful." % (folder, binaries["ref"], binaries["chg"]), "",
+             "| Run | Shown | Useful | Precision | Gate | Built-in | Remember | Start store | Re-extracted | Gotcha "
+             "| Facts written | Strikes | Failed sessions | Cost |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    for n in XR_RUNS:
+        if n in done:
+            s = done[n]
+            lines.append("| %s | %d | %d | %s | %d/%d | %s | %s | %s | %s | %d/%d | %d | %d | %s | $%.2f |" % (
+                n, s["shown"], s["useful"], pct(s["precision"]), s["gate_shown"], s["gate_useful"],
+                *(pair(s["origins"][k]) for k in ("builtin", "remember", "start", "extract")),
+                s["gotcha_shown"], s["gotcha_useful"], s["facts"], s["strikes"],
+                ", ".join(f[:8] for f in s["failed"]) or "none", s["cost"]))
+    lines += ["",
+              "- Lower pairs (the changed run has the same or fewer useful rows than the reference run): %d of %d%s." % (
+                  len(o["lower"]), o["pairs"], (": " + ", ".join("%s with %s" % p for p in o["lower"])) if o["lower"] else ""),
+              "- Guard: the changed mean precision %s is %s the reference mean %s minus the reference spread %.1f points." % (
+                  pct(o["chg_precision"]), "at or above" if o["guard"] else "below", pct(o["ref_precision"]),
+                  100 * o["p_spread"]),
+              "- Gap: the changed mean useful count minus the reference mean is %+.1f rows, against a reference spread "
+              "of %d rows." % (o["gap"], o["spread"]),
+              "- Outcome: **%s**." % o["outcome"]]
+    return lines, o
+
+
+def xr_run(run, binary, folder, labels, plan, remembered, start, label_fn, today):
+    """One run of Extraction replay: the start store, each planned session through `extract --job` in order, the
+    clock fix-ups, the freeze and the replay with picks. Writes `run/summary.json` and returns it."""
+    live = os.path.dirname(EVAL)
+    home = os.path.join(run, "home")
+    orhome = os.path.join(home, ".openrecall")
+    tracked_path, done_path = os.path.join(run, "tracked.json"), os.path.join(run, "sessions.jsonl")
+    if not os.path.exists(tracked_path):
+        os.makedirs(os.path.join(orhome, "extract"), exist_ok=True)
+        os.makedirs(os.path.join(run, "transcripts"), exist_ok=True)
+        with open(tracked_path, "w") as fh:
+            json.dump(xr_start_store(live, orhome, start), fh)
+    with open(tracked_path) as fh:
+        tracked = {k: tuple(v) for k, v in json.load(fh).items()}
+    pick_home(orhome, *real_provider())
+    env = dict(HOME=home, OPENRECALL_HOME=orhome, OPENRECALL_POLL="0", PATH="/usr/bin:/bin")
+    job = lambda: subprocess.run([binary, "extract", "--job"], env=env, capture_output=True)
+    mains = {s["main"] for s in plan if s["main"]}
+    pending = list(remembered)
+    done = {x["session"] for x in read(done_path)} if os.path.exists(done_path) else set()
+    renamed = {f for f in glob.glob(os.path.join(orhome, "repos", "**", "replaced", "*.md"), recursive=True)
+               if f[-21:-11] < today}
+    for n, s in enumerate(plan, 1):
+        while pending and pending[0][0] < s["time"]:
+            at, address, path = pending.pop(0)
+            if s["session"] not in done:
+                dst = address_path(address, orhome)
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copyfile(fact_at(path, at), dst)
+                unexpired(dst, at)
+        if s["session"] in done:
+            continue
+        for main in mains:
+            dst = os.path.join(home, ".claude", "projects", slug(main), "memory")
+            for f in glob.glob(os.path.join(PROJECTS, slug(main), "memory", "*.md")):
+                if os.path.basename(f) != "MEMORY.md" and born(f) < s["time"] and not os.path.exists(os.path.join(dst, os.path.basename(f))):
+                    os.makedirs(dst, exist_ok=True)
+                    shutil.copy2(f, dst)
+        xr_expiry(tracked, s["time"])
+        copy = os.path.join(run, "transcripts", s["session"] + ".jsonl")
+        with open(s["path"], "rb") as src, open(copy, "wb") as dst:
+            dst.write(src.read(s["cut"]))
+        os.utime(copy, (s["time"].timestamp(), s["time"].timestamp()))
+        tries, retried, entry = xr_session(s, copy, orhome, job)
+        xr_rename(orhome, s, renamed)
+        with open(done_path, "a") as fh:
+            fh.write(json.dumps(dict(session=s["session"], time=s["time"].isoformat(), tries=tries, retried=retried,
+                                     cursor=entry["cursor"], start=s["cursor"], cut=s["cut"], failed=entry["failed"])) + "\n")
+        print("%s %d/%d %s tries=%d retried=%s failed=%s" % (os.path.basename(run), n, len(plan), s["session"][:8], tries,
+                                                             retried, entry["failed"]), flush=True)
+    xr_after(orhome, tracked, today)
+    fz = xr_freeze(run, orhome, folder, labels)
+    report_set(fz, binary, label_fn, picks=True)
+    summary = xr_summary(run, start, {a for _, a, _ in remembered})
+    with open(os.path.join(run, "summary.json"), "w") as fh:
+        json.dump(summary, fh, indent=1)
+    return summary
+
+
+def extract_replay(name, set_name, ref, chg, label_fn, now=None):
+    """Extraction replay of the case set `set_name` with two binaries: ref1, chg1, ref2, chg2, ref3, chg3 one at a
+    time, stopped at 2 lower pairs; a run with a summary.json is not run again. Writes report.md, prints the outcome."""
+    now = now or datetime.now(timezone.utc)
+    live, folder, out = os.path.dirname(EVAL), os.path.join(EVAL, set_name), os.path.join(EVAL, "extract-replay", name)
+    start, end = xr_window(read(os.path.join(folder, "cases.jsonl")))
+    plan, remembered = xr_plan(live, start, end), xr_remembers(live, start, end)
+    binaries = dict(ref=os.path.abspath(ref), chg=os.path.abspath(chg))
+    labels = os.path.join(out, "labels.jsonl")
+    os.makedirs(out, exist_ok=True)
+    if not os.path.exists(labels):
+        if os.path.exists(os.path.join(folder, "labels.jsonl")):
+            shutil.copyfile(os.path.join(folder, "labels.jsonl"), labels)
+        else:
+            open(labels, "w").close()
+    print("window %s to %s: %d sessions, %d remember calls" % (start.isoformat(), end.isoformat(), len(plan), len(remembered)),
+          flush=True)
+    done = {}
+    for n in XR_RUNS:
+        path = os.path.join(out, n, "summary.json")
+        if os.path.exists(path):
+            with open(path) as fh:
+                done[n] = json.load(fh)
+        else:
+            done[n] = xr_run(os.path.join(out, n), binaries[n[:3]], folder, labels, plan, remembered, start, label_fn,
+                             now.date().isoformat())
+        s = done[n]
+        print("%s: useful %d, precision %s, cost $%.2f (extraction $%.2f, picks $%.2f)" % (
+            n, s["useful"], s["precision"], s["cost"], s["extract_cost"], s["pick_cost"]), flush=True)
+        if len(xr_lower(done)) >= 2:
+            break
+    lines, _ = xr_report(name, folder, binaries, done, now)
+    with open(os.path.join(out, "report.md"), "w") as fh:
+        fh.write("\n".join(lines) + "\n")
+    print("\n".join(lines) + "\n\nwritten to %s/report.md" % out)
+
+
 def replay_args(args):
     """`replay-case CASE [--runs N] [--binary PATH]`: (case, runs or None, binary), or None for any other arguments."""
     if not args or args[0].startswith("-") or len(args) % 2 == 0:
@@ -2092,6 +2471,9 @@ if __name__ == "__main__":
     elif set_args:
         import judge
         report_set(os.path.join(EVAL, rest[0]), set_args[0], judge.label_case, set_args[1])
+    elif cmd == "extract-replay" and len(rest) == 4:
+        import judge
+        extract_replay(*rest, judge.label_case)
     elif case_args:
         import judge
         replay_case(os.path.join(EVAL, "replay", case_args[0]), case_args[1], case_args[2], judge.says, judge.dedupe_check)
