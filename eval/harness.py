@@ -40,7 +40,8 @@ HOME = os.path.expanduser("~")
 CASES = 100
 WINDOW = timedelta(days=7)
 QUIET = timedelta(minutes=30)
-QUEUED_MS = 3000
+# Measured 2026-11-20: a prompt's transcript line starts at most 657 ms before its hook (median 25 ms before).
+OWN_TURN_MS = 1000
 CLASSES = ("tickets", "prs", "commits", "paths")
 TRUNK = {"", "main", "master", "HEAD"}
 TICKET = re.compile(r"\b[A-Z]{2,5}-\d{2,5}\b")
@@ -1110,16 +1111,21 @@ def turn_of(e, turns, near_ms=15000, queued=()):
     within `near_ms`. The transcript rewrites some prompts the hook saw: a skill typed by its short name gets its
     plugin name, and spaces after a command are trimmed. Its line is written up to about 10 s after the hook runs.
     A prompt queued while a turn ran (typed mid-turn, or a Code Mode script result in Claude Code 2.1.327 and 2.1.328)
-    has no user line, so a hash miss within QUEUED_MS of a `queued` time (ms, from `scan`) has no turn."""
+    has no user line, so a hash miss gets no turn when a `queued` time (ms, from `scan`) lies between the nearest
+    turn's start and the hook, unless that turn starts within OWN_TURN_MS of the hook."""
     at = e.get("started_at", e.get("at"))
     gap = lambda t: abs(t["start"].timestamp() * 1000 - at) if at is not None else 0
     same = [t for t in turns if fnv(t["ask"]) == e.get("prompt_hash")]
     if same or at is None:
         return min(same, key=gap, default=None)
-    if any(abs(q - at) <= QUEUED_MS for q in queued):
-        return None
     near = min(turns, key=gap, default=None)
-    return near if near and gap(near) <= near_ms else None
+    if not near or gap(near) > near_ms:
+        return None
+    started = near["start"].timestamp() * 1000
+    lo, hi = (started, at + OWN_TURN_MS) if started < at else (at - OWN_TURN_MS, started)
+    if abs(started - at) > OWN_TURN_MS and any(lo <= q <= hi for q in queued):
+        return None
+    return near
 
 
 def live_expansions(by_sid):
