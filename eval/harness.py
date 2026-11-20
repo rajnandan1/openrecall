@@ -40,8 +40,10 @@ HOME = os.path.expanduser("~")
 CASES = 100
 WINDOW = timedelta(days=7)
 QUIET = timedelta(minutes=30)
-# Measured 2026-11-20: a prompt's transcript line starts at most 657 ms before its hook (median 25 ms before).
+# Measured 2026-11-20: a prompt's transcript line starts within 657 ms before its hook (p99 778 ms after), and a
+# queued prompt's queue line lands 2,039 ms before to 2,683 ms after its hook.
 OWN_TURN_MS = 1000
+QUEUED_MS = (2500, 3000)
 CLASSES = ("tickets", "prs", "commits", "paths")
 TRUNK = {"", "main", "master", "HEAD"}
 TICKET = re.compile(r"\b[A-Z]{2,5}-\d{2,5}\b")
@@ -118,7 +120,7 @@ def scan(path, until=None):
             typ, branch = o.get("type"), o.get("gitBranch")
             if typ == "queue-operation":
                 if o.get("operation") == "enqueue":
-                    s["queued"].append(t.timestamp() * 1000)
+                    s["queued"].append((t.timestamp() * 1000, fnv(o.get("content") or "")))
                 continue
             if typ == "attachment":
                 a = o.get("attachment") or {}
@@ -1111,8 +1113,8 @@ def turn_of(e, turns, near_ms=15000, queued=()):
     within `near_ms`. The transcript rewrites some prompts the hook saw: a skill typed by its short name gets its
     plugin name, and spaces after a command are trimmed. Its line is written up to about 10 s after the hook runs.
     A prompt queued while a turn ran (typed mid-turn, or a Code Mode script result in Claude Code 2.1.327 and 2.1.328)
-    has no user line, so a hash miss gets no turn when a `queued` time (ms, from `scan`) lies between the nearest
-    turn's start and the hook, unless that turn starts within OWN_TURN_MS of the hook."""
+    has no user line. So a hash miss gets no turn when a `queued` line (ms and hash, from `scan`) within `near_ms`
+    has the prompt's hash, or lands within QUEUED_MS of the hook while no turn starts within OWN_TURN_MS of it."""
     at = e.get("started_at", e.get("at"))
     gap = lambda t: abs(t["start"].timestamp() * 1000 - at) if at is not None else 0
     same = [t for t in turns if fnv(t["ask"]) == e.get("prompt_hash")]
@@ -1121,9 +1123,9 @@ def turn_of(e, turns, near_ms=15000, queued=()):
     near = min(turns, key=gap, default=None)
     if not near or gap(near) > near_ms:
         return None
-    started = near["start"].timestamp() * 1000
-    lo, hi = (started, at + OWN_TURN_MS) if started < at else (at - OWN_TURN_MS, started)
-    if abs(started - at) > OWN_TURN_MS and any(lo <= q <= hi for q in queued):
+    if any(h == e.get("prompt_hash") and abs(q - at) <= near_ms for q, h in queued):
+        return None
+    if gap(near) > OWN_TURN_MS and any(-QUEUED_MS[0] <= q - at <= QUEUED_MS[1] for q, _ in queued):
         return None
     return near
 

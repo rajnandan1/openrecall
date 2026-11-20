@@ -255,19 +255,22 @@ class HarnessTest(unittest.TestCase):
         self.assertIsNone(harness.turn_of(event("/wayfinder plan it", "2026-01-08T08:00:00Z"), turns))
         self.assertIs(harness.turn_of(event("yes", "2026-01-08T09:40:00Z"), turns), turns[2])
         self.assertIs(harness.turn_of(dict(prompt_hash=harness.fnv("yes")), turns), turns[1])
+        q = lambda ts, text="": (ms(ts), harness.fnv(text))
         queued = event('<event kind="repl-eval">done</event>', "2026-01-08T09:40:02Z")
         self.assertIs(harness.turn_of(queued, turns), turns[2], "a hash miss falls back to the nearest turn")
-        self.assertIsNone(harness.turn_of(queued, turns, queued=[ms("2026-01-08T09:40:01Z")]),
-                          "a prompt queued mid-turn has no turn of its own")
-        self.assertIs(harness.turn_of(event("yes", "2026-01-08T09:40:00Z"), turns, queued=[ms("2026-01-08T09:40:01Z")]),
+        self.assertIsNone(harness.turn_of(queued, turns, queued=[q("2026-01-08T09:40:02.200Z")]),
+                          "a script result queued mid-turn has no turn of its own")
+        typed = event("also add a test", "2026-01-08T09:40:00.900Z")
+        self.assertIsNone(harness.turn_of(typed, turns, queued=[q("2026-01-08T09:40:00.300Z", "also add a test")]),
+                          "a prompt typed mid-turn has no turn, even right after a turn starts")
+        self.assertIs(harness.turn_of(event("yes", "2026-01-08T09:40:00Z"), turns, queued=[q("2026-01-08T09:40:01Z")]),
                       turns[2], "a hash match wins over a queued line")
-        late = event("<event>late</event>", "2026-01-08T09:40:12Z")
-        self.assertIsNone(harness.turn_of(late, turns, queued=[ms("2026-01-08T09:40:03Z")]),
-                          "a hook that starts long after its prompt was queued still gets no turn")
         rewritten = event("/wayfinder plan it", "2026-01-08T09:00:00Z")
         rewritten["prompt_hash"] = "0"
-        self.assertIs(harness.turn_of(rewritten, turns, queued=[ms("2026-01-08T09:00:02Z")]), turns[0],
-                      "a later unrelated queued line keeps a rewritten prompt's own turn")
+        self.assertIs(harness.turn_of(rewritten, turns, queued=[q("2026-01-08T09:00:02Z")]), turns[0],
+                      "an unrelated queued line keeps a rewritten prompt's own turn")
+        self.assertIs(harness.turn_of(rewritten, turns, queued=[q("2026-01-08T09:00:09Z")]), turns[0],
+                      "a queued line past the window does not drop a turn")
 
     def test_scan_keeps_queued_times_out_of_the_turns(self):
         path = os.path.join(tempfile.mkdtemp(), "q.jsonl")
@@ -279,7 +282,7 @@ class HarnessTest(unittest.TestCase):
                 said("2026-01-08T09:01:00Z", "Done.", "feat-a", "m1")))
         s = harness.scan(path)
         self.assertEqual([t["ask"] for t in s["turns"]], ["fix the export"])
-        self.assertEqual(s["queued"], [harness.ts_of("2026-01-08T09:00:30Z").timestamp() * 1000])
+        self.assertEqual(s["queued"], [(harness.ts_of("2026-01-08T09:00:30Z").timestamp() * 1000, harness.fnv("also add a test"))])
 
     def test_live_pr_urls(self):
         start = int(datetime(2026, 1, 8, 8, tzinfo=timezone.utc).timestamp() * 1000)
