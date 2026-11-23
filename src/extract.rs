@@ -1209,6 +1209,18 @@ const DEADLINE: Duration = Duration::from_secs(300);
 const PLAN_STDIN: usize = 10 * 1024 * 1024;
 const EXTRACT_EFFORT: &str = "xhigh";
 const PICK_EFFORT: &str = "medium";
+/// In `-p` mode an API key or a cloud provider selector wins over the plan login (Claude Code 2.1.330).
+const PLAN_UNSET: [&str; 9] = [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+    "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_FOUNDRY",
+    "CLAUDE_CODE_USE_GATEWAY",
+    "CLAUDE_CODE_USE_MANTLE",
+    "CLAUDE_CODE_USE_VERTEX",
+];
 
 fn plan_call<'a>(
     model: &str,
@@ -1230,10 +1242,10 @@ fn plan_call<'a>(
     if pick {
         cmd.arg("--json-schema").arg(format["schema"].to_string());
     }
-    // In `-p` mode an `ANTHROPIC_API_KEY` wins over the plan login.
-    cmd.env_remove("ANTHROPIC_API_KEY")
-        .env_remove("ANTHROPIC_AUTH_TOKEN")
-        .env("CLAUDE_CODE_DISABLE_ADVISOR_TOOL", "1")
+    for name in PLAN_UNSET {
+        cmd.env_remove(name);
+    }
+    cmd.env("CLAUDE_CODE_DISABLE_ADVISOR_TOOL", "1")
         .current_dir(dir);
     Ok((cmd, user, pick))
 }
@@ -1467,7 +1479,14 @@ mod tests {
                 [
                     ("ANTHROPIC_API_KEY", None),
                     ("ANTHROPIC_AUTH_TOKEN", None),
-                    ("CLAUDE_CODE_DISABLE_ADVISOR_TOOL", Some("1"))
+                    ("CLAUDE_CODE_DISABLE_ADVISOR_TOOL", Some("1")),
+                    ("CLAUDE_CODE_USE_ANTHROPIC_AWS", None),
+                    ("CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD", None),
+                    ("CLAUDE_CODE_USE_BEDROCK", None),
+                    ("CLAUDE_CODE_USE_FOUNDRY", None),
+                    ("CLAUDE_CODE_USE_GATEWAY", None),
+                    ("CLAUDE_CODE_USE_MANTLE", None),
+                    ("CLAUDE_CODE_USE_VERTEX", None),
                 ]
             );
             if name == "pick" {
