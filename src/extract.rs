@@ -1491,7 +1491,11 @@ mod tests {
                    "api_error_status": status, "result": result})
             .to_string()
         };
-        let too_long = failed("prompt_too_long", json!(400), "Prompt is too long");
+        let too_long = failed(
+            "prompt_too_long",
+            json!(400),
+            "made-up text for a long input",
+        );
         for status in [code(1), code(0)] {
             assert_eq!(
                 reply(status, &too_long, false),
@@ -1512,18 +1516,15 @@ mod tests {
         assert_eq!(
             stop(
                 code(1),
-                &failed(
-                    "api_error",
-                    Value::Null,
-                    "Not logged in · Please run /login"
-                )
+                &failed("api_error", Value::Null, "Made-up refusal")
             ),
-            "claude exit 1 api_error: Not logged in · Please run /login"
+            "claude exit 1 api_error: Made-up refusal"
         );
-        let throttle = "API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited, try again in a while";
+        let long = "Made-up error text · the stand-in service turned the call away and ended it early, with more words after the cut";
         assert_eq!(
-            stop(code(1), &failed("api_error", json!(429), throttle)),
-            "claude exit 1 429 api_error: API Error: Server is temporarily limiting requests (not your usage limit) · Rate"
+            stop(code(1), &failed("api_error", json!(429), long)),
+            "claude exit 1 429 api_error: Made-up error text · the stand-in service turned the call away and ended it earl",
+            "80 characters, not 80 bytes"
         );
         assert_eq!(
             stop(code(0), &failed("api_error", json!(529), "")),
