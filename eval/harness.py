@@ -826,21 +826,49 @@ def mains_of(cases):
 
 
 def pick_home(orhome, toml, key):
-    """Picks on in a scratch home: `toml` as extract.toml with its `pick` line set to true, `key` as a mode 600 api-key."""
+    """Picks on in a scratch home: `toml` as extract.toml with its `pick` line set to true, `key` as a mode 600
+    api-key unless it is None."""
     os.makedirs(orhome, exist_ok=True)
     lines = [l for l in toml.splitlines() if l.partition("=")[0].strip() != "pick"]
     with open(os.path.join(orhome, "extract.toml"), "w") as fh:
         fh.write("\n".join(lines + ["pick = true"]) + "\n")
-    with os.fdopen(os.open(os.path.join(orhome, "api-key"), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as fh:
-        fh.write(key)
+    if key is not None:
+        with os.fdopen(os.open(os.path.join(orhome, "api-key"), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as fh:
+            fh.write(key)
+
+
+def plan_provider(toml):
+    """Whether `toml` names the Plan provider: its first `provider` line, read the way `Settings::load` reads it."""
+    lines = (l.split("=", 1) for l in toml.splitlines() if "=" in l)
+    return next((v.strip().strip('"') for k, v in lines if k.strip() == "provider"), None) == "claude-code"
+
+
+def plan_env(env, provider):
+    """A case home's `env` with what the Plan provider's `claude` needs when `provider` names it: the real Keychains
+    linked into the scratch HOME, USER, and the folder of `claude` on the harness's own PATH first on PATH."""
+    if not provider or not plan_provider(provider[0]):
+        return env
+    claude = shutil.which("claude")
+    if not claude:
+        sys.exit("the Plan provider needs claude on PATH")
+    link = os.path.join(env["HOME"], "Library", "Keychains")
+    if not os.path.lexists(link):
+        os.makedirs(os.path.dirname(link), exist_ok=True)
+        os.symlink(os.path.join(HOME, "Library", "Keychains"), link)
+    return dict(env, USER=os.environ.get("USER", ""), PATH=os.path.dirname(claude) + ":" + env["PATH"])
 
 
 def real_provider():
-    """The user's extract.toml text and api-key, for the case homes of a `--picks` run (spec 5.2)."""
+    """The user's extract.toml text and api-key, for the case homes of a `--picks` run (spec 5.2); no key (None) for
+    the Plan provider."""
     orhome = os.path.dirname(EVAL)
     try:
-        with open(os.path.join(orhome, "extract.toml")) as toml, open(os.path.join(orhome, "api-key")) as key:
-            return toml.read(), key.read()
+        with open(os.path.join(orhome, "extract.toml")) as toml:
+            text = toml.read()
+        if plan_provider(text):
+            return text, None
+        with open(os.path.join(orhome, "api-key")) as key:
+            return text, key.read()
     except OSError:
         sys.exit("--picks needs extract.toml and api-key in %s" % orhome)
 
@@ -872,8 +900,8 @@ def replay_cases(binary, cases, mains, provider=None, frozen=None):
     """Ticket 16: each case through `openrecall recall` in its own stand-in world: a folder whose `.git` holds the
     case's origin and branch, the case's worktree (else the repo's main checkout) linked in so the path check sees
     today's tree, and a scratch home with the case's memories (memories_at) where the binary looks for them. Returns
-    one result per case: candidates, injections, drops, timing. `provider`, the extract.toml text and api-key, turns
-    picks on (spec 5.2).
+    one result per case: candidates, injections, drops, timing. `provider`, the extract.toml text and api-key (None for
+    the Plan provider), turns picks on (spec 5.2).
     `frozen`, a case set's folder (freeze_set), replays from its copies: the memories, the session's ledger and pick
     calls, the transcript and the named documents."""
     tmp = scratch()
@@ -908,8 +936,8 @@ def replay_cases(binary, cases, mains, provider=None, frozen=None):
                 os.utime(dst, (times[address], times[address]))
                 if not address.startswith("builtin/"):
                     unexpired(dst, at)
-            env = dict(HOME=home, OPENRECALL_HOME=os.path.join(home, ".openrecall"), CLAUDE_CODE_ENTRYPOINT="cli",
-                       CLAUDE_PROJECT_DIR=folder, PATH="/usr/bin:/bin")
+            env = plan_env(dict(HOME=home, OPENRECALL_HOME=os.path.join(home, ".openrecall"), CLAUDE_CODE_ENTRYPOINT="cli",
+                                CLAUDE_PROJECT_DIR=folder, PATH="/usr/bin:/bin"), provider)
             ask = dict(session_id=c["session"], cwd=folder, prompt=c["prompt"], hook_event_name="UserPromptSubmit")
             drift = 0
             if frozen:
@@ -2029,8 +2057,8 @@ def replay_case(folder, runs=None, binary=BINARY, says=None, dedupe_fn=None):
                     json.dump(entry, fh)
             if provider:
                 pick_home(orhome, *provider)
-            env = dict(HOME=home, OPENRECALL_HOME=orhome, CLAUDE_CODE_ENTRYPOINT="cli", CLAUDE_PROJECT_DIR=work,
-                       PATH="/usr/bin:/bin", OPENRECALL_POLL="0")
+            env = plan_env(dict(HOME=home, OPENRECALL_HOME=orhome, CLAUDE_CODE_ENTRYPOINT="cli", CLAUDE_PROJECT_DIR=work,
+                                PATH="/usr/bin:/bin", OPENRECALL_POLL="0"), provider)
             for step in c["steps"]:
                 if step["run"] == "extract":
                     subprocess.run([binary, "extract", "--job"], env=env, capture_output=True)
@@ -2366,8 +2394,9 @@ def xr_run(run, binary, folder, labels, plan, remembered, start, label_fn, today
             json.dump(xr_start_store(live, orhome, start), fh)
     with open(tracked_path) as fh:
         tracked = {k: tuple(v) for k, v in json.load(fh).items()}
-    pick_home(orhome, *real_provider())
-    env = dict(HOME=home, OPENRECALL_HOME=orhome, OPENRECALL_POLL="0", PATH="/usr/bin:/bin")
+    provider = real_provider()
+    pick_home(orhome, *provider)
+    env = plan_env(dict(HOME=home, OPENRECALL_HOME=orhome, OPENRECALL_POLL="0", PATH="/usr/bin:/bin"), provider)
     job = lambda: subprocess.run([binary, "extract", "--job"], env=env, capture_output=True)
     mains = {s["main"] for s in plan if s["main"]}
     pending = list(remembered)
