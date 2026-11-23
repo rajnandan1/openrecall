@@ -1,5 +1,6 @@
 use crate::index::{self, Candidate, Memory};
 use crate::turn::{self, Event, Turn};
+use crate::update::RunError;
 use crate::{git, record, scan};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -8,8 +9,9 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, SystemTime};
 
 const QUIET: Duration = Duration::from_secs(30 * 60);
@@ -913,7 +915,8 @@ fn extracted(content: &str) -> Option<(Vec<Value>, Vec<String>)> {
             .iter()
             .all(|k| f[*k].as_str().is_some_and(|t| t.trim().is_empty()))
     };
-    if facts.iter().any(placeholder) {
+    let shape = |f: &Value| matches!(fact_of(f), Err("shape"));
+    if facts.iter().any(|f| placeholder(f) || shape(f)) {
         return None;
     }
     let rules = o
@@ -994,16 +997,21 @@ pub fn picks_on(home: &Path) -> bool {
 
 const PICK_CAP: u64 = 10;
 
+enum Provider {
+    Api { base_url: String, key: String },
+    Plan,
+}
+
 pub struct Settings {
-    base_url: String,
+    provider: Provider,
     pub model: String,
-    key: String,
     pub pick: bool,
     pub pick_cap: u64,
 }
 
 impl Settings {
-    /// Ticket 24: `extract.toml` holds `base_url` and `model`, `api-key` the key alone. `Err` says why extraction is off.
+    /// Ticket 24: `extract.toml` holds `base_url` and `model`, `api-key` the key alone. With `provider = "claude-code"`,
+    /// the Plan provider needs only `model`. `Err` says why extraction is off.
     pub fn load(home: &Path) -> Result<Settings, String> {
         let toml = fs::read_to_string(home.join("extract.toml"))
             .map_err(|_| "no extract.toml".to_string())?;
@@ -1014,36 +1022,51 @@ impl Settings {
                 .map(|(_, v)| v.trim().trim_matches('"').to_string())
                 .filter(|v| !v.is_empty())
         };
-        let base_url = value("base_url").ok_or("no base_url in extract.toml")?;
-        let model = value("model").ok_or("no model in extract.toml")?;
+        let model = value("model").ok_or("no model in extract.toml");
+        let (provider, model) = match value("provider").as_deref() {
+            None => {
+                let base_url = value("base_url").ok_or("no base_url in extract.toml")?;
+                let model = model?;
+                let api = Provider::Api {
+                    base_url: base_url.trim_end_matches('/').into(),
+                    key: api_key(home)?,
+                };
+                (api, model)
+            }
+            Some("claude-code") => (Provider::Plan, model?),
+            Some(other) => return Err(format!("unknown provider {other} in extract.toml")),
+        };
         let pick = value("pick").as_deref() == Some("true");
         let pick_cap = value("pick_cap").and_then(|v| v.parse().ok()).unwrap_or(PICK_CAP);
-        let path = home.join("api-key");
-        let mode = fs::metadata(&path)
-            .map_err(|_| "no api-key")?
-            .permissions()
-            .mode();
-        if mode & 0o077 != 0 {
-            return Err("api-key is readable by group or others: chmod 600 it".into());
-        }
-        let key = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-        let key = key.trim();
-        if key.is_empty() || !key.chars().all(|c| c.is_ascii_graphic()) {
-            return Err("api-key is not one key on one line".into());
-        }
         Ok(Settings {
-            base_url: base_url.trim_end_matches('/').into(),
+            provider,
             model,
-            key: key.into(),
             pick,
             pick_cap,
         })
     }
 }
 
+fn api_key(home: &Path) -> Result<String, String> {
+    let path = home.join("api-key");
+    let mode = fs::metadata(&path)
+        .map_err(|_| "no api-key")?
+        .permissions()
+        .mode();
+    if mode & 0o077 != 0 {
+        return Err("api-key is readable by group or others: chmod 600 it".into());
+    }
+    let key = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let key = key.trim();
+    if key.is_empty() || !key.chars().all(|c| c.is_ascii_graphic()) {
+        return Err("api-key is not one key on one line".into());
+    }
+    Ok(key.into())
+}
+
 #[derive(Default)]
 pub struct Usage {
-    /// The upstream a router served the call from, when it says (OpenRouter's `provider`).
+    /// The upstream a router served the call from, when it says (OpenRouter's `provider`), or "plan" for the Plan provider.
     provider: String,
     pub tokens_in: u64,
     pub tokens_out: u64,
@@ -1063,6 +1086,21 @@ impl Usage {
             .as_u64()
             .unwrap_or(0);
         self.cost += used["cost"].as_f64().unwrap_or(0.0);
+    }
+
+    /// `total_cost_usd` is Claude Code's estimate at list prices, not what the plan bills.
+    fn add_plan(&mut self, reply: &Value) {
+        let used = &reply["usage"];
+        let n = |key: &str| used[key].as_u64().unwrap_or(0);
+        self.tokens_in +=
+            n("input_tokens") + n("cache_creation_input_tokens") + n("cache_read_input_tokens");
+        self.tokens_out += n("output_tokens");
+        self.reasoning += reply["modelUsage"].as_object().map_or(0, |models| {
+            models
+                .values()
+                .map(|m| m["thinkingTokens"].as_u64().unwrap_or(0))
+                .sum()
+        });
     }
 }
 
@@ -1090,11 +1128,14 @@ fn ask<T>(
     Err(Fail::Strike("invalid json".into()))
 }
 
-/// One `POST <base_url>/chat/completions` through macOS curl. The key goes in curl's config on stdin, never in `ps`;
-/// the body goes in a 0600 file, because stdin cannot carry both (ticket 24).
+/// One `claude -p` call for the Plan provider, else one `POST <base_url>/chat/completions` through macOS curl. The key goes
+/// in curl's config on stdin, never in `ps`; the body goes in a 0600 file, because stdin cannot carry both (ticket 24).
 pub fn post(s: &Settings, body: &Value, usage: &mut Usage) -> Result<String, Fail> {
     let dir = crate::home().join("extract");
     fs::create_dir_all(&dir)?;
+    let Provider::Api { base_url, key } = &s.provider else {
+        return plan(&s.model, body, &dir, usage);
+    };
     let tmp = dir.join(format!("request.{}", std::process::id()));
     fs::OpenOptions::new()
         .write(true)
@@ -1105,11 +1146,12 @@ pub fn post(s: &Settings, body: &Value, usage: &mut Usage) -> Result<String, Fai
         .write_all(body.to_string().as_bytes())?;
     let config = format!(
         "url = \"{}/chat/completions\"\nheader = \"Authorization: Bearer {}\"\n\
-         header = \"Content-Type: application/json\"\ndata-binary = \"@{}\"\nmax-time = 300\n\
+         header = \"Content-Type: application/json\"\ndata-binary = \"@{}\"\nmax-time = {}\n\
          silent\nshow-error\nwrite-out = \"\\n%{{http_code}}\"\n",
-        quote(&s.base_url),
-        quote(&s.key),
-        quote(&tmp.to_string_lossy())
+        quote(base_url),
+        quote(key),
+        quote(&tmp.to_string_lossy()),
+        DEADLINE.as_secs()
     );
     let run = || -> std::io::Result<std::process::Output> {
         let mut child = Command::new("/usr/bin/curl")
@@ -1162,6 +1204,112 @@ fn classify(exit: Option<i32>, stdout: &str, usage: &mut Usage) -> Result<String
     }
 }
 
+const DEADLINE: Duration = Duration::from_secs(300);
+/// `claude -p` refuses piped stdin over 10 MB.
+const PLAN_STDIN: usize = 10 * 1024 * 1024;
+const EXTRACT_EFFORT: &str = "xhigh";
+const PICK_EFFORT: &str = "medium";
+/// In `-p` mode an API key or a cloud provider selector wins over the plan login (Claude Code 2.1.330).
+const PLAN_UNSET: [&str; 9] = [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+    "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_FOUNDRY",
+    "CLAUDE_CODE_USE_GATEWAY",
+    "CLAUDE_CODE_USE_MANTLE",
+    "CLAUDE_CODE_USE_VERTEX",
+];
+
+fn plan_call<'a>(
+    model: &str,
+    body: &'a Value,
+    dir: &Path,
+) -> Result<(Command, &'a str, bool), Fail> {
+    let user = body["messages"][1]["content"].as_str().unwrap_or("");
+    if user.len() > PLAN_STDIN {
+        return Err(Fail::Strike("context length".into()));
+    }
+    let format = &body["response_format"]["json_schema"];
+    let pick = format["name"] == "pick";
+    let mut cmd = Command::new("claude");
+    cmd.args(["-p", "--safe-mode", "--no-session-persistence"])
+        .args(["--tools", "", "--setting-sources", "", "--model", model])
+        .args(["--effort", if pick { PICK_EFFORT } else { EXTRACT_EFFORT }])
+        .args(["--output-format", "json", "--system-prompt"])
+        .arg(body["messages"][0]["content"].as_str().unwrap_or(""));
+    if pick {
+        cmd.arg("--json-schema").arg(format["schema"].to_string());
+    }
+    for name in PLAN_UNSET {
+        cmd.env_remove(name);
+    }
+    cmd.env("CLAUDE_CODE_DISABLE_ADVISOR_TOOL", "1")
+        .current_dir(dir);
+    Ok((cmd, user, pick))
+}
+
+fn plan(model: &str, body: &Value, dir: &Path, usage: &mut Usage) -> Result<String, Fail> {
+    let (mut cmd, user, schema) = plan_call(model, body, dir)?;
+    let run = crate::update::run_for(&mut cmd, Some(user.as_bytes()), DEADLINE);
+    plan_reply(run, schema, usage)
+}
+
+/// The exit code wins over stdout: `claude` exits 143 on SIGTERM even after it prints a full success result.
+fn plan_reply(
+    run: Result<(ExitStatus, String), RunError>,
+    schema: bool,
+    usage: &mut Usage,
+) -> Result<String, Fail> {
+    usage.provider = "plan".into();
+    let (status, stdout) = match run {
+        Ok(done) => done,
+        Err(RunError::Start(_, e)) => return Err(Fail::Stop(format!("cannot start claude: {e}"))),
+        Err(RunError::Late(..)) => return Err(Fail::Strike("deadline".into())),
+    };
+    let reply: Value = serde_json::from_str(&stdout).unwrap_or(Value::Null);
+    usage.add_plan(&reply);
+    if status.success() && reply["is_error"] == false && reply["type"] == "result" {
+        return Ok(match (schema, &reply["structured_output"]) {
+            (true, Value::Null) => String::new(),
+            (true, structured) => structured.to_string(),
+            (false, _) => reply["result"].as_str().unwrap_or("").into(),
+        });
+    }
+    match reply["terminal_reason"].as_str() {
+        Some("prompt_too_long") => Err(Fail::Strike("context length".into())),
+        Some("structured_output_retry_exhausted") => Err(Fail::Strike("invalid json".into())),
+        _ => Err(Fail::Stop(plan_stop(status, &reply))),
+    }
+}
+
+/// "Not logged in" and an API timeout both exit 1 with `terminal_reason` "api_error"; only `result` tells them apart.
+fn plan_stop(status: ExitStatus, reply: &Value) -> String {
+    let exit = status.code().map_or_else(
+        || format!("signal {}", status.signal().unwrap_or(0)),
+        |c| c.to_string(),
+    );
+    let mut text = format!("claude exit {exit}");
+    for part in [&reply["api_error_status"], &reply["terminal_reason"]] {
+        match part {
+            Value::Number(n) => text += &format!(" {n}"),
+            Value::String(s) if !s.is_empty() => text += &format!(" {s}"),
+            _ => {}
+        }
+    }
+    let result: String = reply["result"]
+        .as_str()
+        .unwrap_or("")
+        .chars()
+        .take(80)
+        .collect();
+    if !result.is_empty() {
+        text += &format!(": {result}");
+    }
+    text
+}
+
 /// A double-quoted value in a curl config file, where `\` escapes.
 fn quote(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
@@ -1198,6 +1346,312 @@ mod tests {
             assert!(strict(&serde_json::from_str(schema).unwrap()));
         }
         assert!(EXTRACT.ends_with("matching this JSON schema:\n") && !EXTRACT.contains("scope"));
+    }
+
+    #[test]
+    fn settings_choose_the_api_provider_or_the_plan_provider() {
+        let home = std::env::temp_dir().join(format!("openrecall-settings-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+        let load = |toml: &str| {
+            fs::write(home.join("extract.toml"), toml).unwrap();
+            Settings::load(&home)
+        };
+        let api = "base_url = \"http://127.0.0.1:9/v1/\"\nmodel = \"test/model\"\npick = true\n";
+        assert_eq!(load(api).err().unwrap(), "no api-key");
+        assert_eq!(
+            load("pick = true\n").err().unwrap(),
+            "no base_url in extract.toml"
+        );
+        assert_eq!(
+            load("base_url = \"http://127.0.0.1:9/v1/\"\n")
+                .err()
+                .unwrap(),
+            "no model in extract.toml",
+            "model before api-key"
+        );
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(home.join("api-key"))
+            .unwrap()
+            .write_all(b"sk-test\n")
+            .unwrap();
+        let s = load(api).unwrap();
+        assert!(
+            matches!(&s.provider, Provider::Api { base_url, key } if base_url == "http://127.0.0.1:9/v1" && key == "sk-test")
+        );
+        assert_eq!(
+            (s.model.as_str(), s.pick, s.pick_cap),
+            ("test/model", true, 10)
+        );
+        let s = load(&format!("provider = \"\"\n{api}")).unwrap();
+        assert!(
+            matches!(s.provider, Provider::Api { .. }),
+            "an empty provider is no provider line"
+        );
+        fs::remove_file(home.join("api-key")).unwrap();
+
+        let s = load("provider = \"claude-code\"\nmodel = \"claude-sonnet-5-5\"\npick = true\npick_cap = 4\n").unwrap();
+        assert!(
+            matches!(s.provider, Provider::Plan),
+            "no base_url and no api-key"
+        );
+        assert_eq!(
+            (s.model.as_str(), s.pick, s.pick_cap),
+            ("claude-sonnet-5-5", true, 4)
+        );
+        assert!(picks_on(&home));
+        assert_eq!(
+            load("provider = \"claude-code\"\n").err().unwrap(),
+            "no model in extract.toml"
+        );
+        assert_eq!(
+            load("provider = \"openai\"\n").err().unwrap(),
+            "unknown provider openai in extract.toml"
+        );
+        assert!(!picks_on(&home));
+        fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn the_plan_call_runs_claude_with_the_measured_flags() {
+        let dir = Path::new("/nonexistent/openrecall/extract");
+        let schema = json!({"type": "object", "properties": {"ids": {"type": "array", "items": {"type": "string"}}},
+                            "required": ["ids"], "additionalProperties": false});
+        let body = |name: &str| {
+            json!({
+                "model": "test/model",
+                "max_tokens": 500,
+                "reasoning": {"effort": "low"},
+                "messages": [{"role": "system", "content": "Find the facts.\n"},
+                             {"role": "user", "content": "  [user] hi\n\n"}],
+                "response_format": {"type": "json_schema", "json_schema": {"name": name, "strict": true, "schema": schema}},
+            })
+        };
+        let args = |cmd: &Command| -> Vec<String> {
+            cmd.get_args()
+                .map(|a| a.to_str().unwrap().to_string())
+                .collect()
+        };
+        let flags = |effort: &str| {
+            [
+                "-p",
+                "--safe-mode",
+                "--no-session-persistence",
+                "--tools",
+                "",
+                "--setting-sources",
+                "",
+                "--model",
+                "claude-sonnet-5-5",
+                "--effort",
+                effort,
+                "--output-format",
+                "json",
+                "--system-prompt",
+                "Find the facts.\n",
+            ]
+            .map(String::from)
+            .to_vec()
+        };
+        for (name, effort) in [
+            ("facts", "xhigh"),
+            ("decisions", "xhigh"),
+            ("pick", "medium"),
+        ] {
+            let b = body(name);
+            let (cmd, stdin, with_schema) = plan_call("claude-sonnet-5-5", &b, dir).unwrap();
+            assert_eq!(with_schema, name == "pick", "{name}: --json-schema");
+            let got = args(&cmd);
+            assert_eq!(got[..15], flags(effort), "{name}");
+            assert_eq!(stdin, "  [user] hi\n\n", "{name}: the user text as it is");
+            assert_eq!(cmd.get_program(), "claude");
+            assert_eq!(cmd.get_current_dir(), Some(dir));
+            let mut envs: Vec<_> = cmd
+                .get_envs()
+                .map(|(k, v)| (k.to_str().unwrap(), v.map(|v| v.to_str().unwrap())))
+                .collect();
+            envs.sort();
+            assert_eq!(
+                envs,
+                [
+                    ("ANTHROPIC_API_KEY", None),
+                    ("ANTHROPIC_AUTH_TOKEN", None),
+                    ("CLAUDE_CODE_DISABLE_ADVISOR_TOOL", Some("1")),
+                    ("CLAUDE_CODE_USE_ANTHROPIC_AWS", None),
+                    ("CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD", None),
+                    ("CLAUDE_CODE_USE_BEDROCK", None),
+                    ("CLAUDE_CODE_USE_FOUNDRY", None),
+                    ("CLAUDE_CODE_USE_GATEWAY", None),
+                    ("CLAUDE_CODE_USE_MANTLE", None),
+                    ("CLAUDE_CODE_USE_VERTEX", None),
+                ]
+            );
+            if name == "pick" {
+                assert_eq!((got.len(), got[15].as_str()), (17, "--json-schema"));
+                assert_eq!(serde_json::from_str::<Value>(&got[16]).unwrap(), schema);
+            } else {
+                assert_eq!(got.len(), 15, "{name}: no --json-schema");
+            }
+        }
+        let mut b = body("facts");
+        b["messages"][1]["content"] = json!("x".repeat(10 * 1024 * 1024));
+        assert!(plan_call("claude-sonnet-5-5", &b, dir).is_ok());
+        b["messages"][1]["content"] = json!("x".repeat(10 * 1024 * 1024 + 1));
+        assert_eq!(
+            plan_call("claude-sonnet-5-5", &b, dir).err(),
+            Some(Fail::Strike("context length".into()))
+        );
+    }
+
+    #[test]
+    fn plan_replies_are_classified_by_exit_code_then_terminal_reason() {
+        let code = |c: i32| ExitStatus::from_raw(c << 8);
+        let reply = |status: ExitStatus, stdout: &str, schema: bool| {
+            plan_reply(Ok((status, stdout.into())), schema, &mut Usage::default())
+        };
+        let ok = json!({"type": "result", "subtype": "success", "is_error": false, "result": "{\"facts\": []}",
+                        "structured_output": {"ids": ["m2"]}})
+        .to_string();
+        assert_eq!(reply(code(0), &ok, false), Ok("{\"facts\": []}".into()));
+        assert_eq!(reply(code(0), &ok, true), Ok(r#"{"ids":["m2"]}"#.into()));
+        let bare = r#"{"type": "result", "subtype": "success", "is_error": false}"#;
+        assert_eq!(
+            reply(code(0), bare, true),
+            Ok(String::new()),
+            "no structured_output"
+        );
+        assert_eq!(reply(code(0), bare, false), Ok(String::new()), "no result");
+
+        let failed = |reason: &str, status: Value, result: &str| {
+            json!({"type": "result", "subtype": "success", "is_error": true, "terminal_reason": reason,
+                   "api_error_status": status, "result": result})
+            .to_string()
+        };
+        let too_long = failed(
+            "prompt_too_long",
+            json!(400),
+            "made-up text for a long input",
+        );
+        for status in [code(1), code(0)] {
+            assert_eq!(
+                reply(status, &too_long, false),
+                Err(Fail::Strike("context length".into()))
+            );
+        }
+        let retries = r#"{"type": "result", "subtype": "error_max_structured_output_retries", "is_error": true,
+                          "terminal_reason": "structured_output_retry_exhausted", "errors": ["no valid output"]}"#;
+        assert_eq!(
+            reply(code(1), retries, true),
+            Err(Fail::Strike("invalid json".into()))
+        );
+
+        let stop = |status: ExitStatus, stdout: &str| match reply(status, stdout, false) {
+            Err(Fail::Stop(why)) => why,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            stop(
+                code(1),
+                &failed("api_error", Value::Null, "Made-up refusal")
+            ),
+            "claude exit 1 api_error: Made-up refusal"
+        );
+        let long = "Made-up error text · the stand-in service turned the call away and ended it early, with more words after the cut";
+        assert_eq!(
+            stop(code(1), &failed("api_error", json!(429), long)),
+            "claude exit 1 429 api_error: Made-up error text · the stand-in service turned the call away and ended it earl",
+            "80 characters, not 80 bytes"
+        );
+        assert_eq!(
+            stop(code(0), &failed("api_error", json!(529), "")),
+            "claude exit 0 529 api_error",
+            "is_error at exit 0"
+        );
+        assert_eq!(
+            stop(code(143), &ok),
+            "claude exit 143: {\"facts\": []}",
+            "the exit code wins over a full result"
+        );
+        assert_eq!(stop(ExitStatus::from_raw(9), ""), "claude exit signal 9");
+        assert_eq!(stop(code(0), "Error: not JSON"), "claude exit 0");
+        assert_eq!(stop(code(0), "{}"), "claude exit 0", "not a result");
+        assert_eq!(
+            stop(
+                code(0),
+                r#"{"type": "assistant", "is_error": false, "result": "Made-up text"}"#
+            ),
+            "claude exit 0: Made-up text",
+            "an object of another type"
+        );
+    }
+
+    #[test]
+    fn plan_usage_adds_every_finished_call_and_never_a_cost() {
+        let mut usage = Usage::default();
+        let used = json!({"type": "result", "is_error": false, "result": "{}", "total_cost_usd": 0.25,
+            "usage": {"input_tokens": 2, "cache_creation_input_tokens": 1200, "cache_read_input_tokens": 30000,
+                      "output_tokens": 150},
+            "modelUsage": {"claude-sonnet-5-5": {"thinkingTokens": 90}, "claude-haiku-4-5": {"thinkingTokens": 10}}});
+        plan_reply(
+            Ok((ExitStatus::from_raw(0), used.to_string())),
+            false,
+            &mut usage,
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                usage.tokens_in,
+                usage.tokens_out,
+                usage.reasoning,
+                usage.cost
+            ),
+            (31202, 150, 100, 0.0)
+        );
+        assert_eq!(usage.provider, "plan");
+        let struck = json!({"is_error": true, "terminal_reason": "prompt_too_long",
+                            "usage": {"input_tokens": 5, "output_tokens": 0}});
+        assert!(
+            plan_reply(
+                Ok((ExitStatus::from_raw(1 << 8), struck.to_string())),
+                false,
+                &mut usage
+            )
+            .is_err()
+        );
+        assert_eq!(usage.tokens_in, 31207, "a struck reply counts");
+    }
+
+    #[test]
+    fn a_plan_call_past_the_deadline_is_a_strike_and_one_that_cannot_start_is_a_stop() {
+        let mut usage = Usage::default();
+        let late = crate::update::run_for(
+            Command::new("sleep").arg("5"),
+            Some(b"text"),
+            Duration::from_millis(100),
+        );
+        assert_eq!(
+            plan_reply(late, false, &mut usage),
+            Err(Fail::Strike("deadline".into()))
+        );
+        assert_eq!(
+            (usage.tokens_in, usage.provider.as_str()),
+            (0, "plan"),
+            "a killed call adds 0"
+        );
+        let gone = crate::update::run_for(
+            &mut Command::new("openrecall-no-such-program"),
+            Some(b"text"),
+            Duration::from_secs(5),
+        );
+        assert_eq!(
+            plan_reply(gone, false, &mut usage),
+            Err(Fail::Stop(
+                "cannot start claude: No such file or directory (os error 2)".into()
+            ))
+        );
     }
 
     #[test]
@@ -1262,22 +1716,35 @@ mod tests {
                 .is_none(),
             "a placeholder fact makes the reply invalid"
         );
+        assert!(
+            extracted(
+                r#"{"facts": [
+                    {"type": "gotcha", "name": "A B", "description": "d", "body": "b"},
+                    {"type": "state", "name": "x", "description": "d"}],
+                   "claude_md_rules": []}"#
+            )
+            .is_none(),
+            "a shape drop makes the reply invalid, so ask sends it again"
+        );
         let (facts, rules) = extracted(
             r#"{"facts": [
                 {"type": "gotcha", "name": "A B", "description": "d", "body": "b"},
                 {"type": "chat", "name": "x", "description": "d", "body": "b"},
-                {"type": "state", "name": "x", "description": " ", "body": "b"},
-                {"type": "state", "name": "x", "description": "d"}],
+                {"type": "state", "name": "x", "description": " ", "body": "b"}],
                "claude_md_rules": ["Run cargo fmt."]}"#,
         )
         .unwrap();
         assert_eq!(rules, ["Run cargo fmt."]);
         let got: Vec<Result<String, &str>> =
             facts.iter().map(|f| fact_of(f).map(|f| f.name)).collect();
-        assert_eq!(
-            got,
-            [Ok("A B".into()), Err("type"), Err("empty"), Err("shape")]
-        );
+        assert_eq!(got, [Ok("A B".into()), Err("type"), Err("empty")]);
+        for shape in [
+            json!({"type": "state", "name": "x", "description": "d"}),
+            json!({"type": "state", "name": "x", "description": "d", "body": 1}),
+            json!({"type": "state", "name": "x", "description": "d", "body": "b", "extra": "e"}),
+        ] {
+            assert_eq!(fact_of(&shape).map(|f| f.name), Err("shape"), "{shape}");
+        }
         let pointer = |body: &str| fact_of(&json!({"type": "pointer", "name": "x", "description": "d", "body": body})).map(|f| f.body);
         assert_eq!(
             pointer("Facts are files at ~/.config/app/repos/<name>.md with frontmatter."),
