@@ -555,6 +555,42 @@ class HarnessTest(unittest.TestCase):
                       "[assistant] The null check runs late.\n\n## Prompt\n" + prompt, sent[0])
         self.assertNotIn("It reads the rows first", sent[0], "the transcript stops before the case's prompt")
 
+    def test_a_plan_provider_case_home(self):
+        orhome, fake, empty, out = tempfile.mkdtemp(), tempfile.mkdtemp(), tempfile.mkdtemp(), tempfile.mkdtemp()
+        eval_dir = unittest.mock.patch.object(harness, "EVAL", os.path.join(orhome, "eval"))
+        eval_dir.start()
+        self.addCleanup(eval_dir.stop)
+        toml = 'provider = "claude-code"\nmodel = "made-up"\n'
+        with open(os.path.join(orhome, "extract.toml"), "w") as fh:
+            fh.write(toml)
+        with open(os.path.join(orhome, "api-key"), "w") as fh:
+            fh.write("made-up-key")
+        claude, binary, seen = os.path.join(fake, "claude"), os.path.join(out, "openrecall"), os.path.join(out, "seen.json")
+        with open(claude, "w") as fh:
+            fh.write("#!/bin/sh\nexit 1\n")
+        with open(binary, "w") as fh:
+            fh.write("#!%s\nimport json, os, sys\nsys.stdin.read()\njson.dump(dict(user=os.environ.get('USER'), "
+                     "path=os.environ['PATH'], keychains=os.readlink(os.path.join(os.environ['HOME'], 'Library', 'Keychains')), "
+                     "files=sorted(os.listdir(os.environ['OPENRECALL_HOME']))), open(%r, 'w'))\n" % (sys.executable, seen))
+        os.chmod(claude, 0o755)
+        os.chmod(binary, 0o755)
+        provider = harness.real_provider()
+        self.assertEqual(provider, (toml, None), "the Plan provider has no key, even with an api-key on disk")
+        case = dict(id="C1", session="plan", at="2030-01-01T00:00:00Z", prompt="why do exports fail on empty rows",
+                    repo="", branch="", folder="/nonexistent/app")
+        with unittest.mock.patch.dict(os.environ, PATH=fake + ":/usr/bin:/bin", USER="made-up-user", OPENRECALL_HOME=orhome), \
+                unittest.mock.patch.object(harness, "PICK_WAIT", 0):
+            harness.replay_cases(binary, [case], {}, provider)
+            with open(seen) as fh:
+                self.assertEqual(json.load(fh), dict(user="made-up-user", path=fake + ":/usr/bin:/bin",
+                                                     keychains=os.path.expanduser("~/Library/Keychains"), files=["extract.toml"]))
+            os.environ["PATH"] = empty + ":/usr/bin:/bin"
+            self.assertRaises(SystemExit, harness.replay_cases, binary, [case], {}, provider)
+        os.remove(os.path.join(orhome, "api-key"))
+        with open(os.path.join(orhome, "extract.toml"), "w") as fh:
+            fh.write('base_url = "http://127.0.0.1:9"\nmodel = "made-up"\n')
+        self.assertRaises(SystemExit, harness.real_provider)
+
     def test_facts_as_they_stood(self):
         orhome = os.path.dirname(harness.EVAL)
         repo = os.path.join(orhome, "repos", "github.com", "someone", "app")

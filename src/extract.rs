@@ -915,7 +915,8 @@ fn extracted(content: &str) -> Option<(Vec<Value>, Vec<String>)> {
             .iter()
             .all(|k| f[*k].as_str().is_some_and(|t| t.trim().is_empty()))
     };
-    if facts.iter().any(placeholder) {
+    let shape = |f: &Value| matches!(fact_of(f), Err("shape"));
+    if facts.iter().any(|f| placeholder(f) || shape(f)) {
         return None;
     }
     let rules = o
@@ -1667,22 +1668,35 @@ mod tests {
                 .is_none(),
             "a placeholder fact makes the reply invalid"
         );
+        assert!(
+            extracted(
+                r#"{"facts": [
+                    {"type": "gotcha", "name": "A B", "description": "d", "body": "b"},
+                    {"type": "state", "name": "x", "description": "d"}],
+                   "claude_md_rules": []}"#
+            )
+            .is_none(),
+            "a shape drop makes the reply invalid, so ask sends it again"
+        );
         let (facts, rules) = extracted(
             r#"{"facts": [
                 {"type": "gotcha", "name": "A B", "description": "d", "body": "b"},
                 {"type": "chat", "name": "x", "description": "d", "body": "b"},
-                {"type": "state", "name": "x", "description": " ", "body": "b"},
-                {"type": "state", "name": "x", "description": "d"}],
+                {"type": "state", "name": "x", "description": " ", "body": "b"}],
                "claude_md_rules": ["Run cargo fmt."]}"#,
         )
         .unwrap();
         assert_eq!(rules, ["Run cargo fmt."]);
         let got: Vec<Result<String, &str>> =
             facts.iter().map(|f| fact_of(f).map(|f| f.name)).collect();
-        assert_eq!(
-            got,
-            [Ok("A B".into()), Err("type"), Err("empty"), Err("shape")]
-        );
+        assert_eq!(got, [Ok("A B".into()), Err("type"), Err("empty")]);
+        for shape in [
+            json!({"type": "state", "name": "x", "description": "d"}),
+            json!({"type": "state", "name": "x", "description": "d", "body": 1}),
+            json!({"type": "state", "name": "x", "description": "d", "body": "b", "extra": "e"}),
+        ] {
+            assert_eq!(fact_of(&shape).map(|f| f.name), Err("shape"), "{shape}");
+        }
         let pointer = |body: &str| fact_of(&json!({"type": "pointer", "name": "x", "description": "d", "body": body})).map(|f| f.body);
         assert_eq!(
             pointer("Facts are files at ~/.config/app/repos/<name>.md with frontmatter."),
