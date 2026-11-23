@@ -556,7 +556,10 @@ class HarnessTest(unittest.TestCase):
         self.assertNotIn("It reads the rows first", sent[0], "the transcript stops before the case's prompt")
 
     def test_a_plan_provider_case_home(self):
-        orhome, fake, empty, out = os.path.dirname(harness.EVAL), tempfile.mkdtemp(), tempfile.mkdtemp(), tempfile.mkdtemp()
+        orhome, fake, empty, out = tempfile.mkdtemp(), tempfile.mkdtemp(), tempfile.mkdtemp(), tempfile.mkdtemp()
+        eval_dir = unittest.mock.patch.object(harness, "EVAL", os.path.join(orhome, "eval"))
+        eval_dir.start()
+        self.addCleanup(eval_dir.stop)
         toml = 'provider = "claude-code"\nmodel = "made-up"\n'
         with open(os.path.join(orhome, "extract.toml"), "w") as fh:
             fh.write(toml)
