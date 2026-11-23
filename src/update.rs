@@ -1,11 +1,12 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::ffi::OsString;
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 const RELEASES: &str = "https://github.com/rajnandan1/openrecall/releases";
@@ -233,10 +234,12 @@ fn plugin_due(session: &str, done: &str, on_disk: &str) -> bool {
 /// Only "updated" proves an update: two updates that collide, or one within 30 s of a refresh, report "up_to_date"
 /// and leave the plugin old.
 fn plugin_step() -> Result<(), String> {
-    let (ok, out) = run_for(
+    let (status, out) = run_for(
         Command::new("claude").args(["plugin", "update", "openrecall@openrecall", "--json"]),
+        None,
         Duration::from_secs(60),
     )?;
+    let ok = status.success();
     let reply = out
         .lines()
         .rev()
@@ -329,7 +332,11 @@ fn fetch(releases: &str, version: &str, tmp: &Path) -> Result<(), String> {
         ));
     }
     // main() exits 0 on every path, so only the output proves that the download runs.
-    let (_, out) = run_for(Command::new(tmp).arg("version"), Duration::from_secs(5))?;
+    let (_, out) = run_for(
+        Command::new(tmp).arg("version"),
+        None,
+        Duration::from_secs(5),
+    )?;
     if out.trim() != version {
         return Err(format!(
             "smoke test: the download printed {:?}, not {version}",
@@ -366,17 +373,46 @@ fn curl(releases: &str, limit: u64, args: &[&str], out: Stdio) -> Result<String,
     Ok(String::from_utf8_lossy(&done.stdout).into_owned())
 }
 
-/// The command's success and stdout, or why it did not finish within `limit`. A thread drains stdout, so a full pipe
-/// cannot stall the child, and a grandchild that keeps the pipe open cannot stall the caller.
-fn run_for(cmd: &mut Command, limit: Duration) -> Result<(bool, String), String> {
+#[derive(Debug)]
+pub(crate) enum RunError {
+    Start(OsString, std::io::Error),
+    Late(OsString, Duration),
+}
+
+impl From<RunError> for String {
+    fn from(e: RunError) -> String {
+        match e {
+            RunError::Start(program, e) => format!("cannot start {program:?}: {e}"),
+            RunError::Late(program, limit) => {
+                format!("{program:?} ran past {} s", limit.as_secs())
+            }
+        }
+    }
+}
+
+/// The command's exit status and stdout, or why it did not finish within `limit`. Threads write `stdin` and drain stdout,
+/// so a full pipe cannot stall the deadline, and a grandchild that keeps a pipe open cannot stall the caller.
+pub(crate) fn run_for(
+    cmd: &mut Command,
+    stdin: Option<&[u8]>,
+    limit: Duration,
+) -> Result<(ExitStatus, String), RunError> {
     let started = Instant::now();
     let mut child = cmd
-        .stdin(Stdio::null())
+        .stdin(stdin.map_or_else(Stdio::null, |_| Stdio::piped()))
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|e| format!("cannot start {:?}: {e}", cmd.get_program()))?;
-    let mut stdout = child.stdout.take().ok_or("no stdout")?;
+        .map_err(|e| RunError::Start(cmd.get_program().into(), e))?;
+    if let (Some(mut pipe), Some(bytes)) = (child.stdin.take(), stdin) {
+        let bytes = bytes.to_vec();
+        std::thread::spawn(move || {
+            let _ = pipe.write_all(&bytes);
+        });
+    }
+    let mut stdout = child.stdout.take().ok_or_else(|| {
+        RunError::Start(cmd.get_program().into(), std::io::Error::other("no stdout"))
+    })?;
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let mut text = String::new();
@@ -388,17 +424,13 @@ fn run_for(cmd: &mut Command, limit: Duration) -> Result<(bool, String), String>
             let text = rx
                 .recv_timeout(limit.saturating_sub(started.elapsed()))
                 .unwrap_or_default();
-            return Ok((status.success(), text));
+            return Ok((status, text));
         }
         std::thread::sleep(Duration::from_millis(20));
     }
     let _ = child.kill();
     let _ = child.wait();
-    Err(format!(
-        "{:?} ran past {} s",
-        cmd.get_program(),
-        limit.as_secs()
-    ))
+    Err(RunError::Late(cmd.get_program().into(), limit))
 }
 
 fn sha256(bytes: &[u8]) -> String {
@@ -608,6 +640,49 @@ mod tests {
             assert_eq!(now, b"old", "{why}");
         }
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn run_for_feeds_stdin_and_tells_a_late_child_from_one_that_cannot_start() {
+        let text = b"two lines\n  and no final newline  ";
+        let (status, out) =
+            run_for(&mut Command::new("cat"), Some(text), Duration::from_secs(5)).unwrap();
+        assert!(status.success());
+        assert_eq!(out.as_bytes(), text);
+        let (status, _) = run_for(
+            Command::new("sh").args(["-c", "exit 3"]),
+            None,
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(status.code(), Some(3));
+
+        let started = Instant::now();
+        let late = run_for(
+            Command::new("sleep").arg("5"),
+            Some(&vec![b'x'; 1 << 20]),
+            Duration::from_millis(200),
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "a full stdin pipe cannot hold up the deadline"
+        );
+        assert!(matches!(late, Err(RunError::Late(..))), "{late:?}");
+        assert_eq!(String::from(late.unwrap_err()), "\"sleep\" ran past 0 s");
+
+        let gone = run_for(
+            &mut Command::new("openrecall-no-such-program"),
+            None,
+            Duration::from_secs(5),
+        );
+        assert!(
+            matches!(&gone, Err(RunError::Start(_, e)) if e.kind() == std::io::ErrorKind::NotFound),
+            "{gone:?}"
+        );
+        assert_eq!(
+            String::from(gone.unwrap_err()),
+            "cannot start \"openrecall-no-such-program\": No such file or directory (os error 2)"
+        );
     }
 
     #[test]
