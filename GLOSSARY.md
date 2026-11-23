@@ -228,6 +228,14 @@ _Avoid_: strike (that is a failed extraction run), update, sync
 The LLM service that extraction and picks send session text to, chosen by the user. OpenRecall has no default provider; with none set, extraction and picks are off.
 _Avoid_: vendor, backend, model (one provider serves many models)
 
+**API provider**:
+A provider that OpenRecall reaches at an OpenAI-style endpoint with a key that the user stores in the home. OpenRouter is one.
+_Avoid_: curl provider, HTTP provider, OpenRouter (that is one API provider)
+
+**Plan provider**:
+The provider reached through the user's own Claude Code program and the user's Claude plan (a Pro, Max or Ultra subscription), so the home stores no key.
+_Avoid_: Claude Code provider (Anthropic does not permit "Claude Code" as a name), claude -p provider, subscription provider, local provider
+
 **Quiet**:
 A session whose transcript's last line with a timestamp is at least 30 minutes old. A quiet session can still resume; its later turns are extracted when it goes quiet again.
 _Avoid_: idle, finished, stale
