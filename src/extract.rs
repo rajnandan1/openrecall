@@ -997,13 +997,13 @@ pub fn picks_on(home: &Path) -> bool {
 
 const PICK_CAP: u64 = 10;
 
-enum Route {
+enum Provider {
     Api { base_url: String, key: String },
     Plan,
 }
 
 pub struct Settings {
-    route: Route,
+    provider: Provider,
     pub model: String,
     pub pick: bool,
     pub pick_cap: u64,
@@ -1022,28 +1022,24 @@ impl Settings {
                 .map(|(_, v)| v.trim().trim_matches('"').to_string())
                 .filter(|v| !v.is_empty())
         };
-        let plan = match value("provider").as_deref() {
-            None => false,
-            Some("claude-code") => true,
+        let model = value("model").ok_or("no model in extract.toml");
+        let (provider, model) = match value("provider").as_deref() {
+            None => {
+                let base_url = value("base_url").ok_or("no base_url in extract.toml")?;
+                let model = model?;
+                let api = Provider::Api {
+                    base_url: base_url.trim_end_matches('/').into(),
+                    key: api_key(home)?,
+                };
+                (api, model)
+            }
+            Some("claude-code") => (Provider::Plan, model?),
             Some(other) => return Err(format!("unknown provider {other} in extract.toml")),
         };
-        let base_url = if plan {
-            None
-        } else {
-            Some(value("base_url").ok_or("no base_url in extract.toml")?)
-        };
-        let model = value("model").ok_or("no model in extract.toml")?;
         let pick = value("pick").as_deref() == Some("true");
         let pick_cap = value("pick_cap").and_then(|v| v.parse().ok()).unwrap_or(PICK_CAP);
-        let route = match base_url {
-            None => Route::Plan,
-            Some(base_url) => Route::Api {
-                base_url: base_url.trim_end_matches('/').into(),
-                key: api_key(home)?,
-            },
-        };
         Ok(Settings {
-            route,
+            provider,
             model,
             pick,
             pick_cap,
@@ -1070,7 +1066,7 @@ fn api_key(home: &Path) -> Result<String, String> {
 
 #[derive(Default)]
 pub struct Usage {
-    /// The upstream a router served the call from, when it says (OpenRouter's `provider`).
+    /// The upstream a router served the call from, when it says (OpenRouter's `provider`), or "plan" for the Plan provider.
     provider: String,
     pub tokens_in: u64,
     pub tokens_out: u64,
@@ -1137,7 +1133,7 @@ fn ask<T>(
 pub fn post(s: &Settings, body: &Value, usage: &mut Usage) -> Result<String, Fail> {
     let dir = crate::home().join("extract");
     fs::create_dir_all(&dir)?;
-    let Route::Api { base_url, key } = &s.route else {
+    let Provider::Api { base_url, key } = &s.provider else {
         return plan(&s.model, body, &dir, usage);
     };
     let tmp = dir.join(format!("request.{}", std::process::id()));
@@ -1150,11 +1146,12 @@ pub fn post(s: &Settings, body: &Value, usage: &mut Usage) -> Result<String, Fai
         .write_all(body.to_string().as_bytes())?;
     let config = format!(
         "url = \"{}/chat/completions\"\nheader = \"Authorization: Bearer {}\"\n\
-         header = \"Content-Type: application/json\"\ndata-binary = \"@{}\"\nmax-time = 300\n\
+         header = \"Content-Type: application/json\"\ndata-binary = \"@{}\"\nmax-time = {}\n\
          silent\nshow-error\nwrite-out = \"\\n%{{http_code}}\"\n",
         quote(base_url),
         quote(key),
-        quote(&tmp.to_string_lossy())
+        quote(&tmp.to_string_lossy()),
+        DEADLINE.as_secs()
     );
     let run = || -> std::io::Result<std::process::Output> {
         let mut child = Command::new("/usr/bin/curl")
@@ -1207,13 +1204,17 @@ fn classify(exit: Option<i32>, stdout: &str, usage: &mut Usage) -> Result<String
     }
 }
 
-const PLAN_DEADLINE: Duration = Duration::from_secs(300);
+const DEADLINE: Duration = Duration::from_secs(300);
 /// `claude -p` refuses piped stdin over 10 MB.
 const PLAN_STDIN: usize = 10 * 1024 * 1024;
 const EXTRACT_EFFORT: &str = "xhigh";
 const PICK_EFFORT: &str = "medium";
 
-fn plan_call<'a>(model: &str, body: &'a Value, dir: &Path) -> Result<(Command, &'a str), Fail> {
+fn plan_call<'a>(
+    model: &str,
+    body: &'a Value,
+    dir: &Path,
+) -> Result<(Command, &'a str, bool), Fail> {
     let user = body["messages"][1]["content"].as_str().unwrap_or("");
     if user.len() > PLAN_STDIN {
         return Err(Fail::Strike("context length".into()));
@@ -1234,13 +1235,12 @@ fn plan_call<'a>(model: &str, body: &'a Value, dir: &Path) -> Result<(Command, &
         .env_remove("ANTHROPIC_AUTH_TOKEN")
         .env("CLAUDE_CODE_DISABLE_ADVISOR_TOOL", "1")
         .current_dir(dir);
-    Ok((cmd, user))
+    Ok((cmd, user, pick))
 }
 
 fn plan(model: &str, body: &Value, dir: &Path, usage: &mut Usage) -> Result<String, Fail> {
-    let (mut cmd, user) = plan_call(model, body, dir)?;
-    let schema = cmd.get_args().any(|a| a == "--json-schema");
-    let run = crate::update::run_for(&mut cmd, Some(user.as_bytes()), PLAN_DEADLINE);
+    let (mut cmd, user, schema) = plan_call(model, body, dir)?;
+    let run = crate::update::run_for(&mut cmd, Some(user.as_bytes()), DEADLINE);
     plan_reply(run, schema, usage)
 }
 
@@ -1258,7 +1258,7 @@ fn plan_reply(
     };
     let reply: Value = serde_json::from_str(&stdout).unwrap_or(Value::Null);
     usage.add_plan(&reply);
-    if status.success() && reply["is_error"] == false {
+    if status.success() && reply["is_error"] == false && reply["type"] == "result" {
         return Ok(match (schema, &reply["structured_output"]) {
             (true, Value::Null) => String::new(),
             (true, structured) => structured.to_string(),
@@ -1347,6 +1347,17 @@ mod tests {
         };
         let api = "base_url = \"http://127.0.0.1:9/v1/\"\nmodel = \"test/model\"\npick = true\n";
         assert_eq!(load(api).err().unwrap(), "no api-key");
+        assert_eq!(
+            load("pick = true\n").err().unwrap(),
+            "no base_url in extract.toml"
+        );
+        assert_eq!(
+            load("base_url = \"http://127.0.0.1:9/v1/\"\n")
+                .err()
+                .unwrap(),
+            "no model in extract.toml",
+            "model before api-key"
+        );
         fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -1357,16 +1368,24 @@ mod tests {
             .unwrap();
         let s = load(api).unwrap();
         assert!(
-            matches!(&s.route, Route::Api { base_url, key } if base_url == "http://127.0.0.1:9/v1" && key == "sk-test")
+            matches!(&s.provider, Provider::Api { base_url, key } if base_url == "http://127.0.0.1:9/v1" && key == "sk-test")
         );
         assert_eq!(
             (s.model.as_str(), s.pick, s.pick_cap),
             ("test/model", true, 10)
         );
+        let s = load(&format!("provider = \"\"\n{api}")).unwrap();
+        assert!(
+            matches!(s.provider, Provider::Api { .. }),
+            "an empty provider is no provider line"
+        );
         fs::remove_file(home.join("api-key")).unwrap();
 
         let s = load("provider = \"claude-code\"\nmodel = \"claude-sonnet-5-5\"\npick = true\npick_cap = 4\n").unwrap();
-        assert!(matches!(s.route, Route::Plan), "no base_url and no api-key");
+        assert!(
+            matches!(s.provider, Provider::Plan),
+            "no base_url and no api-key"
+        );
         assert_eq!(
             (s.model.as_str(), s.pick, s.pick_cap),
             ("claude-sonnet-5-5", true, 4)
@@ -1431,7 +1450,8 @@ mod tests {
             ("pick", "medium"),
         ] {
             let b = body(name);
-            let (cmd, stdin) = plan_call("claude-sonnet-5-5", &b, dir).unwrap();
+            let (cmd, stdin, with_schema) = plan_call("claude-sonnet-5-5", &b, dir).unwrap();
+            assert_eq!(with_schema, name == "pick", "{name}: --json-schema");
             let got = args(&cmd);
             assert_eq!(got[..15], flags(effort), "{name}");
             assert_eq!(stdin, "  [user] hi\n\n", "{name}: the user text as it is");
@@ -1539,6 +1559,14 @@ mod tests {
         assert_eq!(stop(ExitStatus::from_raw(9), ""), "claude exit signal 9");
         assert_eq!(stop(code(0), "Error: not JSON"), "claude exit 0");
         assert_eq!(stop(code(0), "{}"), "claude exit 0", "not a result");
+        assert_eq!(
+            stop(
+                code(0),
+                r#"{"type": "assistant", "is_error": false, "result": "Made-up text"}"#
+            ),
+            "claude exit 0: Made-up text",
+            "an object of another type"
+        );
     }
 
     #[test]

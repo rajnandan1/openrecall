@@ -837,7 +837,7 @@ def pick_home(orhome, toml, key):
             fh.write(key)
 
 
-def plan_provider(toml):
+def names_plan_provider(toml):
     """Whether `toml` names the Plan provider: its first `provider` line, read the way `Settings::load` reads it."""
     lines = (l.split("=", 1) for l in toml.splitlines() if "=" in l)
     return next((v.strip().strip('"') for k, v in lines if k.strip() == "provider"), None) == "claude-code"
@@ -846,7 +846,7 @@ def plan_provider(toml):
 def plan_env(env, provider):
     """A case home's `env` with what the Plan provider's `claude` needs when `provider` names it: the real Keychains
     linked into the scratch HOME, USER, and the folder of `claude` on the harness's own PATH first on PATH."""
-    if not provider or not plan_provider(provider[0]):
+    if not provider or not names_plan_provider(provider[0]):
         return env
     claude = shutil.which("claude")
     if not claude:
@@ -865,7 +865,7 @@ def real_provider():
     try:
         with open(os.path.join(orhome, "extract.toml")) as toml:
             text = toml.read()
-        if plan_provider(text):
+        if names_plan_provider(text):
             return text, None
         with open(os.path.join(orhome, "api-key")) as key:
             return text, key.read()

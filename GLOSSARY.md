@@ -245,7 +245,7 @@ How far extraction has read a session's transcript. The next run sends the whole
 _Avoid_: offset, checkpoint, watermark
 
 **Strike**:
-A failed extraction run that is the session's own fault: too long for the model, a reply still invalid after one retry, a reply cut off or filtered. The cursor stays; after 3 strikes the session is marked failed and never taken again. Any other failure stops the whole run instead, with every cursor where it was.
+A failed extraction run that is the session's own fault: too long for the model, a reply still invalid after one retry, a reply cut off or filtered, or a call to the Plan provider that runs past its 300 s deadline. The cursor stays; after 3 strikes the session is marked failed and never taken again. Any other failure stops the whole run instead, with every cursor where it was.
 _Avoid_: error, retry
 
 **Suggestion**:
