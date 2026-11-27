@@ -1,0 +1,655 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenRecall: Claude picks up where you left off</title>
+<meta name="description" content="OpenRecall is a Claude Code plugin. It hands a new session the handoff record of its branch and the few memories that match each prompt. Local Markdown, no model call before Claude answers.">
+<link rel="canonical" href="https://openrecall.dev/">
+<meta property="og:title" content="OpenRecall: Claude picks up where you left off">
+<meta property="og:description" content="A recall layer for Claude Code. Local Markdown, no model call before Claude answers.">
+<meta property="og:image" content="https://openrecall.dev/assets/og.png">
+<meta property="og:url" content="https://openrecall.dev/">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Azeret+Mono:wght@400;500;600&family=Inter:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#ffffff;--bg-2:#fbf8f4;--fg:#1c1917;--fg-muted:#57534e;--fg-dim:#a8a29e;
+  --accent:#c2410c;--accent-fg:#ffffff;--accent-2:#ea580c;--cta:#fdba74;--cta-hover:#fb923c;--key:#fff7ed;
+  --night:#1c1917;--cta-fg:#1c1917;--ok:#3f6b3f;--wait:#8a7d1a;--err:#b23a2f;
+  --grid-alpha:7%;
+  --border:color-mix(in srgb,var(--night) 16%,transparent);
+  --line-soft:color-mix(in srgb,var(--night) var(--grid-alpha),transparent);
+  --wash:linear-gradient(var(--line-soft),var(--line-soft));
+  --shadow:0 8px 22px color-mix(in srgb,var(--night) 10%,transparent);
+  --mono:"Azeret Mono",ui-monospace,monospace;
+  --sans:"Inter",system-ui,sans-serif;
+  --pill:20px;--dur:150ms;--max:1180px;--dot-gap:22px;--head-track:-2px;
+}
+*{box-sizing:border-box;margin:0}
+html{scroll-padding-top:140px}
+body{position:relative;background:radial-gradient(circle at 1px 1px,var(--line-soft) 1px,transparent 0) 0 0/var(--dot-gap) var(--dot-gap),var(--bg);color:var(--fg-muted);font:500 13px/1.65 var(--mono);-webkit-font-smoothing:antialiased}
+body::before{content:"";box-sizing:border-box;position:absolute;top:0;bottom:0;left:50%;width:min(var(--max),100%);transform:translateX(-50%);border-right:1px solid var(--line-soft);background:linear-gradient(to right,var(--line-soft) 1px,transparent 1px) 0 0/calc(100% / 6) 100%;pointer-events:none;z-index:-1}
+a{color:inherit;text-decoration:none}
+svg{display:block}
+code,pre{font-family:var(--mono)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.wrap{max-width:calc(var(--max) + 48px);margin:0 auto;padding:0 24px}
+.sec{padding:64px 0;border-bottom:1px solid var(--border)}
+.eyebrow{color:var(--accent);font-size:12px;margin-bottom:14px}
+h1,h2{color:var(--fg);font-weight:500;letter-spacing:var(--head-track);text-wrap:balance}
+h1{font-size:56px;line-height:1.05;max-width:900px}
+h2{font-size:34px;line-height:1.3;max-width:820px}
+.lede{font-size:13.5px;margin-top:14px;max-width:680px;text-wrap:pretty}
+
+.btn{display:inline-flex;align-items:center;gap:8px;padding:9px 14px;border:1px solid var(--border);background:var(--bg);color:var(--fg);font:600 12px/1.65 var(--mono);text-transform:lowercase;cursor:pointer;white-space:nowrap}
+.btn-primary{background:var(--fg);border-color:var(--fg);color:var(--bg)}
+.btn-accent{background:var(--cta);border-color:var(--cta);color:var(--cta-fg)}
+.btn-lg{padding:12px 20px;letter-spacing:.02em}
+
+/* nav */
+.nav{position:sticky;top:0;z-index:20;background:var(--bg)}
+.nav::after{content:"";position:absolute;left:0;right:0;bottom:-3px;height:3px;background:radial-gradient(circle,var(--border) 1px,transparent 1.1px) 0 50%/7px 3px}
+.nav .wrap{display:flex;align-items:center;gap:32px;height:62px}
+.logo{color:var(--fg)}
+.logo svg{height:22px;width:auto}
+.links{display:flex;gap:24px;font-size:12px}
+.links a{border-bottom:1px solid transparent}
+.nav-cta{margin-left:auto;display:flex;gap:8px}
+
+.subnav{position:fixed;top:62px;left:0;right:0;z-index:10;height:64px;background:var(--accent);color:var(--accent-fg);transform:translateY(-100%);visibility:hidden}
+.subnav.on{transform:none;visibility:visible}
+.subnav .wrap{display:flex;align-items:center;gap:28px;height:100%;font-size:12px}
+.subnav a b{color:var(--key);font-weight:500;margin-right:6px}
+.subnav .btn{margin-left:auto;border-color:var(--bg)}
+
+/* hero */
+.hero{padding:88px 0 64px}
+.hero .lede{font-size:14px;max-width:640px}
+.ctas{display:flex;flex-wrap:wrap;gap:10px;margin-top:28px}
+.oneliner{display:flex;align-items:center;gap:12px;margin-top:20px;max-width:100%;font-size:12px;color:var(--fg)}
+.oneliner code{overflow-x:auto;white-space:nowrap;padding:6px 0}
+.oneliner span{color:var(--fg-muted)}
+
+/* numbered figure */
+.fig{margin-top:36px;border:1px solid var(--border);background:radial-gradient(circle at 1px 1px,color-mix(in srgb,var(--night) 10%,transparent) 1.2px,transparent 0) 0 0/26px 26px,var(--bg-2);color:var(--fg)}
+.fig-bar{display:flex;align-items:center;gap:14px;padding:8px 12px;border-bottom:1px solid var(--border);background:var(--bg);color:var(--fg-muted);font-size:12px;letter-spacing:.04em;white-space:nowrap}
+.fig-bar .rule{flex:1;height:1px;background:var(--border)}
+.fig-bar .ic{padding:1px 5px;border:1px solid var(--border);letter-spacing:0;color:var(--fg)}
+.sheet{background:var(--bg);border:1px solid var(--border)}
+pre.code{margin:0;padding:18px 20px;font-size:12.5px;line-height:1.7;white-space:pre-wrap;word-break:break-word;color:var(--fg)}
+.k{color:var(--accent)}.s{color:var(--ok)}.c,.d{color:var(--fg-muted)}
+
+/* hero figure */
+.hero-fig{display:grid;grid-template-columns:1.35fr 1fr;gap:24px;padding:24px}
+.term{padding:16px 18px;font-size:12px;line-height:1.7;white-space:pre-wrap;word-break:break-word}
+.term .you{color:var(--fg);font-weight:600}
+.term .inj{display:block;margin:10px 0;padding:10px 12px;border-left:2px solid var(--accent);background:color-mix(in srgb,var(--accent) 4%,var(--bg))}
+.term .tag{display:block;color:var(--accent);font-size:12px;margin-bottom:4px}
+.term .ans{color:var(--fg)}
+.term .st{display:block;margin-top:10px;padding-top:8px;border-top:1px dashed var(--border);color:var(--fg-muted)}
+.board{display:flex;flex-direction:column;gap:14px;padding:18px;align-self:start}
+.board-top{display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--fg)}
+.live{display:inline-flex;align-items:center;gap:6px;padding:2px 10px;border:1px solid var(--border);border-radius:var(--pill);background:var(--bg);font-size:12px;letter-spacing:.1em;text-transform:uppercase}
+.live i{width:7px;height:7px;border-radius:50%;background:var(--ok)}
+.cells{display:grid;grid-template-columns:repeat(16,18px);gap:4px}
+.cells i{width:18px;height:18px;border:1px solid var(--border);background:var(--bg)}
+.cells i.lit{background:var(--accent-2);border-color:var(--accent-2)}
+.cells i.near{background:var(--wash),var(--bg)}
+.board p{font-size:12px;color:var(--fg-muted)}
+.board p b{color:var(--fg);font-weight:600}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);border-top:1px solid var(--border)}
+.stat{padding:18px 20px;background:var(--bg);border-right:1px solid var(--border)}
+.stat:last-child{border-right:0}
+.stat b{display:block;font-size:22px;font-weight:500;letter-spacing:-1px;color:var(--accent)}
+.stat span{display:block;margin-top:4px;font-size:12px}
+
+/* feature rail */
+.rail{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-top:36px;align-items:start}
+.rail .fig{margin-top:0}
+.rows{display:grid;border:1px solid var(--border);background:var(--bg)}
+.row{display:grid;grid-template-columns:32px 1fr;gap:4px 12px;padding:20px;border:0;border-bottom:1px solid var(--border);background:transparent;text-align:left;font:inherit;color:inherit;cursor:pointer}
+.row:last-child{border-bottom:0}
+.row[aria-pressed="true"]{background:var(--wash),var(--bg)}
+.row .n{grid-row:span 2;color:var(--accent);font-size:12px;padding-top:3px}
+.row b{font-size:18px;font-weight:600;color:var(--fg);letter-spacing:-.5px}
+.row span{font-size:12.5px}
+
+/* gate: three figure columns */
+.three{display:grid;grid-template-columns:repeat(3,1fr)}
+.col{padding:20px;border-right:1px solid var(--border);background:var(--bg)}
+.col:last-child{border-right:0}
+.col h3{font:500 13px/1.4 var(--sans);color:var(--fg)}
+.kpi{display:flex;align-items:center;gap:12px;margin:14px 0;font-size:20px;color:var(--fg)}
+.badge{padding:1px 6px;border:1px solid currentColor;font-size:12px;letter-spacing:.1em;text-transform:uppercase;color:var(--accent)}
+.kpi small{font-size:12px;color:var(--fg-muted)}
+.chart{width:100%;height:96px;margin-bottom:10px}
+table{width:100%;border-collapse:collapse;font-size:12px}
+td{padding:7px 0;border-top:1px solid var(--line-soft);vertical-align:top}
+td:last-child{text-align:right;padding-left:10px;white-space:nowrap}
+.ok{color:var(--ok)}.err{color:var(--err)}.wait{color:var(--wait)}
+
+/* blue band */
+.band{background:radial-gradient(circle at 1px 1px,color-mix(in srgb,var(--accent-fg) 22%,transparent) 1px,transparent 0) 0 0/var(--dot-gap) var(--dot-gap),var(--accent);color:var(--accent-fg)}
+.band .wrap{display:grid;grid-template-columns:1fr 1fr;gap:48px;align-items:center;padding-top:72px;padding-bottom:72px}
+.band .eyebrow{color:var(--key)}
+.band h2{color:var(--accent-fg);font-size:28px;line-height:1.65;letter-spacing:-1px}
+.band .btn{margin-top:24px;border-color:var(--bg);color:var(--accent)}
+.timing{position:relative;padding:22px;background:var(--bg);color:var(--fg);border:1px solid var(--border)}
+.timing h3{font:500 12px/1.4 var(--sans);color:var(--fg-muted);margin-bottom:14px}
+.lane{display:grid;grid-template-columns:150px 1fr;gap:12px;align-items:center;padding:9px 0;border-top:1px solid var(--line-soft);font-size:12px}
+.bar{height:14px;background:var(--wash),var(--bg-2);position:relative}
+.bar i{position:absolute;top:0;bottom:0;background:var(--accent-2)}
+.tip{position:absolute;right:22px;top:-18px;padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-left:3px solid var(--accent);box-shadow:var(--shadow);font-size:12px;color:var(--fg)}
+
+/* step table */
+.pill{padding:1px 9px;border:1px solid currentColor;border-radius:var(--pill);font-size:12px;white-space:nowrap}
+.flow{overflow-x:auto;padding:6px 4px;background:var(--bg)}
+.flow table{min-width:860px;font-size:12.5px}
+.flow th{padding:10px 16px;text-align:left;font-weight:500;color:var(--fg-muted);border-bottom:1px solid var(--border)}
+.flow td{padding:14px 16px;text-align:left;vertical-align:top;white-space:normal}
+.flow td:first-child{white-space:nowrap;color:var(--fg)}
+.flow td:first-child b{display:inline-block;width:22px;color:var(--accent);font-weight:500}
+.flow td:nth-child(2){white-space:nowrap}
+.flow td:last-child{text-align:left;white-space:nowrap}
+.flow code{color:var(--accent)}
+.flow tr.hot td{background:color-mix(in srgb,var(--accent) 6%,var(--bg))}
+.flow .pill{color:var(--fg-muted)}
+.flow tr.hot .pill{color:var(--accent)}
+.store{display:grid;grid-template-columns:1.4fr 1fr;border-top:1px solid var(--border)}
+.store>div{display:grid;gap:4px;padding:18px 20px}
+.store small{font-size:12px;letter-spacing:.12em;text-transform:uppercase}
+.store b{font-size:18px;font-weight:500}
+.store span{font-size:12.5px}
+.disk{background:var(--accent);color:var(--accent-fg)}
+.cache{background:color-mix(in srgb,var(--accent) 12%,var(--bg));color:var(--fg)}
+
+/* run list */
+.runs{overflow-x:auto;padding:6px 4px;background:var(--bg)}
+.runs table{min-width:760px;font-size:12px}
+.runs td{padding:12px 16px;border-top:1px solid var(--line-soft);text-align:left;white-space:nowrap}
+.runs tr:first-child td{border-top:0}
+.runs td:last-child{text-align:right}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:currentColor}
+.runs .pill{color:var(--accent)}
+
+/* install */
+.code-wrap{position:relative;padding:18px}
+.code-wrap .btn{position:absolute;top:28px;right:28px}
+.checks{display:grid;grid-template-columns:repeat(3,1fr);gap:24px;margin-top:28px;list-style:none;padding:0}
+.checks li b{display:block;color:var(--accent);font-weight:500;margin-bottom:6px}
+.checks code{color:var(--fg)}
+
+/* faq */
+.faq{margin-top:36px}
+details{border-bottom:1px solid var(--border)}
+details:first-child{border-top:1px solid var(--border)}
+summary{display:flex;gap:14px;align-items:baseline;padding:18px 4px;cursor:pointer;list-style:none;font-size:14px;color:var(--fg)}
+summary::-webkit-details-marker{display:none}
+summary::before{content:">";color:var(--accent)}
+summary::after{content:"[+]";margin-left:auto;color:var(--fg-muted)}
+details[open] summary::after{content:"[\2212]"}
+details p{padding:0 4px 20px 28px;max-width:760px}
+details code{color:var(--fg)}
+
+/* footer */
+footer .cols{display:grid;grid-template-columns:2fr repeat(4,1fr);gap:24px;padding-top:56px;padding-bottom:40px;font-size:12px}
+footer h3{font-size:12px;font-weight:500;color:var(--fg-muted);margin-bottom:10px}
+footer ul{list-style:none;padding:0;display:grid;gap:6px}
+footer li a{color:var(--fg)}
+footer .note{margin-top:14px;max-width:300px}
+footer .legal{display:flex;justify-content:space-between;gap:24px;padding-top:18px;padding-bottom:28px;border-top:1px solid var(--border);font-size:12px}
+
+/* video */
+dialog{padding:0;border:0;background:transparent;width:min(1040px,calc(100vw - 32px))}
+dialog::backdrop{background:color-mix(in srgb,var(--night) 70%,transparent)}
+dialog video{display:block;width:100%;aspect-ratio:16/9;background:var(--fg)}
+dialog form{position:absolute;top:10px;right:10px}
+
+@media (prefers-reduced-motion:no-preference){
+  html{scroll-behavior:smooth}
+  .btn,.links a,.row,footer li a,.subnav a,summary::after{transition:background-color var(--dur) ease,border-color var(--dur) ease,color var(--dur) ease}
+  .subnav{transition:transform 250ms ease,visibility 250ms}
+  .live i{animation:blink 2s step-end infinite}
+  .cells i.lit{animation:pulse 2.4s steps(1) infinite}
+  .cells i.lit:nth-child(3n){animation-delay:.8s}
+  .cells i.lit:nth-child(3n+1){animation-delay:1.6s}
+}
+@keyframes blink{50%{opacity:0}}
+@keyframes pulse{50%{background:var(--accent);border-color:var(--accent)}}
+@media (hover:hover){
+  .btn:hover{border-color:var(--accent);color:var(--accent)}
+  .btn-primary:hover{background:var(--accent);border-color:var(--accent);color:var(--accent-fg)}
+  .btn-accent:hover{background:var(--cta-hover);border-color:var(--cta-hover);color:var(--cta-fg)}
+  .band .btn:hover,.subnav .btn:hover{background:var(--cta);border-color:var(--cta);color:var(--cta-fg)}
+  .links a:hover{border-color:var(--accent);color:var(--accent)}
+  .row:hover{background:var(--wash),var(--bg)}
+  footer li a:hover{color:var(--accent)}
+  .subnav a:not(.btn):hover{text-decoration:underline}
+  summary:hover::after{color:var(--accent)}
+}
+
+@media (max-width:980px){
+  .links,.subnav{display:none}
+  h1{font-size:40px;letter-spacing:-1px}
+  h2{font-size:28px;letter-spacing:-1px}
+  .hero-fig,.rail,.band .wrap,.three{grid-template-columns:1fr}
+  .col{border-right:0;border-bottom:1px solid var(--border)}
+  .stats{grid-template-columns:1fr 1fr}
+  .stat:nth-child(2){border-right:0}
+  .stat:nth-child(-n+2){border-bottom:1px solid var(--border)}
+  .store{grid-template-columns:1fr}
+  .flow table{min-width:0}
+  .flow thead{display:none}
+  .flow tr,.flow td{display:block}
+  .flow tr{padding:14px 0;border-top:1px solid var(--line-soft)}
+  .flow tr:first-child{border-top:0}
+  .flow td,.flow tr td:first-child{padding:3px 16px;border:0;white-space:normal}
+  .checks{grid-template-columns:1fr}
+  footer .cols{grid-template-columns:1fr 1fr}
+}
+@media (max-width:560px){
+  h1{font-size:32px;letter-spacing:-1px}
+  .nav-cta .btn:not(.btn-accent){display:none}
+  .hero{padding-top:48px}
+  .hero-fig{padding:12px}
+  .cells{grid-template-columns:repeat(16,1fr);gap:3px}
+  .cells i{width:auto;height:auto;aspect-ratio:1}
+  .fig-bar .rule{display:none}
+  .fig-bar{white-space:normal}
+  .code-wrap .btn{position:static;margin-top:10px}
+  .tip{position:static;display:inline-block;margin-bottom:12px}
+  .lane{grid-template-columns:1fr}
+  footer .legal{flex-direction:column}
+}
+</style>
+</head>
+<body>
+
+<header class="nav">
+  <div class="wrap">
+    <a class="logo" href="#top" aria-label="OpenRecall home">
+      <svg viewBox="-24 30 1192 240" role="img" aria-label="OpenRecall"><g transform="translate(-6.5 68.7) scale(0.65)" fill="none" stroke-linecap="round" stroke-linejoin="round" stroke="var(--accent)" stroke-width="28"><path d="M24 196 C52.8 196 75.3 192.1 95 183.8"/><path d="M155.8 139.8 C166.3 128.4 172 116.7 172 100 A44 44 0 1 0 84 100 C84 128 100 142 128 164 C156 186 186 196 232 196"/></g><g transform="translate(196 0)" fill="none" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor" stroke-width="20"><path d="M50 110 A40 40 0 1 0 50.01 110"/><path d="M130 240 V110 M130 150 A40 40 0 1 1 130 150.01"/><path d="M250 150 H330 A40 40 0 1 0 318.3 178.3"/><path d="M370 190 V110 M370 150 A40 40 0 0 1 450 150 V190"/><path d="M490 190 V110 M490 150 A40 40 0 0 1 530 110"/><path d="M562 150 H642 A40 40 0 1 0 630.3 178.3"/><path d="M750.3 121.7 A40 40 0 1 0 750.3 178.3"/><path d="M822 110 A40 40 0 1 0 822.01 110 M862 110 V190"/><path d="M902 60 V190 M942 60 V190"/></g></svg>
+    </a>
+    <nav class="links" aria-label="Sections">
+      <a href="#how">how it works</a>
+      <a href="#gate">the gate</a>
+      <a href="#layers">architecture</a>
+      <a href="#install">install</a>
+      <a href="#faq">faq</a>
+    </nav>
+    <div class="nav-cta">
+      <a class="btn" href="https://github.com/rajnandan1/openrecall">github ↗</a>
+      <a class="btn btn-accent" href="#install">install</a>
+    </div>
+  </div>
+</header>
+
+<nav class="subnav" aria-label="Sections, compact" id="subnav">
+  <div class="wrap">
+    <a href="#how"><b>[1]</b>how it works</a>
+    <a href="#gate"><b>[2]</b>the gate</a>
+    <a href="#layers"><b>[3]</b>architecture</a>
+    <a href="#extraction"><b>[4]</b>extraction</a>
+    <a href="#install"><b>[5]</b>install</a>
+    <a href="#faq"><b>[6]</b>faq</a>
+    <a class="btn" href="#install">install openrecall</a>
+  </div>
+</nav>
+
+<main id="top">
+  <section class="sec hero" id="hero">
+    <div class="wrap">
+      <p class="eyebrow"># openrecall · v0.3.0 · a plugin for claude code</p>
+      <h1>Claude picks up where you left off.</h1>
+      <p class="lede">A new Claude Code session starts blank. OpenRecall hands it what the last session on the same branch knew: the goal, the ticket, the PR, the commands that worked and what you asked last. It runs locally, in a few milliseconds, with no model call before Claude answers.</p>
+      <div class="ctas">
+        <a class="btn btn-accent btn-lg" href="#install">install openrecall</a>
+        <button class="btn btn-lg" type="button" data-video>▶ watch the launch video</button>
+        <a class="btn btn-primary btn-lg" href="https://github.com/rajnandan1/openrecall">read the readme</a>
+      </div>
+      <p class="oneliner"><span>$</span><code>curl -fsSL https://raw.githubusercontent.com/rajnandan1/openrecall/main/install.sh | sh</code></p>
+
+      <figure class="fig" aria-label="Figure 1: a new session gets the handoff record and three memories">
+        <div class="fig-bar"><span class="ic">&gt;_</span><span class="rule"></span><span>[ fig. 1 · new session · branch abc-12-empty-rows · example ]</span><span class="rule"></span><span class="ic">⌗</span></div>
+        <div class="hero-fig">
+<div class="sheet term"><span class="d">~/acme/exporter (abc-12-empty-rows) $ claude</span>
+<span class="you">&gt; pick up ABC-12, the Windows job still times out</span>
+<span class="inj"><span class="tag">openrecall · handoff record · written 2026-09-30T17:42:08Z</span><span class="k">## Goal</span>
+Fix ABC-12 so exports stop failing on empty rows
+<span class="k">## Identifiers</span>
+tickets: ABC-12
+prs: #48
+paths: src/export.rs, tests/export.rs
+commands:
+- cargo test export
+<span class="k">## Last ask</span>
+open the PR and wait for CI
+<span class="k">## Last answer</span>
+Opened #48. CI passes except the Windows job, which times out in `cargo test export`.</span><span class="inj"><span class="tag">openrecall · recalled memories</span>- gotcha 2026-09-28 …/windows-runner-timeout: The Windows CI runner kills any single test that runs longer than 60 s.
+- state 2026-09-30 …/abc-12: ABC-12: PR #48 is open. CI passes except the Windows job.
+- pointer 2026-09-26 …/row-writer: Rows are written in src/export.rs, in `write_row()`.</span><span class="ans">● The Windows runner kills any test over 60 s, and `cargo test export` runs longer there. I will split the slow test in tests/export.rs and push to #48.</span>
+<span class="st">recall 4 · 4 ms</span></div>
+          <div class="sheet board">
+            <div class="board-top"><span>index.db · 112 memories</span><span class="live"><i></i>live</span></div>
+            <div class="cells" id="cells" aria-hidden="true"></div>
+            <p><b>3 passed the gate.</b> Each square is one memory. OpenRecall scored every memory against the prompt, and only a score of 1.50 or more gets in.</p>
+            <p>The handoff record counts as one more injection, so the status line reads <b>recall 4</b>.</p>
+          </div>
+        </div>
+        <div class="stats">
+          <div class="stat"><b>0</b><span>model calls between your prompt and Claude's answer</span></div>
+          <div class="stat"><b>≤ 3</b><span>recalled memory lines per prompt, about 400 tokens</span></div>
+          <div class="stat"><b>800</b><span>tokens at most for the handoff record of a branch</span></div>
+          <div class="stat"><b>1.50</b><span>the gate: the lowest score that gets injected</span></div>
+        </div>
+      </figure>
+    </div>
+  </section>
+
+  <section class="sec" id="how">
+    <div class="wrap">
+      <p class="eyebrow"># how it works</p>
+      <h2>Four hooks, one binary, plain files.</h2>
+      <p class="lede">OpenRecall hooks into Claude Code at four moments and keeps everything as Markdown on your disk.</p>
+      <div class="rail">
+        <div class="rows" role="group" aria-label="Parts of OpenRecall">
+          <button class="row" type="button" aria-pressed="true" data-pane="0"><span class="n">01</span><b>Handoff record</b><span>At the end of each turn, OpenRecall writes one Markdown record for the branch. The next session on that branch gets it once per context window.</span></button>
+          <button class="row" type="button" aria-pressed="false" data-pane="1"><span class="n">02</span><b>Recall</b><span>On each prompt, OpenRecall scores your memories against the prompt. The gate lets through at most three lines.</span></button>
+          <button class="row" type="button" aria-pressed="false" data-pane="2"><span class="n">03</span><b>MCP tools</b><span>When Claude needs more, it calls recall, remember or forget. You just ask in plain words.</span></button>
+          <button class="row" type="button" aria-pressed="false" data-pane="3"><span class="n">04</span><b>Local files</b><span>Memories and records are Markdown under ~/.openrecall. Secrets become [REDACTED:rule-id] before a write.</span></button>
+          <button class="row" type="button" aria-pressed="false" data-pane="4"><span class="n">05</span><b>Extraction</b><span>Optional. After a session ends, a worker writes the facts that a later session would need.</span></button>
+        </div>
+        <figure class="fig" aria-label="Figure 2: what each part writes or injects">
+          <div class="fig-bar"><span class="ic">&gt;_</span><span class="rule"></span><span>[ fig. 2 · <span id="pane-name">handoff record</span> ]</span><span class="rule"></span><span class="ic">⌗</span></div>
+          <div class="panes">
+<pre class="code" data-name="handoff record"><span class="c"># ~/.openrecall/repos/github.com/acme/exporter/handoffs/abc-12-empty-rows.md</span>
+<span class="c"># written by the Stop hook: openrecall capture</span>
+
+<span class="k">## Goal</span>
+Fix ABC-12 so exports stop failing on empty rows
+<span class="k">## Identifiers</span>
+tickets: ABC-12
+prs: #48
+paths: src/export.rs, tests/export.rs
+commands:
+- cargo test export
+<span class="k">## Last ask</span>
+open the PR and wait for CI
+<span class="k">## Last answer</span>
+Opened #48. CI passes except the Windows job, which times out
+in `cargo test export`. Next: find out why Windows is slow.
+<span class="k">## My notes</span>
+<span class="c"># your own section: OpenRecall keeps it on each update</span>
+Check the runner time limit before the next push.</pre>
+<pre class="code" data-name="recall" hidden><span class="c"># UserPromptSubmit hook: openrecall recall</span>
+<span class="c"># added to Claude's context, before Claude reads the prompt</span>
+
+Recalled memories from earlier sessions (OpenRecall). They reflect
+what was true when written. Full text: mcp__plugin_openrecall_openrecall__recall
+with the address.
+- <span class="k">gotcha</span> 2026-09-28 <span class="s">github.com/acme/exporter/windows-runner-timeout</span>:
+  The Windows CI runner kills any single test that runs longer than 60 s.
+
+<span class="c"># the gate: constants in src/index.rs</span>
+<span class="k">MAX_LINES</span> = 3        <span class="c"># memories per prompt</span>
+<span class="k">MAX_CHARS</span> = 1040     <span class="c"># about 400 tokens</span>
+<span class="k">GATE</span>      = 1.50     <span class="c"># lowest score that gets in</span>
+<span class="k">MIN_ROWS</span>  = 10       <span class="c"># below this index size, inject nothing</span></pre>
+<pre class="code" data-name="mcp tools" hidden><span class="c"># you: "remember that the Windows runner kills tests after 60 s"</span>
+<span class="c"># Claude calls:</span>
+<span class="k">remember</span>({
+  <span class="k">"type"</span>:  <span class="s">"gotcha"</span>,
+  <span class="k">"scope"</span>: <span class="s">"repo"</span>,
+  <span class="k">"text"</span>:  <span class="s">"The Windows CI runner kills any single test that runs longer than 60 s."</span>
+})
+<span class="c">→ Stored as github.com/acme/exporter/windows-runner-timeout</span>
+
+<span class="k">recall</span>({ <span class="k">"query"</span>: <span class="s">"windows runner timeout"</span>, <span class="k">"k"</span>: 5 })
+<span class="c">→ finds the matching memories and skips the gate</span>
+
+<span class="k">forget</span>({ <span class="k">"id"</span>: <span class="s">"github.com/acme/exporter/windows-runner-timeout"</span> })</pre>
+<pre class="code" data-name="local files" hidden><span class="k">~/.openrecall/</span>
+├── repos/github.com/acme/exporter/
+│   ├── windows-runner-timeout.md
+│   ├── csv-quoting.md
+│   ├── claude-md-suggestions.md   <span class="c"># rules you may copy into CLAUDE.md</span>
+│   └── handoffs/
+│       ├── abc-12-empty-rows.md
+│       └── retired/               <span class="c"># no update for 7 days</span>
+├── global/                        <span class="c"># every repo may recall these</span>
+├── index.db                       <span class="c"># a cache: delete it at any time</span>
+├── log/openrecall.jsonl
+└── status/&lt;session_id&gt;            <span class="c"># recall 4 · 4 ms</span>
+
+<span class="c"># off for one session</span>
+OPENRECALL=0 claude</pre>
+<pre class="code" data-name="extraction" hidden><span class="c"># ~/.openrecall/extract.toml (off until this file and api-key exist)</span>
+<span class="k">base_url</span> = <span class="s">"https://openrouter.ai/api/v1"</span>
+<span class="k">model</span>    = <span class="s">"anthropic/claude-sonnet-5.5"</span>
+
+<span class="c"># SessionEnd hook: openrecall extract</span>
+<span class="c"># 2 model calls a session, about $0.085 with this model</span>
+<span class="c"># call 1 writes facts: decision, preference, pointer, state, gotcha</span>
+<span class="c"># call 2 is dedupe: new, skip or replace</span>
+<span class="c"># secrets become [REDACTED:rule-id] before anything leaves</span></pre>
+          </div>
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec" id="gate">
+    <div class="wrap">
+      <p class="eyebrow"># the gate</p>
+      <h2>It adds little, and only when it matches.</h2>
+      <p class="lede">A handoff record once per context window. At most three memory lines per prompt. Nothing at all for short prompts.</p>
+      <figure class="fig" aria-label="Figure 3: when OpenRecall injects and when it skips">
+        <div class="fig-bar"><span class="ic">&gt;_</span><span class="rule"></span><span>[ fig. 3 · the gate · example prompts ]</span><span class="rule"></span><span class="ic">⌗</span></div>
+        <div class="three">
+          <div class="col">
+            <h3>Handoff record</h3>
+            <div class="kpi"><span class="badge">once</span>1 <small>per context window</small></div>
+            <table>
+              <tr><td>prompt names ABC-12</td><td class="ok">inject</td></tr>
+              <tr><td>prompt names src/export.rs, before the first turn ends</td><td class="ok">inject</td></tr>
+              <tr><td>one turn finished on the branch</td><td class="ok">inject</td></tr>
+              <tr><td>this session wrote the record</td><td class="err">skip</td></tr>
+              <tr><td>prompt of 2,000 characters or more</td><td class="err">no match</td></tr>
+            </table>
+          </div>
+          <div class="col">
+            <h3>Recalled memories</h3>
+            <div class="kpi"><span class="badge">gate</span>1.50 <small>lowest score in</small></div>
+            <svg class="chart" viewBox="0 0 300 96" preserveAspectRatio="none" aria-hidden="true">
+              <line x1="0" x2="300" y1="40" y2="40" stroke="var(--accent)" stroke-dasharray="4 4" stroke-width="1"/>
+              <polyline fill="none" stroke="var(--accent-2)" stroke-width="2" points="0,8 43,22 86,34 129,52 171,62 214,70 257,78 300,86"/>
+              <g fill="var(--accent-2)"><circle cx="4" cy="8" r="3"/><circle cx="43" cy="22" r="3"/><circle cx="86" cy="34" r="3"/></g>
+            </svg>
+            <table>
+              <tr><td>2.41 · gotcha · windows-runner-timeout</td><td class="ok">inject</td></tr>
+              <tr><td>1.87 · state · abc-12</td><td class="ok">inject</td></tr>
+              <tr><td>1.62 · pointer · row-writer</td><td class="ok">inject</td></tr>
+              <tr><td>1.12 · decision · csv-quoting</td><td class="err">blocked</td></tr>
+            </table>
+          </div>
+          <div class="col">
+            <h3>No recall at all</h3>
+            <div class="kpi"><span class="badge">skip</span>0 <small>lines, by design</small></div>
+            <table>
+              <tr><td>"fix typo" · under 4 words, no identifier</td><td class="err">skip</td></tr>
+              <tr><td>"/compact" · slash command, no arguments</td><td class="err">skip</td></tr>
+              <tr><td>task notification</td><td class="err">skip</td></tr>
+              <tr><td>prompt inside a subagent</td><td class="err">skip</td></tr>
+              <tr><td>expired state, or a pointer to deleted code</td><td class="err">never</td></tr>
+            </table>
+          </div>
+        </div>
+      </figure>
+    </div>
+  </section>
+
+  <section class="band" aria-labelledby="band-title">
+    <div class="wrap">
+      <div>
+        <p class="eyebrow"># speed</p>
+        <h2 id="band-title">No model call between your prompt and Claude's answer. The hook adds a few milliseconds.</h2>
+        <a class="btn btn-lg" href="https://github.com/rajnandan1/openrecall#recalled-memories">read how recall works</a>
+      </div>
+      <div class="timing">
+        <span class="tip">status line · recall 4 · 4 ms</span>
+        <h3>One prompt, example timeline</h3>
+        <div class="lane"><span>you press enter</span><div class="bar"><i style="left:0;width:1%"></i></div></div>
+        <div class="lane"><span>openrecall recall</span><div class="bar"><i style="left:1%;width:2%"></i></div></div>
+        <div class="lane"><span>claude reads + answers</span><div class="bar"><i style="left:3%;width:96%"></i></div></div>
+        <div class="lane"><span>openrecall capture</span><div class="bar"><i style="left:99%;width:1%"></i></div></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec" id="layers">
+    <div class="wrap">
+      <p class="eyebrow"># architecture</p>
+      <h2>What runs, and when.</h2>
+      <p class="lede">The plugin holds no code. It tells Claude Code to run one binary, <code>openrecall</code>, at four moments of a session. Only the prompt step runs before Claude answers. The other steps run in the background.</p>
+      <figure class="fig" aria-label="Figure 4: what OpenRecall runs at each moment of a session">
+        <div class="fig-bar"><span class="ic">&gt;_</span><span class="rule"></span><span>[ fig. 4 · one session, step by step ]</span><span class="rule"></span><span class="ic">⌗</span></div>
+        <div class="flow">
+          <table>
+            <thead><tr><th>when, in claude code</th><th>openrecall runs</th><th>what it does</th><th>timing</th></tr></thead>
+            <tbody>
+              <tr><td><b>1</b>the session starts</td><td><code>openrecall handoff</code></td><td>Notes the branch. Retires records with no update for 7 days. Starts the update check and the extraction worker.</td><td><span class="pill">background</span></td></tr>
+              <tr class="hot"><td><b>2</b>you send a prompt</td><td><code>openrecall recall</code></td><td>Adds the handoff record of the branch and at most 3 matching memories to Claude's context. Writes the status line.</td><td><span class="pill">before Claude reads it · a few ms</span></td></tr>
+              <tr><td><b>3</b>Claude finishes a turn</td><td><code>openrecall capture</code></td><td>Updates the handoff record of the branch: goal, identifiers, last ask, last answer.</td><td><span class="pill">background</span></td></tr>
+              <tr><td><b>4</b>the session ends</td><td><code>openrecall extract</code></td><td>Optional. Sends the session to your model provider and writes new facts.</td><td><span class="pill">background</span></td></tr>
+              <tr><td><b>*</b>Claude calls a tool</td><td><code>openrecall mcp</code></td><td>Serves the recall, remember and forget tools.</td><td><span class="pill">only when Claude asks</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="store">
+          <div class="disk"><small>source of truth</small><b>~/.openrecall/</b><span>Memories, handoff records, the log and status lines, as files you can read and edit.</span></div>
+          <div class="cache"><small>cache</small><b>index.db</b><span>A search index that OpenRecall builds from those files. Delete it at any time.</span></div>
+        </div>
+      </figure>
+    </div>
+  </section>
+
+  <section class="sec" id="extraction">
+    <div class="wrap">
+      <p class="eyebrow"># extraction, optional</p>
+      <h2>Facts that write themselves, if you want them.</h2>
+      <p class="lede">Off until you add an API key for any OpenAI-style endpoint. After a session ends, or after 30 quiet minutes, a background worker writes the facts that a later session would need. It never runs between your prompt and Claude's answer.</p>
+      <figure class="fig" aria-label="Figure 5: example extraction runs">
+        <div class="fig-bar"><span class="ic">&gt;_</span><span class="rule"></span><span>[ fig. 5 · extraction runs · example ]</span><span class="rule"></span><span class="ic">⌗</span></div>
+        <div class="runs">
+          <table>
+            <tr><td class="wait"><span class="dot"></span></td><td>session 5d1e…a7</td><td><span class="pill">claude-sonnet-5.5</span></td><td>ended</td><td>running</td><td>—</td><td>now</td></tr>
+            <tr><td class="ok"><span class="dot"></span></td><td>session 4be1…c2</td><td><span class="pill">claude-sonnet-5.5</span></td><td>ended</td><td>3 new · 1 skip</td><td>$0.081</td><td>12 min ago</td></tr>
+            <tr><td class="ok"><span class="dot"></span></td><td>session 91fa…07</td><td><span class="pill">claude-sonnet-5.5</span></td><td>quiet 30 min</td><td>2 new · 1 replace</td><td>$0.092</td><td>1 h ago</td></tr>
+            <tr><td class="ok"><span class="dot"></span></td><td>session 0c7d…5e</td><td><span class="pill">claude-sonnet-5.5</span></td><td>ended</td><td>0 new · 2 skip</td><td>$0.064</td><td>3 h ago</td></tr>
+          </table>
+        </div>
+      </figure>
+    </div>
+  </section>
+
+  <section class="sec" id="install">
+    <div class="wrap">
+      <p class="eyebrow"># install</p>
+      <h2>Install in three commands.</h2>
+      <p class="lede">You need macOS on Apple silicon. The first command checks the SHA-256 hash of the binary and needs no Rust.</p>
+      <figure class="fig" aria-label="Figure 6: install commands">
+        <div class="fig-bar"><span class="ic">&gt;_</span><span class="rule"></span><span>[ fig. 6 · install ]</span><span class="rule"></span><span class="ic">⌗</span></div>
+        <div class="code-wrap">
+<pre class="code sheet" id="cmds"><span class="c"># 1. the binary, into ~/.local/bin</span>
+curl -fsSL https://raw.githubusercontent.com/rajnandan1/openrecall/main/install.sh | sh
+
+<span class="c"># 2. the plugin marketplace</span>
+claude plugin marketplace add rajnandan1/openrecall
+
+<span class="c"># 3. the hooks and the MCP server</span>
+claude plugin install openrecall@openrecall</pre>
+          <button class="btn" type="button" data-copy>copy</button>
+        </div>
+      </figure>
+      <ol class="checks" aria-label="Check that it works">
+        <li><b>01</b>Open Claude Code in a git repo, on any branch except <code>main</code> or <code>master</code>.</li>
+        <li><b>02</b>Send one prompt and wait for the answer.</li>
+        <li><b>03</b>Run <code>find ~/.openrecall/repos -path '*/handoffs/*.md'</code>. You see the record for your branch.</li>
+      </ol>
+    </div>
+  </section>
+
+  <section class="sec" id="faq">
+    <div class="wrap">
+      <p class="eyebrow"># faq</p>
+      <h2>Questions.</h2>
+      <div class="faq">
+        <details><summary>does openrecall send my code anywhere?</summary><p>No. Memories and handoff records stay in <code>~/.openrecall/</code>. Only extraction sends text out, to the provider that you choose, and it is off until you configure it.</p></details>
+        <details><summary>does it slow down my prompts?</summary><p>OpenRecall calls no model between your prompt and the start of Claude's answer. The hook adds a few milliseconds. The status line shows the time, for example <code>recall 3 · 4 ms</code>.</p></details>
+        <details><summary>how much context does it add?</summary><p>At most one handoff record of about 800 tokens, once per context window. On each prompt, at most 3 memory lines of about 400 tokens in all. Often it adds nothing, because nothing passed the gate.</p></details>
+        <details><summary>does it change claude.md or claude code's built-in memory?</summary><p>No. OpenRecall reads the built-in memory and never writes there. Extraction writes suggested rules to <code>claude-md-suggestions.md</code>, and you copy the ones that you want by hand.</p></details>
+        <details><summary>how does it update?</summary><p>In the background, at most once in 24 hours. It checks the SHA-256 hash of each new binary. To turn it off, set <code>OPENRECALL_UPDATE</code> to <code>0</code> in the <code>env</code> key of <code>~/.claude/settings.json</code>.</p></details>
+        <details><summary>how do i remove it?</summary><p>Run <code>claude plugin uninstall openrecall@openrecall</code>, then delete <code>~/.local/bin/openrecall</code>. To delete every memory and handoff record too, delete <code>~/.openrecall</code>. You cannot undo that step.</p></details>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap cols">
+    <div>
+      <a class="logo" href="#top" aria-label="OpenRecall home"><svg viewBox="0 0 256 256" width="28" height="28" aria-hidden="true"><g fill="none" stroke-linecap="round" stroke-linejoin="round" stroke="var(--accent)" stroke-width="28"><path d="M24 196 C52.8 196 75.3 192.1 95 183.8"/><path d="M155.8 139.8 C166.3 128.4 172 116.7 172 100 A44 44 0 1 0 84 100 C84 128 100 142 128 164 C156 186 186 196 232 196"/></g></svg></a>
+      <p class="note">An independent open-source recall layer for Claude Code. Anthropic does not make OpenRecall.</p>
+    </div>
+    <div><h3>product</h3><ul><li><a href="#how">how it works</a></li><li><a href="#gate">the gate</a></li><li><a href="#layers">architecture</a></li><li><a href="#install">install</a></li></ul></div>
+    <div><h3>docs</h3><ul><li><a href="https://github.com/rajnandan1/openrecall#handoff-records">handoff records</a></li><li><a href="https://github.com/rajnandan1/openrecall#recalled-memories">recalled memories</a></li><li><a href="https://github.com/rajnandan1/openrecall#mcp-tools">mcp tools</a></li><li><a href="https://github.com/rajnandan1/openrecall#extraction-optional">extraction</a></li></ul></div>
+    <div><h3>project</h3><ul><li><a href="https://github.com/rajnandan1/openrecall">github</a></li><li><a href="https://github.com/rajnandan1/openrecall/releases">releases</a></li><li><a href="https://github.com/rajnandan1/openrecall/issues">issues</a></li></ul></div>
+    <div><h3>legal</h3><ul><li><a href="https://github.com/rajnandan1/openrecall/blob/main/LICENSE">mit license</a></li></ul></div>
+  </div>
+  <div class="wrap legal"><span>© 2026 OpenRecall. MIT license.</span><span>openrecall.dev</span></div>
+</footer>
+
+<dialog id="video" aria-label="OpenRecall launch video">
+  <video controls playsinline preload="none" poster="assets/launch-poster.jpg" src="assets/launch.mp4"></video>
+  <form method="dialog"><button class="btn" type="submit">close</button></form>
+</dialog>
+
+<script>
+const lit = new Set([18, 53, 90]);
+const near = new Set([7, 34, 61, 77, 102]);
+document.getElementById("cells").innerHTML = Array.from({ length: 112 }, (_, i) =>
+  `<i${lit.has(i) ? ' class="lit"' : near.has(i) ? ' class="near"' : ""}></i>`).join("");
+
+const rows = document.querySelectorAll("[data-pane]");
+const panes = document.querySelectorAll(".panes pre");
+rows.forEach(row => row.addEventListener("click", () => {
+  rows.forEach(r => r.setAttribute("aria-pressed", r === row));
+  panes.forEach((p, i) => p.hidden = i !== +row.dataset.pane);
+  document.getElementById("pane-name").textContent = panes[row.dataset.pane].dataset.name;
+}));
+
+document.querySelector("[data-copy]").addEventListener("click", e => {
+  const text = document.getElementById("cmds").innerText.split("\n").filter(l => l && !l.startsWith("#")).join("\n");
+  navigator.clipboard.writeText(text).then(() => {
+    e.target.textContent = "copied";
+    setTimeout(() => e.target.textContent = "copy", 1500);
+  });
+});
+
+const subnav = document.getElementById("subnav");
+new IntersectionObserver(([e]) => subnav.classList.toggle("on", !e.isIntersecting))
+  .observe(document.getElementById("hero"));
+
+const dialog = document.getElementById("video");
+document.querySelector("[data-video]").addEventListener("click", () => {
+  dialog.showModal();
+  dialog.querySelector("video").play();
+});
+dialog.addEventListener("close", () => dialog.querySelector("video").pause());
+</script>
+</body>
+</html>

@@ -1,282 +1,307 @@
 ---
 version: "alpha"
-name: "Fambly"
-description: "Warm-white paper, flat sticker mascots, beige 12px panels, black pill buttons, drawn phones and colour-coded tick lists."
+name: "OpenRecall"
+description: "Lowercase mono on white graph paper: hairline figure frames, dotted grids, square buttons, the OpenRecall logo orange as ink and one apricot CTA."
 colors:
-  primary: "#171717"
+  primary: "#c2410c"
   on-primary: "#ffffff"
   surface: "#ffffff"
-  surface-container: "#fbfaf9"
-  on-surface: "#121212"
-  on-surface-variant: "#848281"
-  outline: "#efedea"
-  heading: "#343433"
-  body: "#474645"
-  pill: "#f6f4ef"
-  pill-hover: "#eae6dd"
-  stone: "#f2ebe0"
-  blue: "#3784f4"
-  app-blue: "#018dff"
-  sky: "#62bfff"
-  green: "#34c759"
-  orange: "#ff5310"
-  gold: "#ca9230"
-  yellow: "#ffbe4c"
-  pink: "#f966ac"
-  purple: "#9553f9"
-  red: "#ff3d17"
+  surface-container: "#fbf8f4"
+  on-surface: "#1c1917"
+  on-surface-variant: "#57534e"
+  outline: "#d9d8e2"
+  fg-dim: "#a8a29e"
+  accent-2: "#ea580c"
+  cta: "#fdba74"
+  cta-hover: "#fb923c"
+  key: "#fff7ed"
+  night: "#1c1917"
+  cta-fg: "#1c1917"
+  cover-bg: "#1c1917"
+  ok: "#3f6b3f"
+  err: "#b23a2f"
 typography:
   headline-display:
-    fontFamily: "Plus Jakarta Sans"
-    fontSize: 68px
+    fontFamily: "Azeret Mono"
+    fontSize: 56px
     fontWeight: 500
-    lineHeight: 1.1
-    letterSpacing: -0.045em
+    lineHeight: 1.05
+    letterSpacing: -2px
   headline-lg:
-    fontFamily: "Plus Jakarta Sans"
-    fontSize: 44px
+    fontFamily: "Azeret Mono"
+    fontSize: 34px
     fontWeight: 500
-    lineHeight: 48px
-    letterSpacing: -0.045em
+    lineHeight: 1.3
+    letterSpacing: -2px
   body-md:
-    fontFamily: "Inter"
-    fontSize: 17px
-    fontWeight: 400
-    lineHeight: 26px
-    letterSpacing: -0.01em
+    fontFamily: "Azeret Mono"
+    fontSize: 13px
+    fontWeight: 500
+    lineHeight: 1.65
   label-md:
-    fontFamily: "Inter"
-    fontSize: 15px
+    fontFamily: "Azeret Mono"
+    fontSize: 12px
     fontWeight: 600
-    letterSpacing: -0.01em
+  label-sm:
+    fontFamily: "Azeret Mono"
+    fontSize: 12px
+    fontWeight: 400
+    letterSpacing: 0.14em
 rounded:
-  sm: 6px
-  md: 12px
-  lg: 12px
-  full: 32px
+  none: 0px
+  md: 0px
+  pill: 20px
 spacing:
   unit: 4px
-  section: 96px
-  max-width: 1024px
+  section: 64px
+  max-width: 1180px
+components:
+  button-primary:
+    backgroundColor: "{colors.on-surface}"
+    textColor: "{colors.surface}"
+    rounded: "{rounded.none}"
+    padding: 9px 14px
+  button-accent:
+    backgroundColor: "{colors.cta}"
+    textColor: "{colors.cta-fg}"
+    rounded: "{rounded.none}"
+    padding: 9px 14px
+  subnav:
+    backgroundColor: "{colors.primary}"
+    textColor: "{colors.on-primary}"
+    height: 64px
+  figure:
+    backgroundColor: "{colors.surface-container}"
+    textColor: "{colors.on-surface}"
+    rounded: "{rounded.none}"
+  fig-bar-rule:
+    backgroundColor: "{colors.fg-dim}"
+    textColor: "{colors.on-surface}"
+  button-accent-hover:
+    backgroundColor: "{colors.cta-hover}"
+    textColor: "{colors.cta-fg}"
+  grid-cell-lit:
+    backgroundColor: "{colors.accent-2}"
+    size: 18px
+  layer-bar:
+    backgroundColor: "{colors.surface-container}"
+    textColor: "{colors.night}"
+  story-cover:
+    backgroundColor: "{colors.cover-bg}"
+    textColor: "{colors.on-primary}"
+  status-pass:
+    backgroundColor: "{colors.surface}"
+    textColor: "{colors.ok}"
+  status-fail:
+    backgroundColor: "{colors.surface}"
+    textColor: "{colors.err}"
 ---
 
-# Fambly
+# OpenRecall
 
-> A friendly phone money app on warm-white paper: flat sticker mascots flank a centred headline, everything else lives in beige 12px panels next to drawn phones.
+> An engineering notebook for a developer platform: lowercase monospace on white graph paper, every product shot drawn as a numbered figure in a hairline frame, the burnt orange of the OpenRecall logo as the one ink colour and one apricot button.
 
-Source: https://flavors.design/f/fambly
+Source: https://flavors.design/f/wrap, recoloured to the OpenRecall logo in `assets/logo/`: orange `#C2410C` and warm ink `#1C1917`.
+
+Everything is set in Azeret Mono, a wide geometric mono from Google Fonts; Inter covers the few sans labels inside figures.
 
 ## Overview
 
-The consumer-crypto wallet that decided money should feel like a sticker book.
-White page, a 1024px column, and a hero whose headline sits between two big
-clusters of soft clay-rendered mascots on pure white (a blue flower-blob with
-a square face, a sleepy green bean, a red cloud, gold coins, a heart, a pink
-piggy bank), shipped as real images, not vector art. Below that
-the page turns calm and product-page quiet: beige `#fbfaf9` panels at 12px radius
-holding drawn phones and UI fragments, 44px tight headlines, and small
-colour-coded eyebrows and tick lists that give each section its own hue
-(green, orange, blue, gold). The emotion is "relieved": finance without
-dread. It is not a dark crypto dashboard, not glassmorphism, not a gradient
-startup page; nothing glows, nothing is neon.
+OpenRecall reads like a lab notebook that ships software. The page is white, laid over a 22px dot grid and six faint vertical column rules that run the full height of the page, so every section sits on visible graph paper. Everything is monospace, mostly lowercase, weight 500, tightly tracked in the headlines (-2px). Product is never screenshotted: it is drawn as **numbered figures** — a warm off-white panel with a hairline frame and a title bar reading `>_ ——— [ fig. 2 · quickstart ] ——— ⌗` — holding cell grids, YAML, line charts, run lists and a layered stack diagram.
+
+Colour is almost absent: warm ink `#1c1917`, a stone grey for body, and one burnt orange `#c2410c`, the colour of the logo mark, used for eyebrows, numbers, links and, once, a full-bleed band. The single loud thing is an apricot `#fdba74` "install" button. It is for developer platforms, infra, CI and agent tooling. It is not dark-mode terminal cosplay, not glassy, not rounded, and never uses gradients as decoration.
 
 ## Colors
 
-| Role       | Value     | Notes |
-| ---------- | --------- | ----- |
-| bg         | `#ffffff` | page |
-| bg-2       | `#fbfaf9` | beige panels, stats band, final CTA band |
-| fg         | `#121212` | section headlines, card titles |
-| heading    | `#343433` | hero h1, nav labels, wordmark |
-| body       | `#474645` | paragraphs |
-| fg-muted   | `#848281` | captions, footer links, "Watch the demo" |
-| accent     | `#171717` | primary pill button |
-| accent-fg  | `#ffffff` | text on accent |
-| border     | `#efedea` | 1px section rules, inset card rings |
-| pill       | `#f6f4ef` | secondary pill ("Log In", "Watch the Video") |
-| pill-hover | `#eae6dd` | secondary pill hover |
-| stone      | `#f2ebe0` | sticker backdrops, soft discs |
-| blue       | `#3784f4` | Secure / details eyebrows |
-| app-blue   | `#018dff` | app-UI blue, "Download the app" link |
-| sky        | `#62bfff` | mascot body, shields |
-| green      | `#34c759` | Simple eyebrow + ticks |
-| orange     | `#ff5310` | Readable eyebrow, FAQ +, "See More FAQs" |
-| gold       | `#ca9230` | coin shadow, gold eyebrow |
-| yellow     | `#ffbe4c` | coins, stars |
-| pink       | `#f966ac` | app icon tint |
-| purple     | `#9553f9` | app icon tint |
-| red        | `#ff3d17` | hearts, red mascot |
+| Role      | Value                                              | Notes                                                     |
+| --------- | -------------------------------------------------- | --------------------------------------------------------- |
+| bg        | `#ffffff`                                          | paper, under the dot grid                                 |
+| bg-2      | `#fbf8f4`                                          | warm off-white figure panels                              |
+| fg        | `#1c1917`                                          | warm ink, the logo wordmark: headlines, primary button fill |
+| fg-muted  | `#57534e`                                          | body copy, ledes, fig bars                                |
+| fg-dim    | `#a8a29e`                                          | decorative glyphs and rules only, never text              |
+| accent    | `#c2410c`                                          | logo orange: eyebrows, numbers, links, subnav, one band   |
+| accent-fg | `#ffffff`                                          | text on orange                                            |
+| accent-2  | `#ea580c`                                          | chart lines, lit grid cells (fills only, never text)      |
+| cta       | `#fdba74`                                          | the one apricot CTA; buttons on orange hover to it        |
+| cta-hover | `#fb923c`                                          | apricot button hover                                      |
+| key       | `#fff7ed`                                          | subnav key brackets and eyebrows on orange                |
+| night     | `#1c1917`                                          | base of every hairline (16%) and grid line (7%)           |
+| cta-fg    | `#1c1917`                                          | text on the apricot CTA (stays dark in every scheme)      |
+| cover-bg  | `#1c1917`                                          | dark cover behind the white wordmark                      |
+| border    | `color-mix(in srgb,var(--night) 16%,transparent)`  | every frame and rule                                      |
+| ok / wait / err | `#3f6b3f` / `#8a7d1a` / `#b23a2f`          | pass, pending, fail in tables and badges; olive, not neon |
 
-Scheme: light. Contrast rule: body `#474645` on white ≥ 9:1; muted `#848281` only for 13–15px captions.
-Color rules: the page is achromatic; saturated colour appears only in stickers, app icons and one hue per section (eyebrow + its tick list share it). Primary buttons are always near-black, never coloured. No gradients except the tiny demo-video thumbnail.
+Scheme: light. Contrast rule: ink on white is ~17.5:1, body grey ~7.6:1, orange on white ~5.2:1, white on orange ~5.2:1, cream on orange ~4.9:1. Dim grey `#a8a29e` is ~2.5:1, so it never carries text.
+Color rules: orange is ink, not paint — it colours text and 1px outlines, and fills only the subnav, the primary button hover and one full-bleed band. Apricot appears on at most two buttons per page. Status colours are muted olive/ochre/brick. No gradients except the flat tints used to draw grids and hover washes.
 
 ## Typography
 
-- Display: `"Plus Jakarta Sans", -apple-system, sans-serif` — weight 500 only, tracking `-0.045em` (the reference's custom grotesk sits at -0.02em; Jakarta is wider so it needs more), sentence case with a full stop.
-- Body: `"Inter", -apple-system, sans-serif` — 17px/26px weight 500 for the hero sub, 19px/27px for section ledes, 15px/22px at 70% for card copy.
-- Labels: Inter 15px weight 600, `-0.01em`, coloured, sentence case ("Simple", "Readable") — never uppercase.
-- Scale: 11 / 13 / 14 / 15 / 17 / 19 / 24 / 44 / 68
-- Load: `<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@500;600&family=Inter:wght@400;500;600&display=swap">`
-- Rules: headlines are 2 lines max, end with a period, never bold. Tick-list items are 17px/500 in the section hue. Buttons are Inter 500, tracking `-0.03em`.
-
-Plus Jakarta Sans stands in for the reference's proprietary house face: both are geometric grotesks with a single-storey-free double `a`, round `o`, short descenders and flat terminals.
+- Display: `"Azeret Mono", ui-monospace, monospace` — weight 500, 56px hero / 34px section, line-height 1.05 / 1.3, tracking -2px, sentence case
+- Body: same mono — 13px/1.65 weight 500, grey; ledes 13.5px, figure copy 12–12.5px
+- Labels: 12px. Short labels (chips, badges, `LAYER 01`) are uppercase with 0.1–0.14em tracking; fig titles are lowercase with 0.04em; eyebrows are lowercase `# section name` in orange. Nothing is set under 12px.
+- Sans (Inter): only inside figures — layer titles, chart labels
+- Scale: 12 / 12.5 / 13 / 13.5 / 18 / 22 / 34 / 56
+- Load: `<link href="https://fonts.googleapis.com/css2?family=Azeret+Mono:wght@400;500;600&family=Inter:wght@400;500&display=swap">`
+- Rules: buttons and nav are lowercase at 600; feature titles lowercase with the first letter capitalised; never bold above 600; never italic
 
 ## Layout
 
-- Max width 1024px (+24px gutters); hero stickers bleed to the viewport edges.
-- Base unit 4px; spacing 4 / 8 / 12 / 16 / 24 / 32 / 64 / 128.
-- Section rhythm ~88–112px, with a 1px `--border` rule between most feature sections inside the column.
-- Grid: hero centred 500px column between two 460px sticker clusters; bento 3 columns, 34px gap, first card spans 2 rows; feature sections are 50/50 splits (text / 532px-tall panel) alternating sides; details section is a sticky left title with a right column of stacked panels; FAQ is title-left / accordion-right.
-- Density: airy — lots of white, content blocks small and quiet.
-- Full-bleed `--bg-2` bands only for the stats and the final "Explore" CTA.
+- Max width 1180px with 24px gutters; the column rules sit at sixths of that width
+- Base unit 4px; spacing 4 / 8 / 14 / 20 / 24 / 32 / 48 / 64
+- Section rhythm: 64px top and bottom, each section closed by a full-bleed 1px rule
+- Every section: orange `# eyebrow`, 34px headline, one-line grey lede, then a full-width figure 36px below
+- Grids: hero is left-aligned text only (the figure below does the showing); features are a 50/50 rail (clickable list left, figure right); quality loop is three equal figure columns; the speed band is a 50/50 orange band; stories are three columns; footer is five columns
+- Density: balanced — lots of paper around sections, dense tabular content inside figures
 
 ## Elevation & Depth
 
-Flat paper with UI fragments that float a few millimetres; depth comes from the beige panel against white and soft rings, not shadows.
+Flat graph paper. Depth comes from hairlines and the dot grid, not from shadows.
 
-- Panels: `background: #fbfaf9`, no border, no shadow.
-- Testimonial cards: white with `box-shadow: inset 0 0 0 1px var(--border)`; on hover they swap to `--bg-2` and the ring drops to 0 (100ms).
-- UI fragments inside panels (transaction rows, the "Weekly" speed chip): white, ring `inset 0 0 0 1px var(--border)` plus `0 2px 10px color-mix(in srgb, var(--fg) 4%, transparent)`; the details transaction card fakes a stacked card behind it with `0 10px 0 -4px var(--bg), 0 11px 0 -3px var(--border)`.
-- Phones: `10px solid var(--fg)` bezel, 56px radius, a 2px lighter outer ring, cropped by the panel's bottom edge.
-- The only real drop shadow: highlighted pricing tier `0 3px 16px color-mix(in srgb, var(--fg) 10%, transparent)` (the site uses it on nav dropdowns).
-- Forbidden: glass, blur, glows, noise, gradient borders.
+- Page: `radial-gradient(circle at 1px 1px, night-at-7% 1px, transparent 0) 0 0/22px 22px` over white, plus a centred `::before` with 1px `night-at-7%` borders and five 1px linear-gradient column lines at sixths.
+- Frames: `1px solid color-mix(in srgb, #1c1917 16%, transparent)` on figures, buttons (ghost), fig-bar icons, stat cells, tier dividers, FAQ rows. Rows inside run lists use the softer 7% line.
+- Figure panels are `#fbf8f4` with their own denser dot grid (`1.2px` dots every 26px).
+- Nav is separated by a dotted rule: `radial-gradient(circle, border 1px, transparent 1.1px) 0 50%/7px 3px`, 3px tall.
+- Hover and active wash: `linear-gradient(night-7%, night-7%), var(--bg)` — a flat tint, never a lift.
+- The only shadow is `0 8px 22px color-mix(in srgb, #1c1917 10%, transparent)` on the floating benchmark tooltip. The picked pricing tier gets `inset 0 2px 0 var(--accent)`.
 
 ## Shapes
 
-- Radius: 12px panels and cards (`--radius`); 10px testimonial cards; 32px pills (buttons); 6px chips; 56px phones; 26px the dark action stack; 4px demo thumbnails.
-- Circles for app icons (36px), avatars (30–40px) and sticker bubbles (72/90px).
-- Stickers are flat vector shapes: circles-cluster blobs, rounded squares with two oval eyes, coins with two diagonal glare bars, 5-point stars, 4-point sparkles.
+- Radius 0 on everything structural: buttons, figures, cards, inputs, stat cells, covers, layer bars
+- 20px pills only for status chips (LIVE, run badges, layer tags); 50% circles for the live dot, run dots and avatars
+- Grid cells are 18px squares; badges are square-cornered outlined rectangles
+- The logo is the OpenRecall loop mark in orange `#C2410C` beside the wordmark in ink, from `assets/logo/`
 
 ## Components
 
-- Buttons: 32px-tall pills, padding 0 14px, Inter 500 15px — primary `#171717` → `#121212` on hover; secondary `#f6f4ef` → `#eae6dd`. Hero size 48px tall, padding 0 24px 0 20px, 17px, with a 20px glyph (download arrow / play triangle).
-- Nav: 94px tall, white, sticky. Wordmark (18px mark + 17px bold name), then 15px/500 labels with 10px chevrons, 24px apart; "Log In" (secondary pill) and "Get Started" (primary pill) at the right. Mobile: wordmark, Get Started, two-line burger.
-- Bento cards: `--bg-2`, 12px radius, content art on top, title 17px/600 fg, body 15px 70% body colour, 23px side padding.
-- Dark action stack: near-black 26px-radius panel bleeding off the card's right edge, rows at 22px radius with a 36px coloured circle icon, 18px/500 title, 14px 62% white body, and an outlined 11px tag.
-- Split feature: coloured eyebrow → 44px headline → 19px lede → coloured tick list (17px/500, 17×13 check stroke) → a "Watch the demo" row (78×44 thumbnail + two-line label) whose hover draws a 1px inset ring.
-- Testimonials: two marquee lanes of 475px white ringed cards with avatar, bold name, muted handle, speech-bubble glyph top-right; edges masked to transparent.
-- FAQ: rows separated by 1px rules, an orange "+" at 26px/300, question 19px fg; then an orange "See More FAQs →" link.
-- Final CTA band: `--bg-2`, 44px headline, lede, blue "Download the app →" link, garden illustration right.
-- Footer: mark, three 13px link columns (heading fg/500, links muted), copyright right.
+- **Numbered figure (signature).** Frame + `fig-bar`: `>_` icon box, a 1px rule, `[ fig. N · name ]` in 12px body-grey mono at 0.04em, another rule, a `⌗` icon box. Body is the warm off-white dotted panel. Use it for every product visual.
+- **Cell grid hero figure.** 16×7 grid of 18px outlined squares with a handful filled `accent-2` (count is a knob), one dash, an uppercase `KITCHEN.YAML` edge label and a `● LIVE` pill, then a four-cell stat row underneath.
+- **Feature rail.** Left: stacked buttons, 20px padding, orange `01` number, 18px/600 title, 12.5px grey body; the active row gets the 7% wash. Right: a figure whose `<pre>` swaps to the matching YAML/CLI snippet (keys orange, strings olive, comments in body grey).
+- **Quality loop.** Three figure columns: title, outlined `PASS`/`BEST` badge plus a 20px number, a thin `accent-2` polyline chart with dim axis labels, and a three-row table with pass/fail in olive/brick.
+- **Orange band.** Full-bleed `#c2410c` with a white dot grid, 28px white headline at line-height 1.65, a white button with orange text that hovers to apricot, and a white chart card with an orange-edged tooltip.
+- **Layer stack.** Four horizontal bars, each wider than the one above, filled with orange at 5% / 14% / 30% / 100%; tiny uppercase `LAYER 01`, a sans title, pill tags and right-aligned mono copy.
+- **Control plane.** Stacked area chart in three tints next to a run list: dot, truncated task, model pill, coloured source pill, round initial avatar, age.
+- Buttons: 600 12px mono, lowercase, `9px 14px`, square. Primary = ink fill → orange on hover; ghost = white with hairline → orange border and text; accent = apricot → `#fb923c`; nav CTAs add `letter-spacing:.02em` and more padding.
+- Nav: 62px white bar, OpenRecall logo, five 12px/500 lowercase links with an orange underline on hover, a ghost "github ↗" and an apricot "install" button. After the hero a 64px orange **subnav** slides down: `[1] how it works  [2] the gate …` with the bracketed number in cream and a white "install openrecall" button.
+- FAQ: full-width rows with a hairline under each, orange `>` prompt, lowercase question, `[+]` / `[−]` on the right.
+- Footer: five columns, dim lowercase headings, ink 12px links that turn orange, then a hairline and "All Rights Reserved © 2026".
 
 ## Do's and Don'ts
 
-- Do flank the hero headline with two clusters of clay-rendered mascots and coins: generated raster images on a pure white backdrop (`mix-blend-mode: multiply`), never hand-drawn SVG scenes. Keep SVG for icons and small stickers.
-- Do keep every primary button a near-black pill and every secondary a beige pill.
-- Do give each feature section one hue and use it for the eyebrow and the tick list only.
-- Do put product UI (drawn phones, transaction rows) inside beige 12px panels and crop the phone at the panel edge.
-- Do end headlines with a period and keep them at weight 500.
-- Do separate sections inside the column with 1px `--border` rules.
+- Do draw every product visual as a numbered figure with the `>_ — [ fig. N · name ] — ⌗` bar.
+- Do keep the page on graph paper: 22px dot grid plus column rules at sixths, visible behind every section.
+- Do set everything in one monospace at 500, lowercase for buttons, links and questions.
+- Do use orange as ink (eyebrows, numbers, links, outlines) and fill with it only for the subnav and one band.
+- Do reserve apricot for one or two call-to-action buttons.
+- Do use real-looking data in figures: timestamps, costs, pass/fail, PR numbers.
+- Do hover by recolouring (ink → orange, orange → apricot, border → orange), not by moving.
 
-- Don't colour a primary button or add gradients to buttons.
-- Don't uppercase labels or track them out.
-- Don't give panels borders or drop shadows.
-- Don't use dark mode crypto tropes: neon, glow, charts, candlesticks.
-- Don't draw stickers with outlines or gradients; they are flat fills with at most a glare stripe.
-- Don't use more than one saturated hue per section outside the stickers.
+- Don't round corners on buttons, cards or figures; only chips are pills.
+- Don't add drop shadows to cards or buttons.
+- Don't use screenshots or photos inside the page chrome; draw the product.
+- Don't use neon greens or reds for status; keep olive, ochre and brick.
+- Don't set headlines in a sans or at positive tracking.
+- Don't hardcode a colour outside `:root`; derive tints with `color-mix()`.
+- Don't let gradients read as gradients; they only draw dots, rules and flat washes.
 
 ## Motion
 
-- Duration 100ms for pill backgrounds and card hovers, 200ms ease-out for link colour; easing `cubic-bezier(.19,1,.22,1)` for anything that travels.
-- What animates: button background, testimonial card fill/ring, demo-row ring, link colour, the two testimonial marquee lanes (60s / 72s linear, opposite directions, paused on hover), the spinner in "Checking Chore Photo".
-- What never animates: headlines, stickers on load, panels on scroll.
-- Signature move: the dual testimonial marquee with masked edges.
+- Duration 150ms, easing `ease`
+- What animates: background, border-colour and colour on buttons, nav links, feature rows and footer links; the subnav slides in over 250ms once the hero is past
+- What never animates: layout, figures, section entrances
+- Signature move: the `● LIVE` dot blinks on a 2s `step-end`, and lit grid cells pulse from `accent-2` to `accent` in steps, like a status board
+- All of it sits inside `@media (prefers-reduced-motion: no-preference)`
 
 ## Tweaks
 
-- Signature knobs: mascot size (`--art-scale`), confetti opacity (`--sticker-opacity`), panel corners (`--radius-lg`), button corners (`--radius-pill`), headline tracking (`--title-track`), phone bezel (`--phone-bezel`).
-- Alternate schemes: **Bedtime** (dark), **Mint**, **Butter**, **Grape**.
+Five knobs. `--dot-gap` (12–40px) is the page dot-grid pitch; `--grid-alpha` (3–16%) drives the column rules, grid dots and hover wash; `--head-track` (−4 to 1px) is the headline tracking; `--lit-cells` (0–30) is how many squares are lit in the hero figure, redrawn on `flavor:tweak`; `--stack-step` (0–12) is how much narrower each layer bar is than the next. Schemes: Night shift, Appliance, Terminal green, Magenta — each sets all sixteen colour literals.
 
 ## Reference CSS
 
 ```css
 :root {
-
---bg:#ffffff;
---bg-2:#fbfaf9;
---fg:#121212;
---heading:#343433;
---body:#474645;
---fg-muted:#848281;
---accent:#171717;
---accent-fg:#ffffff;
---border:#efedea;
---pill:#f6f4ef;
---pill-hover:#eae6dd;
---stone:#f2ebe0;
---blue:#3784f4;
---app-blue:#018dff;
---sky:#62bfff;
---green:#34c759;
---orange:#ff5310;
---gold:#ca9230;
---yellow:#ffbe4c;
---pink:#f966ac;
---purple:#9553f9;
---red:#ff3d17;
---font-display:"Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, sans-serif;
---font-body:"Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
---radius:12px;
---radius-sm:6px;
---radius-lg:12px;
---radius-card:10px;
---radius-pill:32px;
---space-1:4px;
---space-2:8px;
---space-3:12px;
---space-4:16px;
---space-5:24px;
---space-6:32px;
---space-7:64px;
---space-8:128px;
---shadow:0 3px 16px color-mix(in srgb,var(--fg) 10%,transparent);
---ring:inset 0 0 0 var(--ring-w) var(--border);
---ease:cubic-bezier(.19,1,.22,1);
---dur:100ms;
---max-width:1024px;
---art-scale:1;
---sticker-opacity:1;
---title-track:-0.045em;
---ring-w:1px;
---phone-bezel:10px;
+  --bg:#ffffff;
+  --bg-2:#fbf8f4;
+  --fg:#1c1917;
+  --fg-muted:#57534e;
+  --fg-dim:#a8a29e;
+  --accent:#c2410c;
+  --accent-fg:#ffffff;
+  --accent-2:#ea580c;
+  --cta:#fdba74;
+  --cta-hover:#fb923c;
+  --key:#fff7ed;
+  --night:#1c1917;
+  --cta-fg:#1c1917;
+  --cover-bg:#1c1917;
+  --ok:#3f6b3f;
+  --wait:#8a7d1a;
+  --err:#b23a2f;
+  --border:color-mix(in srgb,var(--night) 16%,transparent);
+  --line-soft:color-mix(in srgb,var(--night) var(--grid-alpha),transparent);
+  --font-display:"Azeret Mono", ui-monospace, monospace;
+  --font-body:"Azeret Mono", ui-monospace, monospace;
+  --font-mono:"Azeret Mono", ui-monospace, monospace;
+  --font-sans:"Inter", system-ui, sans-serif;
+  --radius:0px;
+  --radius-lg:0px;
+  --radius-pill:20px;
+  --space-1:4px;
+  --space-2:8px;
+  --space-3:14px;
+  --space-4:20px;
+  --space-5:24px;
+  --space-6:32px;
+  --space-7:48px;
+  --space-8:64px;
+  --shadow:0 8px 22px color-mix(in srgb,var(--night) 10%,transparent);
+  --ease:ease;
+  --dur:150ms;
+  --max-width:1180px;
+  --dot-gap:22px;
+  --grid-alpha:7%;
+  --head-track:-2px;
+  --lit-cells:6;
+  --stack-step:8;
 }
-.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:32px;padding:0 14px;border:0;border-radius:var(--radius-pill);background:var(--accent);color:var(--accent-fg);font:500 15px/1 var(--font-body);letter-spacing:-.03em;transition:background-color var(--dur)}
-.btn:hover{background:var(--fg)}
-.btn.soft{background:var(--pill);color:var(--fg)}
-.btn.soft:hover{background:var(--pill-hover)}
-.card{padding:0 23px 16px;border-radius:var(--radius-lg);background:var(--bg-2);overflow:hidden}
-.quote{padding:32px;border-radius:var(--radius-card);background:var(--bg);box-shadow:var(--ring);transition:box-shadow var(--dur),background var(--dur)}
-.quote:hover{background:var(--bg-2);box-shadow:inset 0 0 0 0 var(--bg-2)}
-.ticks li{gap:16px;font-size:17px;font-weight:500;color:var(--c)}
+.btn{display:inline-flex;align-items:center;gap:6px;padding:9px 14px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg);color:var(--fg);font:600 12px/1.65 var(--font-mono);text-transform:lowercase}
+.btn-primary{background:var(--fg);border-color:var(--fg);color:var(--bg)}
+.btn-primary:hover{background:var(--accent);border-color:var(--accent)}
+.btn-accent{background:var(--cta);border-color:var(--cta);color:var(--cta-fg)}
+.btn-accent:hover{background:var(--cta-hover);border-color:var(--cta-hover)}
+.fig{border:1px solid var(--border);background:var(--bg-2)}
+.fig-bar{display:flex;align-items:center;gap:14px;padding:8px 12px;border-bottom:1px solid var(--border);color:var(--fg-muted);font-size:12px;letter-spacing:.04em}
+.fig-bar .rule{flex:1;height:1px;background:var(--border)}
+.fig-bar .ic{padding:1px 5px;border:1px solid var(--border)}
 ```
 
 ## Reference markup
 
 ```html
-<section class="split">
-  <div>
-    <p class="eb c-green">Simple</p>
-    <h2 class="t-display h2">Watch every jar grow.</h2>
-    <p class="lede">Keep an eye on unlimited savings jars across every kid.</p>
-    <ul class="ticks c-green">
-      <li class="row"><svg><use href="#tick" /></svg>Watch Any Jar</li>
-      <li class="row"><svg><use href="#tick" /></svg>Goal Pictures</li>
-    </ul>
-    <a class="demo" href="#"><i class="thumb"></i><span><b>Savings Jars</b><span>Watch the demo</span></span></a>
-  </div>
-  <div class="shot">
-    <div class="phone">
-      <div class="sbar row">9:38<i></i></div>
-      <div class="tok row"><i class="av" style="--c:var(--green)">B</i><div>Bike fund<small>Goal $260</small></div><em>$214.50</em></div>
+<section class="sec"><div class="wrap">
+  <div class="eyebrow"># taste loop</div>
+  <h2>Baked-in measurement and self-seasoning</h2>
+  <p class="lede">Taste tests, benchmarks, and self-improvement loops drive measurable crunch.</p>
+  <figure class="fig">
+    <div class="fig-bar">
+      <span class="ic">&gt;_</span><span class="rule"></span>
+      <span>[ fig. 4 · taste loop · sample shift ]</span>
+      <span class="rule"></span><span class="ic">⌗</span>
     </div>
-  </div>
-</section>
+    <div class="three">
+      <div>
+        <h4>Taste tests on your own menu</h4>
+        <div class="kpi"><span class="badge">PASS</span>96%</div>
+        <table><tr><td>8/13 07:03</td><td class="fail">fail</td><td>0.4</td><td>$3.39</td></tr></table>
+      </div>
+    </div>
+  </figure>
+</div></section>
 ```
 
 ## How to apply this flavor
 
-1. Replace the target page's design tokens with the palette, fonts and spacing above.
-2. Rebuild the hero as a centred headline between two sticker clusters; restyle every other section as white column + beige 12px panels with drawn product UI.
-3. Give each feature section one hue (eyebrow + tick list), make buttons black/beige pills, and apply the motion rules; remove any animation not described here.
+1. Replace the target page's design tokens with the palette, fonts and spacing above, and put the dot grid and column rules on the page background.
+2. Restyle components to match the Components section; turn every screenshot into a numbered figure.
+3. Apply the motion rules; remove any animation not described here.
 4. Check the Don't list before finishing.
-

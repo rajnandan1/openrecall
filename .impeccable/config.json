@@ -1,0 +1,29 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "design-system-font",
+        "value": "inter",
+        "createdAt": "2026-10-04T08:16:17.043Z",
+        "reason": "website/DESIGN.md, which the user rewrote on 2026-10-04, says Inter covers the sans labels inside figures and loads it"
+      },
+      {
+        "rule": "overused-font",
+        "value": "inter",
+        "createdAt": "2026-10-04T08:16:17.066Z",
+        "reason": "website/DESIGN.md, which the user rewrote on 2026-10-04, loads Inter for the sans labels inside figures; Azeret Mono carries the page"
+      },
+      {
+        "rule": "pulsing-dot",
+        "value": "*",
+        "files": [
+          "website/index.html"
+        ],
+        "createdAt": "2026-10-04T08:16:22.064Z",
+        "reason": "website/DESIGN.md, which the user rewrote on 2026-10-04, names the blinking LIVE dot as its signature motion; it runs only under prefers-reduced-motion: no-preference"
+      }
+    ]
+  }
+}
