@@ -224,6 +224,16 @@ class HarnessTest(unittest.TestCase):
                     "dropped in this replay: 1", "p50 2.0 ms, p95 2.0 ms"):
             self.assertIn(row, text)
 
+    def test_load_drops_every_sdk_session(self):
+        for entry in ("sdk-py", "sdk-ts"):
+            with open(os.path.join(harness.PROJECTS, "-w-app", entry + ".jsonl"), "w") as fh:
+                fh.writelines(json.dumps(o) + "\n" for o in (
+                    user("2026-01-08T10:00:00Z", "Review this change", "feat-a", entry=entry),
+                    said("2026-01-08T10:01:00Z", "Looks fine.", "feat-a", "m13")))
+        sids = {s["sid"] for s in harness.load()[0]}
+        self.assertIn("new", sids)
+        self.assertFalse(sids & {"sdk-py", "sdk-ts"}, "the hooks never run in an SDK session")
+
     def test_live_expansions(self):
         self.assertEqual(harness.fnv("a"), "af63dc4c8601ec8c")
         turn = user("2026-01-08T09:00:00Z", "why did the export fail on ABC-12", "feat-a")

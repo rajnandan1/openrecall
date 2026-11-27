@@ -199,7 +199,7 @@ def load(until=None):
         if s["recalled"]:
             recalled.append(s["sid"])
         s["real"] = [t for t in s["turns"] if t["real"]]
-        if not s["real"] or is_scratch(s["cwd"]) or s["entrypoint"] == "sdk-cli":
+        if not s["real"] or is_scratch(s["cwd"]) or (s["entrypoint"] or "").startswith("sdk-"):
             continue
         s["repo"] = repo_of(s["cwd"])
         s["tickets"] = {tk for t in s["real"] for tk in tickets_in(t["ask"])}
