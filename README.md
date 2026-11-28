@@ -384,11 +384,11 @@ The `rm` command does not delete Claude Code's built-in memory. Monot never writ
 
 Skip this section if you never installed OpenRecall.
 
-Monot was called OpenRecall before version 0.15.0. The rename changed every name: the binary, the plugin, the home folder, the log file and the variables. An OpenRecall install never updates itself to Monot, so you move it by hand. Do not start Claude Code until the last step is done.
+Monot was called OpenRecall before version 0.15.0. The rename changed every name: the binary, the plugin, the home folder, the log file and the variables. An OpenRecall install never updates itself to Monot, because its update job looks for the release at the old name and does not find it. So you move it by hand. Do not open a Claude Code session until step 7. The `claude plugin` commands in step 4 run without a session.
 
 1. Quit every Claude Code session. Then run `pgrep -fl openrecall`. If it lists a process, such as the extraction worker, wait and run it again until it prints nothing, because that process can still write to the old folder.
 2. Run the install command from [Install](#install). It installs `monot` at `~/.local/bin/monot`, beside the old binary.
-3. Move the home folder, with every fact, handoff record and setting in it, and rename its log file. If `~/.monot` already exists, the `test` stops the commands, so that `mv` does not put the old folder inside the new one.
+3. Move the home folder `~/.openrecall`, with every fact, handoff record and setting in it, to `~/.monot`, and rename its log file. If `~/.monot` already exists, the `test` stops the commands, so that `mv` does not put the old folder inside the new one.
 
    ```sh
    test ! -e ~/.monot &&
@@ -405,7 +405,7 @@ Monot was called OpenRecall before version 0.15.0. The rename changed every name
    claude plugin install monot@monot
    ```
 
-5. If you set any of these by hand, rename them. They can be in the `env` key and `permissions.allow` of `~/.claude/settings.json`, in your shell profile and in your statusline script:
+5. If you set any of these by hand, rename them. They can be in the `env` key and `permissions.allow` of `~/.claude/settings.json`, in your shell profile and in your statusline script. `grep -n -i openrecall ~/.claude/settings.json ~/.zshrc ~/.zprofile` finds the first two:
    - Each `OPENRECALL` variable becomes its `MONOT` name, such as `OPENRECALL=0` to `MONOT=0` and `OPENRECALL_UPDATE` to `MONOT_UPDATE`.
    - The tool names `mcp__plugin_openrecall_openrecall__*` become `mcp__plugin_monot_monot__*`.
    - A statusline script that reads `~/.openrecall/status/` must read `~/.monot/status/`.
