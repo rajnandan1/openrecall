@@ -388,7 +388,7 @@ Monot was called OpenRecall before version 0.15.0. The rename changed every name
 
 1. Quit every Claude Code session. Then run `pgrep -fl openrecall`. If it lists a process, such as the extraction worker, wait and run it again until it prints nothing, because that process can still write to the old folder.
 2. Run the install command from [Install](#install). It installs `monot` at `~/.local/bin/monot`, beside the old binary.
-3. Move the home folder `~/.openrecall`, with every fact, handoff record and setting in it, to `~/.monot`, and rename its log file. If `~/.monot` already exists, the `test` stops the commands, so that `mv` does not put the old folder inside the new one.
+3. Move the home folder `~/.openrecall`, with every fact, handoff record and setting in it, to `~/.monot`, and rename its log file. If `~/.monot` already exists, the `test` stops the commands before anything moves, so that `mv` does not put the old folder inside the new one. Then find out what created `~/.monot` before you go on.
 
    ```sh
    test ! -e ~/.monot &&
@@ -405,7 +405,7 @@ Monot was called OpenRecall before version 0.15.0. The rename changed every name
    claude plugin install monot@monot
    ```
 
-5. If you set any of these by hand, rename them. They can be in the `env` key and `permissions.allow` of `~/.claude/settings.json`, in your shell profile and in your statusline script. `grep -n -i openrecall ~/.claude/settings.json ~/.zshrc ~/.zprofile` finds the first two:
+5. If you set any of these by hand, rename them. They can be in the `env` key and `permissions.allow` of `~/.claude/settings.json`, in your shell profile and in your statusline script. `grep -n -i openrecall ~/.claude/settings.json ~/.zshrc ~/.zprofile` checks `settings.json` and a zsh profile. Check another shell profile and your statusline script by hand:
    - Each `OPENRECALL` variable becomes its `MONOT` name, such as `OPENRECALL=0` to `MONOT=0` and `OPENRECALL_UPDATE` to `MONOT_UPDATE`.
    - The tool names `mcp__plugin_openrecall_openrecall__*` become `mcp__plugin_monot_monot__*`.
    - A statusline script that reads `~/.openrecall/status/` must read `~/.monot/status/`.
