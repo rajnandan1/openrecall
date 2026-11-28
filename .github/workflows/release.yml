@@ -50,18 +50,18 @@ jobs:
       - name: Build the release binary
         if: steps.check.outputs.release == 'new'
         env:
-          OPENRECALL_RELEASE: "1"
+          MONOT_RELEASE: "1"
         run: cargo build --release --locked
 
       - name: Check that the binary prints the version
         if: steps.check.outputs.release == 'new'
-        run: test "$(target/release/openrecall version)" = "$VERSION"
+        run: test "$(target/release/monot version)" = "$VERSION"
 
       - name: Write the hash file
         if: steps.check.outputs.release == 'new'
         run: |
-          cp target/release/openrecall openrecall-aarch64-apple-darwin
-          shasum -a 256 openrecall-aarch64-apple-darwin > openrecall-aarch64-apple-darwin.sha256
+          cp target/release/monot monot-aarch64-apple-darwin
+          shasum -a 256 monot-aarch64-apple-darwin > monot-aarch64-apple-darwin.sha256
 
       - name: Publish
         if: steps.check.outputs.release == 'new'
@@ -70,10 +70,10 @@ jobs:
           newest=$(printf '%s\n%s\n' "${latest#v}" "$VERSION" | sort -V | tail -n 1)
           [ "$newest" = "$VERSION" ] && mark=true || mark=false
           gh release create "v$VERSION" --target "$GITHUB_SHA" --latest="$mark" --title "v$VERSION" --notes "" \
-            openrecall-aarch64-apple-darwin openrecall-aarch64-apple-darwin.sha256
+            monot-aarch64-apple-darwin monot-aarch64-apple-darwin.sha256
 
       - name: Install with the install command
         if: steps.check.outputs.release == 'new'
         run: |
-          curl -fsSL https://raw.githubusercontent.com/rajnandan1/openrecall/main/install.sh | sh || true
-          test "$("$HOME/.local/bin/openrecall" version)" = "$VERSION"
+          curl -fsSL https://raw.githubusercontent.com/rajnandan1/monot/main/install.sh | sh || true
+          test "$("$HOME/.local/bin/monot" version)" = "$VERSION"

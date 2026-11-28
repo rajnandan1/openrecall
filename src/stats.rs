@@ -129,7 +129,7 @@ pub fn lock() -> std::io::Result<Option<fs::File>> {
     }
 }
 
-/// `openrecall stats --job`: at most once in 24 hours, and not while another process holds the lock. A failure keeps
+/// `monot stats --job`: at most once in 24 hours, and not while another process holds the lock. A failure keeps
 /// the old rows file and leaves an `error` line, which the next row counts.
 pub fn job() -> crate::Result<()> {
     if let Err(e) = attempt() {
@@ -161,7 +161,7 @@ fn attempt() -> crate::Result<()> {
 pub fn recompute() -> crate::Result<()> {
     let now = crate::now_ms() as u64;
     // ken: whole-log read each run; an offset index when the read is measured over 1 s
-    let log = read_or_empty(&crate::home().join("log").join("openrecall.jsonl"))?;
+    let log = read_or_empty(&crate::home().join("log").join("monot.jsonl"))?;
     let mut lines: Vec<(String, Value)> = vec![];
     for raw in log.split(|&b| b == b'\n') {
         let Ok(e) = serde_json::from_slice::<Value>(raw) else {

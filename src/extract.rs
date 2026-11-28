@@ -27,8 +27,8 @@ const IDENT_CANDIDATES: usize = 10;
 const TOOL_CHARS: usize = 200;
 const PROSE_CHARS: usize = 1000;
 const PROSE_KEYS: [&str; 5] = ["body", "description", "content", "text", "message"];
-/// An own tool call: `recall`, `remember`, `forget` and `stats` are OpenRecall's doing, so the short form leaves them out.
-const OWN_TOOL: &str = "mcp__plugin_openrecall_openrecall__";
+/// An own tool call: `recall`, `remember`, `forget` and `stats` are Monot's doing, so the short form leaves them out.
+const OWN_TOOL: &str = "mcp__plugin_monot_monot__";
 const TOOL_KEYS: [&str; 8] = [
     "command",
     "file_path",
@@ -165,8 +165,8 @@ pub fn mark_ended(sid: &str, ended: bool) -> crate::Result<()> {
     }
 }
 
-/// `openrecall extract --job`: one worker at a time takes every due session, oldest quiet clock first, and polls while
-/// a session can still become due (issue #37). `OPENRECALL_POLL=0` exits after one pass.
+/// `monot extract --job`: one worker at a time takes every due session, oldest quiet clock first, and polls while
+/// a session can still become due (issue #37). `MONOT_POLL=0` exits after one pass.
 pub fn work() -> crate::Result<()> {
     let dir = crate::home().join("extract");
     fs::create_dir_all(&dir)?;
@@ -181,7 +181,7 @@ pub fn work() -> crate::Result<()> {
         return Ok(());
     }
     let scanner = OnceCell::new();
-    let poll = std::env::var("OPENRECALL_POLL").as_deref() != Ok("0");
+    let poll = std::env::var("MONOT_POLL").as_deref() != Ok("0");
     let mut tried = HashMap::new();
     loop {
         let (due, waiting) = next_due(&dir, &tried);
@@ -266,7 +266,7 @@ fn next_due(
 }
 
 /// When the session's last turn ended, in ms since 1970: `turn::last_time` over the transcript's tail, then over the
-/// whole file, then the mtime, which something outside OpenRecall touches in bulk.
+/// whole file, then the mtime, which something outside Monot touches in bulk.
 fn quiet_clock(transcript: &Path, meta: &fs::Metadata) -> i64 {
     let last = |from: u64| {
         let mut f = fs::File::open(transcript).ok()?;
@@ -700,7 +700,7 @@ fn read(t: &Turn) -> bool {
 }
 
 /// One turn's lines of the short form: its prompt, the assistant's text and one line per tool call that is not
-/// OpenRecall's own.
+/// Monot's own.
 pub fn short_form(t: &Turn) -> String {
     lines(t, format!("[user] {}", t.ask), false)
 }
@@ -1350,7 +1350,7 @@ mod tests {
 
     #[test]
     fn settings_choose_the_api_provider_or_the_plan_provider() {
-        let home = std::env::temp_dir().join(format!("openrecall-settings-{}", std::process::id()));
+        let home = std::env::temp_dir().join(format!("monot-settings-{}", std::process::id()));
         let _ = fs::remove_dir_all(&home);
         fs::create_dir_all(&home).unwrap();
         let load = |toml: &str| {
@@ -1417,7 +1417,7 @@ mod tests {
 
     #[test]
     fn the_plan_call_runs_claude_with_the_measured_flags() {
-        let dir = Path::new("/nonexistent/openrecall/extract");
+        let dir = Path::new("/nonexistent/monot/extract");
         let schema = json!({"type": "object", "properties": {"ids": {"type": "array", "items": {"type": "string"}}},
                             "required": ["ids"], "additionalProperties": false});
         let body = |name: &str| {
@@ -1642,7 +1642,7 @@ mod tests {
             "a killed call adds 0"
         );
         let gone = crate::update::run_for(
-            &mut Command::new("openrecall-no-such-program"),
+            &mut Command::new("monot-no-such-program"),
             Some(b"text"),
             Duration::from_secs(5),
         );
@@ -1825,11 +1825,11 @@ mod tests {
             ask: "store it".into(),
             real: true,
             events: vec![
-                tool("mcp__plugin_openrecall_openrecall__remember", json!({"text": "the runner kills slow tests"})),
+                tool("mcp__plugin_monot_monot__remember", json!({"text": "the runner kills slow tests"})),
                 Event::Text("Stored. Checking the runner.".into()),
-                tool("mcp__plugin_openrecall_openrecall__recall", json!({"query": "runner"})),
+                tool("mcp__plugin_monot_monot__recall", json!({"query": "runner"})),
                 tool("Bash", json!({"command": "cargo test"})),
-                tool("mcp__plugin_openrecall_openrecall__forget", json!({"address": "a/b"})),
+                tool("mcp__plugin_monot_monot__forget", json!({"address": "a/b"})),
             ],
             ..Default::default()
         };

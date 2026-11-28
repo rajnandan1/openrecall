@@ -9,23 +9,23 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-const RELEASES: &str = "https://github.com/rajnandan1/openrecall/releases";
-const ASSET: &str = "openrecall-aarch64-apple-darwin";
+const RELEASES: &str = "https://github.com/rajnandan1/monot/releases";
+const ASSET: &str = "monot-aarch64-apple-darwin";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const DAY: u64 = 24 * 60 * 60;
 const FAILURES_BEFORE_MESSAGE: u32 = 3;
 
-/// Only the release workflow builds with `OPENRECALL_RELEASE=1`; every other binary is a source build.
+/// Only the release workflow builds with `MONOT_RELEASE=1`; every other binary is a source build.
 pub fn release() -> bool {
-    option_env!("OPENRECALL_RELEASE") == Some("1")
+    option_env!("MONOT_RELEASE") == Some("1")
 }
 
 /// A release binary with the off switch unset runs the update check.
 pub fn on() -> bool {
-    release() && std::env::var("OPENRECALL_UPDATE").as_deref() != Ok("0")
+    release() && std::env::var("MONOT_UPDATE").as_deref() != Ok("0")
 }
 
-/// The output of `openrecall version`.
+/// The output of `monot version`.
 pub fn version() -> String {
     if release() {
         VERSION.to_string()
@@ -67,7 +67,7 @@ impl State {
             Attempt::Swapped(to) => {
                 self.failures = 0;
                 self.message = format!(
-                    "OpenRecall updated from {VERSION} to {to}. Sessions that were open before the update get the new MCP server and plugin after a restart of Claude Code."
+                    "Monot updated from {VERSION} to {to}. Sessions that were open before the update get the new MCP server and plugin after a restart of Claude Code."
                 );
             }
             Attempt::Current(_) => self.failures = 0,
@@ -75,7 +75,7 @@ impl State {
                 self.failures += 1;
                 if self.failures >= FAILURES_BEFORE_MESSAGE {
                     self.message = format!(
-                        "OpenRecall could not update itself: {why}. To update by hand, run: {}",
+                        "Monot could not update itself: {why}. To update by hand, run: {}",
                         crate::INSTALL
                     );
                 }
@@ -144,18 +144,18 @@ fn warning(
     if parse(plugin)? > parse(binary)? {
         (!update_check_runs).then(|| {
             format!(
-                "OpenRecall binary {binary} is older than plugin {plugin}. Update the binary: {}",
+                "Monot binary {binary} is older than plugin {plugin}. Update the binary: {}",
                 crate::INSTALL
             )
         })
     } else if plugin_due(plugin, last_plugin_step, binary) {
         Some(if update_check_runs {
             format!(
-                "OpenRecall plugin {plugin} is older than binary {binary}. OpenRecall updates the plugin in the background now. If you see this message again, run: claude plugin update openrecall@openrecall"
+                "Monot plugin {plugin} is older than binary {binary}. Monot updates the plugin in the background now. If you see this message again, run: claude plugin update monot@monot"
             )
         } else {
             format!(
-                "OpenRecall plugin {plugin} is older than binary {binary}. Update the plugin: claude plugin update openrecall@openrecall. Then restart Claude Code."
+                "Monot plugin {plugin} is older than binary {binary}. Update the plugin: claude plugin update monot@monot. Then restart Claude Code."
             )
         })
     } else {
@@ -163,7 +163,7 @@ fn warning(
     }
 }
 
-/// `openrecall update --job`: the binary step at most once in 24 hours, then the plugin step, under one lock.
+/// `monot update --job`: the binary step at most once in 24 hours, then the plugin step, under one lock.
 pub fn job() -> crate::Result<()> {
     if !on() {
         return Ok(());
@@ -235,7 +235,7 @@ fn plugin_due(session: &str, done: &str, on_disk: &str) -> bool {
 /// and leave the plugin old.
 fn plugin_step() -> Result<(), String> {
     let (status, out) = run_for(
-        Command::new("claude").args(["plugin", "update", "openrecall@openrecall", "--json"]),
+        Command::new("claude").args(["plugin", "update", "monot@monot", "--json"]),
         None,
         Duration::from_secs(60),
     )?;
@@ -502,13 +502,13 @@ mod tests {
         s.record(&Attempt::Failed("no route".into()));
         assert_eq!(
             s.message,
-            "OpenRecall could not update itself: no route. To update by hand, run: curl -fsSL https://raw.githubusercontent.com/rajnandan1/openrecall/main/install.sh | sh"
+            "Monot could not update itself: no route. To update by hand, run: curl -fsSL https://raw.githubusercontent.com/rajnandan1/monot/main/install.sh | sh"
         );
         s.record(&Attempt::Current("latest is 0.0.1".into()));
         assert_eq!(s.failures, 0);
         s.record(&Attempt::Swapped("99.0.0".into()));
         assert!(s.message.starts_with(&format!(
-            "OpenRecall updated from {VERSION} to 99.0.0. Sessions that were open"
+            "Monot updated from {VERSION} to 99.0.0. Sessions that were open"
         )));
 
         assert!(plugin_due("0.2.0", "", "0.3.0"));
@@ -531,7 +531,7 @@ mod tests {
         assert_eq!(
             w("0.3.0", "0.2.0", "", false).as_deref(),
             Some(
-                "OpenRecall binary 0.2.0 is older than plugin 0.3.0. Update the binary: curl -fsSL https://raw.githubusercontent.com/rajnandan1/openrecall/main/install.sh | sh"
+                "Monot binary 0.2.0 is older than plugin 0.3.0. Update the binary: curl -fsSL https://raw.githubusercontent.com/rajnandan1/monot/main/install.sh | sh"
             )
         );
         assert_eq!(
@@ -547,7 +547,7 @@ mod tests {
         assert!(
             w("0.2.0", "0.3.0", "", false)
                 .unwrap()
-                .ends_with("Update the plugin: claude plugin update openrecall@openrecall. Then restart Claude Code.")
+                .ends_with("Update the plugin: claude plugin update monot@monot. Then restart Claude Code.")
         );
         assert_eq!(w("0.2.0", "0.3.0", "0.3.0", true), None, "a mixed session");
         assert_eq!(
@@ -561,10 +561,10 @@ mod tests {
 
     #[test]
     fn the_binary_step_swaps_in_only_a_checked_newer_release() {
-        let dir = std::env::temp_dir().join(format!("openrecall-update-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("monot-update-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        let target = dir.join("openrecall");
+        let target = dir.join("monot");
         let new = b"#!/bin/sh\necho 99.0.0\n";
         let sum = format!("{}  {ASSET}\n", sha256(new));
         let step = |latest: &str, sum: &str, binary: &[u8]| {
@@ -575,7 +575,7 @@ mod tests {
                 .unwrap()
                 .map(|e| e.unwrap().file_name())
                 .collect();
-            assert_eq!(left, ["openrecall"], "no temporary file stays");
+            assert_eq!(left, ["monot"], "no temporary file stays");
             let seen = seen.lock().unwrap().clone();
             (attempt, fs::read(&target).unwrap(), seen)
         };
@@ -671,7 +671,7 @@ mod tests {
         assert_eq!(String::from(late.unwrap_err()), "\"sleep\" ran past 0 s");
 
         let gone = run_for(
-            &mut Command::new("openrecall-no-such-program"),
+            &mut Command::new("monot-no-such-program"),
             None,
             Duration::from_secs(5),
         );
@@ -681,7 +681,7 @@ mod tests {
         );
         assert_eq!(
             String::from(gone.unwrap_err()),
-            "cannot start \"openrecall-no-such-program\": No such file or directory (os error 2)"
+            "cannot start \"monot-no-such-program\": No such file or directory (os error 2)"
         );
     }
 

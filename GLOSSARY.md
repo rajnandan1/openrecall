@@ -1,4 +1,4 @@
-# OpenRecall
+# Monot
 
 A recall layer for Claude Code: it hands a session the right past context at the right moment, without slowing the prompt.
 
@@ -43,7 +43,7 @@ A memory's stable ID that Claude can quote to expand or forget the memory. It na
 _Avoid_: URI, link, handle, name
 
 **Built-in memory**:
-Claude Code's own per-project memory files and their MEMORY.md index. OpenRecall indexes the topic files read-only; it never writes there and never copies them.
+Claude Code's own per-project memory files and their MEMORY.md index. Monot indexes the topic files read-only; it never writes there and never copies them.
 _Avoid_: native memory, Claude memory
 
 **Global memory**:
@@ -51,7 +51,7 @@ A memory in no repo's scope. Every session may recall it.
 _Avoid_: shared memory, user memory (that is level 3)
 
 **Home**:
-The one directory on a machine that holds all of OpenRecall's state: memories, handoff records, the index and the log.
+The one directory on a machine that holds all of Monot's state: memories, handoff records, the index and the log.
 _Avoid_: data dir, store, cache
 
 **Index**:
@@ -135,7 +135,7 @@ The work that runs between the user pressing enter and Claude starting to answer
 _Avoid_: hot path, critical path
 
 **Skip rule**:
-A rule that stops OpenRecall for a session or a prompt. It is either a session skip or a prompt skip.
+A rule that stops Monot for a session or a prompt. It is either a session skip or a prompt skip.
 _Avoid_: blacklist, exclusion, filter
 
 **Session skip**:
@@ -163,7 +163,7 @@ A prompt with 10 words or fewer besides the paths of its named files, such as `d
 _Avoid_: pointer prompt
 
 **Headless session**:
-A session started by `claude -p` or the SDK, with no person typing. OpenRecall does nothing in it.
+A session started by `claude -p` or the SDK, with no person typing. Monot does nothing in it.
 _Avoid_: batch session, non-interactive run, sdk session
 
 **Hook cap**:
@@ -225,11 +225,11 @@ The part of dedupe that rewrites each other memory of the repo that a new fact m
 _Avoid_: strike (that is a failed extraction run), update, sync
 
 **Provider**:
-The LLM service that extraction and picks send session text to, chosen by the user. OpenRecall has no default provider; with none set, extraction and picks are off.
+The LLM service that extraction and picks send session text to, chosen by the user. Monot has no default provider; with none set, extraction and picks are off.
 _Avoid_: vendor, backend, model (one provider serves many models)
 
 **API provider**:
-A provider that OpenRecall reaches at an OpenAI-style endpoint with a key that the user stores in the home. OpenRouter is one.
+A provider that Monot reaches at an OpenAI-style endpoint with a key that the user stores in the home. OpenRouter is one.
 _Avoid_: curl provider, HTTP provider, OpenRouter (that is one API provider)
 
 **Plan provider**:
@@ -253,11 +253,11 @@ A line that extraction proposes for a repo's CLAUDE.md, kept in a per-repo file 
 _Avoid_: rule (a rule lives in CLAUDE.md), tip, recommendation
 
 **Own tool call**:
-A call Claude makes to one of OpenRecall's four MCP tools: recall, remember, forget or stats. Extraction and picks never see one, since a memory about using memory is noise and a remembered fact is already stored.
+A call Claude makes to one of Monot's four MCP tools: recall, remember, forget or stats. Extraction and picks never see one, since a memory about using memory is noise and a remembered fact is already stored.
 _Avoid_: self call, meta call, memory tool use
 
 **Secret scan**:
-The check every text OpenRecall stores or sends goes through, using gitleaks' rules. A hit drops a fact; in a handoff record or in extraction's input it is replaced by `[REDACTED:<rule-id>]`.
+The check every text Monot stores or sends goes through, using gitleaks' rules. A hit drops a fact; in a handoff record or in extraction's input it is replaced by `[REDACTED:<rule-id>]`.
 _Avoid_: sanitizer, secret filter, DLP
 
 ### Measuring
@@ -327,7 +327,7 @@ The replay of the released binary on a case set. Every variant of a change is co
 _Avoid_: baseline (that is built-in memory alone), control
 
 **Replay**:
-Running a past case or handoff pair through OpenRecall after the fact, seeing only the memories that existed at the time.
+Running a past case or handoff pair through Monot after the fact, seeing only the memories that existed at the time.
 _Avoid_: simulation, backtest, rerun
 
 **Extraction replay**:
@@ -355,13 +355,17 @@ A change that cannot make a session worse by design. It never removes or rewrite
 _Avoid_: safe change, sure win, absolute improvement
 
 **Daily stats**:
-One row of counts per day that the binary keeps in the home, so Claude can say how OpenRecall performed. The counts come from the log and the transcripts by mechanical checks only, never from a judge.
+One row of counts per day that the binary keeps in the home, so Claude can say how Monot performed. The counts come from the log and the transcripts by mechanical checks only, never from a judge.
 _Avoid_: metrics, telemetry, analytics, dashboard
 
 ### Updating
 
+**Monot**:
+The product: the binary and the plugin together.
+_Avoid_: OpenRecall (the name before version 0.15.0)
+
 **Binary**:
-The one program that does all of OpenRecall's work. The hooks, the MCP server and the update check all run it.
+The one program that does all of Monot's work. The hooks, the MCP server and the update check all run it.
 _Avoid_: CLI, executable, tool
 
 **Plugin**:
@@ -369,7 +373,7 @@ The Claude Code configuration that points a session's hooks and its MCP server a
 _Avoid_: extension, integration, hooks (those are one part of it)
 
 **Release**:
-One published version of OpenRecall: a binary and the plugin that belongs to it. The update check installs nothing else.
+One published version of Monot: a binary and the plugin that belongs to it. The update check installs nothing else.
 _Avoid_: build, deploy, drop, tag
 
 **Version**:

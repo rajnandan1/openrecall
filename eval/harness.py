@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OpenRecall eval harness: the eval set, the baseline (built-in memory alone), and OpenRecall replayed beside it.
+"""Monot eval harness: the eval set, the baseline (built-in memory alone), and Monot replayed beside it.
 
     python3 eval/harness.py freeze                   # draw cases.jsonl once, append new handoff pairs to pairs.jsonl
     python3 eval/harness.py report [--binary PATH] [--picks]   # write runs/<UTC time>/report.md
@@ -9,16 +9,16 @@
     python3 eval/harness.py replay-case CASE [--runs N] [--binary PATH]   # a frozen case of eval/replay/CASE
     python3 eval/harness.py extract-replay NAME SET REF_BINARY CHANGED_BINARY   # Extraction replay of case set SET
 
-Reads Claude Code transcripts under ~/.claude/projects and writes only under ~/.openrecall/eval/
-(OPENRECALL_HOME replaces ~/.openrecall). The first freeze needs appendix-a.jsonl there: one
+Reads Claude Code transcripts under ~/.claude/projects and writes only under ~/.monot/eval/
+(MONOT_HOME replaces ~/.monot). The first freeze needs appendix-a.jsonl there: one
 {"id", "session", "at"} line per spec Appendix A prompt, `at` being the prompt line's timestamp.
-The report replays every session through the openrecall binary (default: target/release/openrecall) in a
+The report replays every session through the monot binary (default: target/release/monot) in a
 scratch world, then every frozen case for level 2, labeled by Jev through judge.py; without a binary it prints the
 baseline alone. `--picks` also runs the pick job with the provider of extract.toml, about $1.60 a run.
 A case set (ticket 06) is every searched real prompt of the live recall log in a window, each with frozen copies of
-what its replay reads; FOLDER is under ~/.openrecall/eval/ and SINCE and UNTIL are ISO times.
+what its replay reads; FOLDER is under ~/.monot/eval/ and SINCE and UNTIL are ISO times.
 A replay case (spec 3.12) runs N times, each on a fresh scratch home, and prints each pass question's share of runs;
-its layout is in ~/.openrecall/eval/replay/README.md.
+its layout is in ~/.monot/eval/replay/README.md.
 """
 import glob
 import json
@@ -35,7 +35,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 
 PROJECTS = os.path.expanduser("~/.claude/projects")
-EVAL = os.path.join(os.environ.get("OPENRECALL_HOME") or os.path.expanduser("~/.openrecall"), "eval")
+EVAL = os.path.join(os.environ.get("MONOT_HOME") or os.path.expanduser("~/.monot"), "eval")
 HOME = os.path.expanduser("~")
 CASES = 100
 WINDOW = timedelta(days=7)
@@ -63,8 +63,8 @@ PICK_CALLS = 10  # src/extract.rs PICK_CAP: a session with this many calls start
 # Spec Appendix A, rows 0 to 13, in the order of appendix-a.jsonl (A00 to A13).
 HAND = ["useful", "useful", "useful", "partly", "partly", "useful", "noise", "noise", "useful", "partly", "noise",
         "noise", "noise", "noise"]
-BINARY = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "target", "release", "openrecall")
-MCP_RECALL = "mcp__plugin_openrecall_openrecall__recall"
+BINARY = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "target", "release", "monot")
+MCP_RECALL = "mcp__plugin_monot_monot__recall"
 STAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{6}Z")
 DOC = re.compile(r"\.(?:md|txt|rst|org|adoc)$", re.I)
 MAX_DOC_BYTES = 262144
@@ -393,10 +393,10 @@ def copy_turns(s, st, upto, subs):
 
 def scratch():
     """A scratch directory that is never under /private/tmp/claude-, which the binary treats as a session skip."""
-    tmp = tempfile.mkdtemp(prefix="openrecall-replay-")
+    tmp = tempfile.mkdtemp(prefix="monot-replay-")
     if tmp.startswith(("/private/tmp/claude-", "/tmp/claude-")):
         shutil.rmtree(tmp)
-        tmp = tempfile.mkdtemp(prefix="openrecall-replay-", dir="/var/tmp")
+        tmp = tempfile.mkdtemp(prefix="monot-replay-", dir="/var/tmp")
     return tmp
 
 
@@ -409,10 +409,10 @@ def replay(binary, sessions, snapshot=(), picks=False):
     on each prompt, against a provider that cannot answer (spec 5.4)."""
     tmp = scratch()
     home = os.path.join(tmp, "home")
-    env = dict(HOME=home, OPENRECALL_HOME=os.path.join(home, ".openrecall"), CLAUDE_CODE_ENTRYPOINT="cli",
+    env = dict(HOME=home, MONOT_HOME=os.path.join(home, ".monot"), CLAUDE_CODE_ENTRYPOINT="cli",
                PATH="/usr/bin:/bin")
     if picks:
-        pick_home(env["OPENRECALL_HOME"], 'base_url = "http://127.0.0.1:9"\nmodel = "made-up"\n', "made-up-key")
+        pick_home(env["MONOT_HOME"], 'base_url = "http://127.0.0.1:9"\nmodel = "made-up"\n', "made-up-key")
     known, worlds, state = {}, {}, {}
     for s in sessions:
         known[s["repo"]] = known.get(s["repo"]) or identity(s["cwd"])[1]
@@ -430,7 +430,7 @@ def replay(binary, sessions, snapshot=(), picks=False):
                     fh.write('[remote "origin"]\n\turl = %s\n' % url)
             worlds[root] = dict(folder=folder, first=s["sid"], subs=[(root + "/", folder + "/"), ('"%s"' % root, '"%s"' % folder),
                                                                    (HOME + "/", home + "/")],
-                                records=os.path.join(env["OPENRECALL_HOME"], "repos", normalize(url), "handoffs"))
+                                records=os.path.join(env["MONOT_HOME"], "repos", normalize(url), "handoffs"))
         state[s["sid"]] = dict(w=worlds[root], pos=0, done=0, branch=None, renamed=False, prompts=0,
                                copy=os.path.join(tmp, s["sid"] + ".jsonl"))
     events = []
@@ -478,10 +478,10 @@ def replay(binary, sessions, snapshot=(), picks=False):
                                **(dict(prompt_id="t%d" % i, transcript_path=st["copy"]) if picks else {}))
                 timings += [ms] if t["real"] else []
                 text = json.loads(out)["hookSpecificOutput"]["additionalContext"] if out.strip() else ""
-                text = text.split("\n\nRecalled memories from earlier sessions (OpenRecall).")[0]
+                text = text.split("\n\nRecalled memories from earlier sessions (Monot).")[0]
                 m = FRAME.match(text)
                 if m:
-                    with open(os.path.join(env["OPENRECALL_HOME"], "repos", m.group(2) + ".md")) as fh:
+                    with open(os.path.join(env["MONOT_HOME"], "repos", m.group(2) + ".md")) as fh:
                         front = dict(l.split(": ", 1) for l in fh.read().split("\n---\n")[0].splitlines() if ": " in l)
                     pushes[sid].append(dict(prompt=st["prompts"], turn=i, text=text, branch=m.group(1),
                                             aliases=set(front.get("aliases", "").split(", ")) - {""}))
@@ -500,7 +500,7 @@ def replay(binary, sessions, snapshot=(), picks=False):
             call("capture", "--job", hook_event_name="Stop", stop_hook_active=False, transcript_path=st["copy"],
                  transcript_len=os.path.getsize(st["copy"]), last_assistant_message=texts[-1] if texts else "")
             st["branch"] = t["branch_end"] or st["branch"]
-        log = os.path.join(env["OPENRECALL_HOME"], "log", "openrecall.jsonl")
+        log = os.path.join(env["MONOT_HOME"], "log", "monot.jsonl")
         events = read(log) if os.path.exists(log) else []
         routes = defaultdict(list)
         for e in events:
@@ -532,7 +532,7 @@ def front(path, key):
 
 
 def fact_date(path):
-    """A fact's `source` date (ticket 21): the time cut for OpenRecall's own facts."""
+    """A fact's `source` date (ticket 21): the time cut for Monot's own facts."""
     parts = front(path, "source").split()
     try:
         return ts_of(parts[1]) if len(parts) > 1 else None
@@ -541,7 +541,7 @@ def fact_date(path):
 
 
 def fact_at(path, at):
-    """Ticket 06: an OpenRecall fact as it stood at `at`. A replace keeps the old text as `replaced/<stem>.<UTC
+    """Ticket 06: a Monot fact as it stood at `at`. A replace keeps the old text as `replaced/<stem>.<UTC
     second>.md`, so the first copy stamped after `at` is that version; without one it is the file."""
     stem, cut = os.path.basename(path)[:-3], at.strftime("%Y-%m-%dT%H%M%SZ")
     copies = {os.path.basename(f)[len(stem) + 1:-3]: f
@@ -552,7 +552,7 @@ def fact_at(path, at):
 
 def memories_at(c, main, at, orhome):
     """A case's memories by address: the built-in files of its main checkout born before the prompt, with today's
-    text, and OpenRecall's facts and globals as they stood then (fact_at), with a `source` date before the prompt."""
+    text, and Monot's facts and globals as they stood then (fact_at), with a `source` date before the prompt."""
     out = {}
     if main and os.path.isdir(main):
         for f in glob.glob(os.path.join(PROJECTS, slug(main), "memory", "*.md")):
@@ -573,8 +573,8 @@ def home_path(address, folder):
     if parts[0] == "builtin":
         return os.path.join(".claude", "projects", slug(folder), "memory", parts[-1] + ".md")
     if parts[0] == "global":
-        return os.path.join(".openrecall", "global", parts[-1] + ".md")
-    return os.path.join(".openrecall", "repos", address + ".md")
+        return os.path.join(".monot", "global", parts[-1] + ".md")
+    return os.path.join(".monot", "repos", address + ".md")
 
 
 def named_docs(prompt, folder):
@@ -707,7 +707,7 @@ def extraction_lines(since, dedupe_fn=None, yes=0.7):
     """Tickets 17, 21 and 26 from the live log: health, facts, Jev's check (cached in dedupe.jsonl) of each written fact
     and applied reconcile, store size, new CLAUDE.md suggestions. `dedupe_fn` is judge.dedupe_check; None asks nothing."""
     orhome = os.path.dirname(EVAL)
-    log = os.path.join(orhome, "log", "openrecall.jsonl")
+    log = os.path.join(orhome, "log", "monot.jsonl")
     events = read(log) if os.path.exists(log) else []
     extract = [e for e in events if e.get("event") == "extract"]
     runs = [e for e in extract if "to" in e]
@@ -801,7 +801,7 @@ def extraction_lines(since, dedupe_fn=None, yes=0.7):
             yes, len(checked), len(written), len(repeats), listed(repeats), len(missed), listed(missed), len(builtin),
             listed(builtin), len(lost), len(merges), listed(lost), len(rechecked), len(rewritten), len(still_true),
             listed(still_true), len(thinned), listed(thinned)),
-        "- Store size: %s." % (", ".join("%s %d" % kv for kv in sorted(sizes.items())) or "no OpenRecall facts yet"),
+        "- Store size: %s." % (", ".join("%s %d" % kv for kv in sorted(sizes.items())) or "no Monot facts yet"),
         "- CLAUDE.md suggestions added since the last report%s: %d%s." % (
             " (%s)" % since.strftime("%Y-%m-%d") if since else "", len(added), listed(added)),
     ]
@@ -897,7 +897,7 @@ def wait_pick(log, sid):
 
 
 def replay_cases(binary, cases, mains, provider=None, frozen=None):
-    """Ticket 16: each case through `openrecall recall` in its own stand-in world: a folder whose `.git` holds the
+    """Ticket 16: each case through `monot recall` in its own stand-in world: a folder whose `.git` holds the
     case's origin and branch, the case's worktree (else the repo's main checkout) linked in so the path check sees
     today's tree, and a scratch home with the case's memories (memories_at) where the binary looks for them. Returns
     one result per case: candidates, injections, drops, timing. `provider`, the extract.toml text and api-key (None for
@@ -905,7 +905,7 @@ def replay_cases(binary, cases, mains, provider=None, frozen=None):
     `frozen`, a case set's folder (freeze_set), replays from its copies: the memories, the session's ledger and pick
     calls, the transcript and the named documents."""
     tmp = scratch()
-    orhome = os.environ.get("OPENRECALL_HOME") or os.path.expanduser("~/.openrecall")
+    orhome = os.environ.get("MONOT_HOME") or os.path.expanduser("~/.monot")
     results = []
     try:
         for i, c in enumerate(cases):
@@ -936,14 +936,14 @@ def replay_cases(binary, cases, mains, provider=None, frozen=None):
                 os.utime(dst, (times[address], times[address]))
                 if not address.startswith("builtin/"):
                     unexpired(dst, at)
-            env = plan_env(dict(HOME=home, OPENRECALL_HOME=os.path.join(home, ".openrecall"), CLAUDE_CODE_ENTRYPOINT="cli",
+            env = plan_env(dict(HOME=home, MONOT_HOME=os.path.join(home, ".monot"), CLAUDE_CODE_ENTRYPOINT="cli",
                                 CLAUDE_PROJECT_DIR=folder, PATH="/usr/bin:/bin"), provider)
             ask = dict(session_id=c["session"], cwd=folder, prompt=c["prompt"], hook_event_name="UserPromptSubmit")
             drift = 0
             if frozen:
-                os.makedirs(os.path.join(env["OPENRECALL_HOME"], "sessions"))
+                os.makedirs(os.path.join(env["MONOT_HOME"], "sessions"))
                 ledger = [re.sub(r"^builtin/[^/]+/", "builtin/%s/" % slug(folder), a) for a in c["state"]["ledger"]]
-                with open(os.path.join(env["OPENRECALL_HOME"], "sessions", c["session"] + ".json"), "w") as fh:
+                with open(os.path.join(env["MONOT_HOME"], "sessions", c["session"] + ".json"), "w") as fh:
                     json.dump(dict(c["state"], ledger=ledger), fh)
                 for typed, kind, h in c["docs"]:
                     if kind == "abs":
@@ -952,7 +952,7 @@ def replay_cases(binary, cases, mains, provider=None, frozen=None):
                         place(home if kind == "home" else folder, typed[2:] if kind == "home" else typed,
                               os.path.join(frozen, "blobs", h))
             if provider:
-                pick_home(env["OPENRECALL_HOME"], *provider)
+                pick_home(env["MONOT_HOME"], *provider)
                 ask.update(prompt_id=c["id"], transcript_path=os.path.join(tmp, "t%d.jsonl" % i))
                 if frozen:
                     copy_turns(dict(path=os.path.join(frozen, c["transcript"])), dict(copy=ask["transcript_path"], pos=0, done=0),
@@ -965,7 +965,7 @@ def replay_cases(binary, cases, mains, provider=None, frozen=None):
             began = time.perf_counter()
             subprocess.run([binary, "recall"], env=env, capture_output=True, input=json.dumps(ask).encode())
             ms = (time.perf_counter() - began) * 1000
-            log = os.path.join(env["OPENRECALL_HOME"], "log", "openrecall.jsonl")
+            log = os.path.join(env["MONOT_HOME"], "log", "monot.jsonl")
             events = read(log) if os.path.exists(log) else []
             recall = next((e for e in events if e.get("event") == "recall" and e.get("session") == c["session"]), {})
             stand_in, real = "builtin/%s/" % slug(folder), "builtin/%s/" % slug(main or "")
@@ -982,7 +982,7 @@ def replay_cases(binary, cases, mains, provider=None, frozen=None):
             if provider and not results[-1]["skipped"] and c.get("state", {}).get("picks", 0) < PICK_CALLS:
                 line = wait_pick(log, c["session"])
                 try:
-                    with open(os.path.join(env["OPENRECALL_HOME"], "picks", c["session"], c["id"] + ".json")) as fh:
+                    with open(os.path.join(env["MONOT_HOME"], "picks", c["session"], c["id"] + ".json")) as fh:
                         address = fix(json.load(fh)["address"])
                 except (OSError, ValueError, KeyError):
                     address = None
@@ -1161,7 +1161,7 @@ def turn_of(e, turns, near_ms=15000, queued=()):
 def live_expansions(by_sid):
     """Ticket 19: over the live recall log, the prompts that got an injection, and how many of them saw the model
     call `recall` on an injected address in that turn. The frame's tool sentence goes if the first 100 show none."""
-    log = os.path.join(os.path.dirname(EVAL), "log", "openrecall.jsonl")
+    log = os.path.join(os.path.dirname(EVAL), "log", "monot.jsonl")
     prompts = expanded = 0
     for e in read(log) if os.path.exists(log) else []:
         if e.get("event") != "recall" or not e.get("injected"):
@@ -1180,7 +1180,7 @@ def live_pr_urls(by_sid, label_fn=None, version="0.4.0"):
     binary step from or to `version`. An injection is an injected address that is also a candidate, so a pushed
     handoff record is not one. `label_fn` labels each injection once, in labels.jsonl."""
     orhome = os.path.dirname(EVAL)
-    log = os.path.join(orhome, "log", "openrecall.jsonl")
+    log = os.path.join(orhome, "log", "monot.jsonl")
     events = read(log) if os.path.exists(log) else []
     start = min((e["at"] for e in events if e.get("event") == "update" and e.get("step") == "binary"
                  and version in (e.get("from"), e.get("to"))), default=None)
@@ -1311,7 +1311,7 @@ def level2_lines(cases, results, labels, by_sid, gate, label_fn=None, picks=Fals
     shown = sorted({rows[i][0] for i in range(0, len(rows), step)} | {best_threshold, rows[-1][0]})
     lines = [
         "", "## Level 2: recalled memories", "",
-        "Each of the %d frozen cases replayed through `openrecall recall` in its own stand-in world (ticket 16): a "
+        "Each of the %d frozen cases replayed through `monot recall` in its own stand-in world (ticket 16): a "
         "folder with the case's origin and branch, the repo's main checkout linked in for the path check, and the "
         "built-in memory files born before the prompt, with today's text. Searched: %d. Skipped by the binary: %s. "
         "No repo, so global memories only: %d. Main checkout unknown: %d."
@@ -1366,7 +1366,7 @@ def level2_lines(cases, results, labels, by_sid, gate, label_fn=None, picks=Fals
         "best threshold: %s." % (dropped["rot"], sum(1 for _, x in cands if x.get("rot")), len(cands),
                        sum(1 for _, x in cands if x.get("rot") == "all"), "; ".join(variants)),
         "",
-        "Replay latency of `openrecall recall` over the %d searched cases, process start included%s: p50 %.1f ms, "
+        "Replay latency of `monot recall` over the %d searched cases, process start included%s: p50 %.1f ms, "
         "p95 %.1f ms. Binary errors: %s." % (len(timings), ", with picks on" if picks else "", pct(timings, 0.5), pct(timings, 0.95),
                                              ", ".join("%d × %s" % kv for kv in Counter(e for r in results for e in r["errors"]).items()) or "none"),
     ]
@@ -1391,7 +1391,7 @@ def is_late(s, push):
 
 def live_routes():
     """The live recall log's `pushed` events by route, and the time of its first event."""
-    log = os.path.join(os.path.dirname(EVAL), "log", "openrecall.jsonl")
+    log = os.path.join(os.path.dirname(EVAL), "log", "monot.jsonl")
     events = read(log) if os.path.exists(log) else []
     return Counter(e.get("how") for e in events if e.get("event") == "pushed"), min((e["at"] for e in events if "at" in e), default=None)
 
@@ -1443,7 +1443,7 @@ def record_of(address, orhome):
 def daily(orhome):
     """Daily stats (spec sections 4 and 5): one row per local day of the recall log, without `written_at`. A line from
     before 0.10.0 lacks `identifiers` or `branch`, so its check reads the memory or record file as it stands now."""
-    events = read(os.path.join(orhome, "log", "openrecall.jsonl"))
+    events = read(os.path.join(orhome, "log", "monot.jsonl"))
     paths = {os.path.basename(p)[:-6]: p for p in sorted(glob.glob(os.path.join(PROJECTS, "*", "*.jsonl")))}
     by_sid, recalls, days = {}, defaultdict(list), defaultdict(lambda: defaultdict(list))
     for sid in {e.get("session") for e in events} & set(paths):
@@ -1579,7 +1579,7 @@ def freeze_set(out, since, until):
     if os.path.exists(os.path.join(out, "cases.jsonl")):
         sys.exit("%s is frozen" % out)
     lo, hi = ts_of(since).timestamp() * 1000, ts_of(until).timestamp() * 1000
-    events = [e for e in read(os.path.join(orhome, "log", "openrecall.jsonl")) if e.get("at", 0) <= hi]
+    events = [e for e in read(os.path.join(orhome, "log", "monot.jsonl")) if e.get("at", 0) <= hi]
     by_session = defaultdict(list)
     for e in events:
         by_session[e.get("session")].append(e)
@@ -1778,7 +1778,7 @@ def report(now=None, binary=BINARY, label_fn=None, gate=None, dedupe_fn=None, pi
     lines = [
         "# Eval report, %s" % now.strftime("%Y-%m-%d %H:%M UTC"),
         "",
-        "OpenRecall %s, beside the baseline: Claude Code's built-in memory alone."
+        "Monot %s, beside the baseline: Claude Code's built-in memory alone."
         % ("replayed from `%s`" % os.path.relpath(binary) if ran else "not replayed (no binary at `%s`; run `cargo build --release`)" % binary),
         "",
         "## Eval set",
@@ -1792,7 +1792,7 @@ def report(now=None, binary=BINARY, label_fn=None, gate=None, dedupe_fn=None, pi
         "## Carry-over",
         "",
         "Final-state identifiers that reach the new session by its third real prompt. Carried: in the handoff record "
-        "OpenRecall pushed. Built-in: already in the start `instructions` attachment (the `MEMORY.md` and CLAUDE.md "
+        "Monot pushed. Built-in: already in the start `instructions` attachment (the `MEMORY.md` and CLAUDE.md "
         "files Claude Code loaded), the baseline. Retyped: in the user's own first 3 real prompts. Goal: carried 80%% "
         "or more. Measured over %d pairs. Not measured: %s. Each rate shows its count and a 95%% Wilson interval."
         % (sum(measured.values()), ", ".join("%d %s" % (n, why) for why, n in skipped.items()) or "none"),
@@ -1842,7 +1842,7 @@ def report(now=None, binary=BINARY, label_fn=None, gate=None, dedupe_fn=None, pi
             "",
             "## Replay latency",
             "",
-            "`openrecall recall` over %d real prompts, process start included%s: p50 %.1f ms, p95 %.1f ms. Replay timings "
+            "`monot recall` over %d real prompts, process start included%s: p50 %.1f ms, p95 %.1f ms. Replay timings "
             "only; live latency comes from the recall log." % (
                 len(timings), ", with picks on: each prompt starts the pick job, against a made-up provider that cannot "
                 "answer" if picks else "", pct(timings, 0.5), pct(timings, 0.95)),
@@ -1930,7 +1930,7 @@ def holds(value, check):
 def live_memories(home, repo):
     """Spec 4.2's live memories of a scratch home: the files at the top of the repo's folder under `repos/`, of
     `global/` and of the built-in folder, with no `expires` or one after today, as `drop_reason` in src/main.rs."""
-    orhome, today = os.path.join(home, ".openrecall"), datetime.now(timezone.utc).date().isoformat()
+    orhome, today = os.path.join(home, ".monot"), datetime.now(timezone.utc).date().isoformat()
     files = (sorted(glob.glob(os.path.join(orhome, "repos", repo, "*.md"))) + sorted(glob.glob(os.path.join(orhome, "global", "*.md")))
              + sorted(glob.glob(os.path.join(home, ".claude", "projects", "*", "memory", "*.md"))))
     return [f for f in files if os.path.basename(f) not in ("MEMORY.md", "claude-md-suggestions.md")
@@ -1940,7 +1940,7 @@ def live_memories(home, repo):
 def judge_check(check, c, home, binary, env, says, yes=0.7):
     """One check of a pass question on a run's scratch home: whether it holds, and what it saw. A memories check holds
     when `want` some, none or all files that match `grep` say yes: by `says` to `jev` at `yes` or more, else always."""
-    orhome = env["OPENRECALL_HOME"]
+    orhome = env["MONOT_HOME"]
     kind = check.get("kind", "memories")
     if kind == "record":
         value = section(os.path.join(orhome, "repos", c["repo"], "handoffs", check["branch"].replace("/", "--") + ".md"),
@@ -1986,7 +1986,7 @@ def read_text(path):
 
 
 def logged(orhome):
-    log = os.path.join(orhome, "log", "openrecall.jsonl")
+    log = os.path.join(orhome, "log", "monot.jsonl")
     return read(log) if os.path.exists(log) else []
 
 
@@ -1994,13 +1994,13 @@ def scratch_path(address, home):
     parts = address.split("/")
     if parts[0] == "builtin" and len(parts) == 3:
         return os.path.join(home, ".claude", "projects", parts[1], "memory", parts[2] + ".md")
-    return address_path(address, os.path.join(home, ".openrecall"))
+    return address_path(address, os.path.join(home, ".monot"))
 
 
 def recalled(binary, env, queries):
-    """Spec 3.12: the addresses `openrecall mcp` returns for each `{query, k}`, called over stdio as Claude Code calls
+    """Spec 3.12: the addresses `monot mcp` returns for each `{query, k}`, called over stdio as Claude Code calls
     it, read from the server's `mcp` log lines."""
-    recalls = lambda: [e for e in logged(env["OPENRECALL_HOME"]) if e.get("event") == "mcp" and e.get("tool") == "recall"]
+    recalls = lambda: [e for e in logged(env["MONOT_HOME"]) if e.get("event") == "mcp" and e.get("tool") == "recall"]
     before = len(recalls())
     mcp = subprocess.Popen([binary, "mcp"], env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
 
@@ -2039,7 +2039,7 @@ def replay_case(folder, runs=None, binary=BINARY, says=None, dedupe_fn=None):
         tmp = scratch()
         try:
             home, work = os.path.join(tmp, "home"), os.path.join(tmp, "w")
-            orhome = os.path.join(home, ".openrecall")
+            orhome = os.path.join(home, ".monot")
             shutil.copytree(os.path.join(folder, "home"), home, copy_function=shutil.copyfile)
             for rel, mtime in c.get("mtimes", {}).items():
                 os.utime(os.path.join(home, rel), (mtime, mtime))
@@ -2057,8 +2057,8 @@ def replay_case(folder, runs=None, binary=BINARY, says=None, dedupe_fn=None):
                     json.dump(entry, fh)
             if provider:
                 pick_home(orhome, *provider)
-            env = plan_env(dict(HOME=home, OPENRECALL_HOME=orhome, CLAUDE_CODE_ENTRYPOINT="cli", CLAUDE_PROJECT_DIR=work,
-                                PATH="/usr/bin:/bin", OPENRECALL_POLL="0"), provider)
+            env = plan_env(dict(HOME=home, MONOT_HOME=orhome, CLAUDE_CODE_ENTRYPOINT="cli", CLAUDE_PROJECT_DIR=work,
+                                PATH="/usr/bin:/bin", MONOT_POLL="0"), provider)
             for step in c["steps"]:
                 if step["run"] == "extract":
                     subprocess.run([binary, "extract", "--job"], env=env, capture_output=True)
@@ -2134,7 +2134,7 @@ def xr_plan(live, start, end):
     `to` there, resumed at its largest `to` before the window (0 without one)."""
     lo, hi = start.timestamp() * 1000, end.timestamp() * 1000
     runs, before = {}, {}
-    for e in read(os.path.join(live, "log", "openrecall.jsonl")):
+    for e in read(os.path.join(live, "log", "monot.jsonl")):
         if e.get("event") == "extract" and e.get("to") and e["at"] <= hi:
             into = runs if e["at"] >= lo else before
             into[e["session"]] = max(into.get(e["session"], 0), e["to"])
@@ -2152,7 +2152,7 @@ def xr_remembers(live, start, end):
     """The `remember` calls of the window, oldest first: (time, address, live file)."""
     lo, hi = start.timestamp() * 1000, end.timestamp() * 1000
     out = []
-    for e in read(os.path.join(live, "log", "openrecall.jsonl")):
+    for e in read(os.path.join(live, "log", "monot.jsonl")):
         if e.get("event") == "mcp" and e.get("tool") == "remember" and e.get("address") and lo <= e["at"] <= hi:
             path = address_path(e["address"], live)
             if os.path.exists(path):
@@ -2210,7 +2210,7 @@ def xr_expiry(tracked, at):
 def xr_session(s, copy, orhome, job):
     """Runs `job` (one `extract --job`) on the session's queue entry until its cursor reaches the cut or the entry
     fails, at most 8 times. A failed entry is reset once and run again. Returns (tries, retried, entry)."""
-    path, log = os.path.join(orhome, "extract", s["session"] + ".json"), os.path.join(orhome, "log", "openrecall.jsonl")
+    path, log = os.path.join(orhome, "extract", s["session"] + ".json"), os.path.join(orhome, "log", "monot.jsonl")
     tries = stops = 0
     for retried in (False, True):
         with open(path, "w") as fh:
@@ -2265,7 +2265,7 @@ def xr_after(orhome, tracked, today):
 
 
 def xr_freeze(run, orhome, folder, labels):
-    """The set's cases with its frozen built-in memories and named documents, and OpenRecall's memories as they stood
+    """The set's cases with its frozen built-in memories and named documents, and Monot's memories as they stood
     at each case in the run's store, in `run/set/`. The set's transcripts and blobs are linked, not copied."""
     fz = os.path.join(run, "set")
     os.makedirs(os.path.join(fz, "blobs"), exist_ok=True)
@@ -2311,7 +2311,7 @@ def xr_summary(run, start, remembered):
                       else "start" if blob and fact_time(blob) < start else "extract")
             origins[origin][0] += 1
             origins[origin][1] += labels.get((c["id"], a, x["text_hash"])) == "useful"
-    log = read(os.path.join(run, "home", ".openrecall", "log", "openrecall.jsonl"))
+    log = read(os.path.join(run, "home", ".monot", "log", "monot.jsonl"))
     ex = [e for e in log if e.get("event") == "extract"]
     extract_cost = sum(e.get("cost") or 0 for e in ex)
     pick_cost = sum((r.get("pick") or {}).get("cost") or 0 for r in results)
@@ -2385,7 +2385,7 @@ def xr_run(run, binary, folder, labels, plan, remembered, start, label_fn, today
     clock fix-ups, the freeze and the replay with picks. Writes `run/summary.json` and returns it."""
     live = os.path.dirname(EVAL)
     home = os.path.join(run, "home")
-    orhome = os.path.join(home, ".openrecall")
+    orhome = os.path.join(home, ".monot")
     tracked_path, done_path = os.path.join(run, "tracked.json"), os.path.join(run, "sessions.jsonl")
     if not os.path.exists(tracked_path):
         os.makedirs(os.path.join(orhome, "extract"), exist_ok=True)
@@ -2396,7 +2396,7 @@ def xr_run(run, binary, folder, labels, plan, remembered, start, label_fn, today
         tracked = {k: tuple(v) for k, v in json.load(fh).items()}
     provider = real_provider()
     pick_home(orhome, *provider)
-    env = plan_env(dict(HOME=home, OPENRECALL_HOME=orhome, OPENRECALL_POLL="0", PATH="/usr/bin:/bin"), provider)
+    env = plan_env(dict(HOME=home, MONOT_HOME=orhome, MONOT_POLL="0", PATH="/usr/bin:/bin"), provider)
     job = lambda: subprocess.run([binary, "extract", "--job"], env=env, capture_output=True)
     mains = {s["main"] for s in plan if s["main"]}
     pending = list(remembered)

@@ -23,7 +23,7 @@ struct World {
 
 impl World {
     fn new(name: &str) -> World {
-        let root = std::env::temp_dir().join(format!("openrecall-{name}-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("monot-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let folder = root.join("w");
         fs::create_dir_all(folder.join(".git/refs/heads")).unwrap();
@@ -64,11 +64,11 @@ impl World {
     }
 
     fn spawn(&self, args: &[&str]) -> Child {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_openrecall"));
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_monot"));
         cmd.args(args)
             .env_clear()
             .env("HOME", &self.home)
-            .env("OPENRECALL_HOME", self.home.join(".openrecall"))
+            .env("MONOT_HOME", self.home.join(".monot"))
             .env("CLAUDE_PROJECT_DIR", &self.folder)
             .env("CLAUDE_CODE_ENTRYPOINT", self.entrypoint)
             .env("CLAUDE_CODE_SESSION_ID", "M")
@@ -79,7 +79,7 @@ impl World {
             cmd.env("CLAUDE_PLUGIN_ROOT", plugin);
         }
         if !self.poll {
-            cmd.env("OPENRECALL_POLL", "0");
+            cmd.env("MONOT_POLL", "0");
         }
         if let Some(path) = &self.path {
             cmd.env("PATH", path);
@@ -139,7 +139,7 @@ impl World {
     fn record_in(&self, identity: &str, stem: &str) -> Option<String> {
         fs::read_to_string(
             self.home
-                .join(".openrecall/repos")
+                .join(".monot/repos")
                 .join(identity)
                 .join("handoffs")
                 .join(format!("{stem}.md")),
@@ -275,7 +275,7 @@ fn a_new_session_gets_the_earlier_sessions_state() {
         w.pushed("S", "and now?").is_none(),
         "never twice in one context window"
     );
-    let status = fs::read_to_string(w.home.join(".openrecall/status/S")).unwrap();
+    let status = fs::read_to_string(w.home.join(".monot/status/S")).unwrap();
     assert!(status.starts_with("recall 1 · "), "the total keeps the record pushed one prompt earlier: {status}");
 
     w.turn(
@@ -308,7 +308,7 @@ fn a_new_session_gets_the_earlier_sessions_state() {
     w.hook(&["handoff"], "U", json!({"source": "startup"}));
     assert!(w.pushed("U", "status of XYZ-99?").is_none());
 
-    let log = fs::read_to_string(w.home.join(".openrecall/log/openrecall.jsonl")).unwrap();
+    let log = fs::read_to_string(w.home.join(".monot/log/monot.jsonl")).unwrap();
     for event in [
         "\"pushed\"",
         "\"settled\"",
@@ -481,14 +481,14 @@ fn the_file_route_pushes_another_tasks_record_that_names_the_document() {
 
     api.branch("feat/a");
     start(&api, "A");
-    turn(&api, "A", "Plan the export", "Wrote the plan to /tmp/openrecall-export-handoff.md. Next: build it in app.");
+    turn(&api, "A", "Plan the export", "Wrote the plan to /tmp/monot-export-handoff.md. Next: build it in app.");
     w.branch("feat/b");
-    let ctx = ask(&w, "S1", "do /tmp/openrecall-export-handoff.md").expect("1. the sibling record names the /tmp file");
+    let ctx = ask(&w, "S1", "do /tmp/monot-export-handoff.md").expect("1. the sibling record names the /tmp file");
     let (head, body) = ctx.split_once("\n\n").unwrap();
     assert!(
         head.starts_with("Handoff record of another task, not this session's: branch feat/a, last written 20")
             && head.ends_with(&format!(
-                "(github.com/someone/api/handoffs/feat--a). It names /tmp/openrecall-export-handoff.md, the file that \
+                "(github.com/someone/api/handoffs/feat--a). It names /tmp/monot-export-handoff.md, the file that \
                  this prompt names. It reflects what was true then in another repo, github.com/someone/api, in the \
                  folder {}. Its paths are paths of that repo, not of this one; check them in that folder before acting \
                  on it.",
@@ -672,12 +672,12 @@ fn a_turn_that_ends_on_trunk_in_another_repo_writes_nothing_there() {
     let api = w.repo("api", Some("git@github.com:someone/api.git"));
     api.branch("main");
     turn(&api, "E", "merge the api fix into main", "Merged into main.");
-    let handoffs = w.home.join(".openrecall/repos/github.com/someone/api/handoffs");
+    let handoffs = w.home.join(".monot/repos/github.com/someone/api/handoffs");
     assert!(fs::read_dir(&handoffs).map_or(true, |mut d| d.next().is_none()), "nothing in {}", handoffs.display());
     assert!(w.record("feat--x").unwrap().contains("## Last ask\nBuild ABC-12"));
     assert!(log_of(&w, "trunk").is_empty());
 
-    put(&w.home.join(".openrecall/sessions/O.json"), &json!({"branch": "feat/x", "turns": 1, "ledger": []}).to_string());
+    put(&w.home.join(".monot/sessions/O.json"), &json!({"branch": "feat/x", "turns": 1, "ledger": []}).to_string());
     w.branch("main");
     turn(&w, "O", "merge it into main", "Merged into main.");
     assert!(w.record("feat--x").unwrap().contains("## Last ask\nBuild ABC-12"), "a state from 0.10.1 keeps no branch");
@@ -690,7 +690,7 @@ fn idle_records_retire_at_session_start() {
     w.branch("feat/old");
     let dir = w
         .home
-        .join(".openrecall/repos/github.com/someone/app/handoffs");
+        .join(".monot/repos/github.com/someone/app/handoffs");
     fs::create_dir_all(&dir).unwrap();
     let old = "---\nrepo: github.com/someone/app\nbranch: feat/old\nfolder: /w\naliases: \nwriters: E\nupdated_at: 2020-01-01T00:00:00Z\n---\n## Last ask\nx\n";
     fs::write(dir.join("feat--old.md"), old).unwrap();
@@ -744,7 +744,7 @@ fn skipped_sessions_write_nothing_and_every_exit_is_zero() {
     );
     assert!(note.is_empty());
     assert_eq!(
-        fs::read_to_string(w.home.join(".openrecall/status/N")).unwrap(),
+        fs::read_to_string(w.home.join(".monot/status/N")).unwrap(),
         "recall 0 · skipped\n"
     );
 }
@@ -762,9 +762,9 @@ fn version_answers_in_a_skipped_session_and_marks_a_source_build() {
 fn session_start_shows_a_waiting_message_once_beside_the_version_warning() {
     let mut w = World::new("message");
     w.branch("feat/x");
-    let state = w.home.join(".openrecall/update/state.json");
+    let state = w.home.join(".monot/update/state.json");
     fs::create_dir_all(state.parent().unwrap()).unwrap();
-    fs::write(&state, r#"{"attempted_at":1,"failures":4,"message":"OpenRecall could not update itself: x."}"#).unwrap();
+    fs::write(&state, r#"{"attempted_at":1,"failures":4,"message":"Monot could not update itself: x."}"#).unwrap();
     fs::create_dir_all(w.root.join("plugin/.claude-plugin")).unwrap();
     fs::write(w.root.join("plugin/.claude-plugin/plugin.json"), r#"{"version": "99.0.0"}"#).unwrap();
     w.plugin = Some(w.root.join("plugin"));
@@ -773,10 +773,10 @@ fn session_start_shows_a_waiting_message_once_beside_the_version_warning() {
         serde_json::from_str::<Value>(&out).ok().map(|v| v["systemMessage"].as_str().unwrap().to_string())
     };
     let warning = format!(
-        "OpenRecall binary {} is older than plugin 99.0.0. Update the binary: curl -fsSL https://raw.githubusercontent.com/rajnandan1/openrecall/main/install.sh | sh",
+        "Monot binary {} is older than plugin 99.0.0. Update the binary: curl -fsSL https://raw.githubusercontent.com/rajnandan1/monot/main/install.sh | sh",
         env!("CARGO_PKG_VERSION")
     );
-    assert_eq!(shown(&w), Some(format!("OpenRecall could not update itself: x.\n{warning}")));
+    assert_eq!(shown(&w), Some(format!("Monot could not update itself: x.\n{warning}")));
     assert_eq!(shown(&w), Some(warning), "the message shows once, and a source build still warns");
     assert_eq!(fs::read_to_string(&state).unwrap(), r#"{"attempted_at":1,"failures":4}"#);
     w.plugin = None;
@@ -800,13 +800,13 @@ fn copy_dir(from: &Path, to: &Path) {
 fn a_home_from_0_2_0_still_reads() {
     let w = World::new("compat");
     w.branch("feat/x");
-    copy_dir(Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/home-0.2.0")), &w.home.join(".openrecall"));
+    copy_dir(Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/home-0.2.0")), &w.home.join(".monot"));
     let out = w.hook(&["handoff"], "NEW", json!({"source": "startup"}));
-    assert!(out.contains("OpenRecall updated from 0.1.0 to 0.2.0. Sessions that were open"), "the update state: {out}");
+    assert!(out.contains("Monot updated from 0.1.0 to 0.2.0. Sessions that were open"), "the update state: {out}");
     let ctx = w.pushed("NEW", "status of ABC-12?").expect("the handoff record");
     assert!(ctx.contains("tickets: ABC-12\nprs: #345\n") && ctx.ends_with("## Last answer\nOpened PR #345. Next: ask for review.\n"), "{ctx}");
     assert!(w.pushed("OLD", "status of ABC-12?").is_none(), "the session state's ledger");
-    let status = fs::read_to_string(w.home.join(".openrecall/status/OLD")).unwrap();
+    let status = fs::read_to_string(w.home.join(".monot/status/OLD")).unwrap();
     assert!(status.starts_with("recall 2 · "), "the session state's total: {status}");
     let mut m = Mcp::start(&w);
     let (text, _) = m.tool("recall", json!({"query": "export queue retries"}));
@@ -857,7 +857,7 @@ fn level_two_recalls_the_repos_memories_above_the_gate() {
     fs::create_dir_all(w.folder.join("src")).unwrap();
     fs::write(w.folder.join("src/export.py"), "").unwrap();
     let builtin = w.builtin_dir();
-    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    let repo = w.home.join(".monot/repos/github.com/someone/app");
     w.fillers(&builtin);
     fs::write(builtin.join("MEMORY.md"), "- ABC-12 exports: src/export.py\n").unwrap();
     let long = format!(
@@ -870,10 +870,10 @@ fn level_two_recalls_the_repos_memories_above_the_gate() {
     w.memory(&repo, "export-null-rows", "gotcha", "source: E 2026-01-02T03:04:05Z\n", "Null rows", "Exports fail on empty rows: ABC-12 needs a null check in src/export.py before the batch seals.");
     w.memory(&repo, "own-export-note", "state", "source: S 2026-01-03T00:00:00Z\n", "Own", "ABC-12 export empty rows: this session's own fact about src/export.py.");
     fs::write(repo.join("claude-md-suggestions.md"), "- ABC-12 exports empty rows src/export.py\n").unwrap();
-    w.memory(&w.home.join(".openrecall/global"), "empty-rows-rule", "preference", "source: G 2026-01-01T00:00:00Z\n", "Rule", "Treat empty rows as a bug in every export, never as data (ABC-12 style).");
+    w.memory(&w.home.join(".monot/global"), "empty-rows-rule", "preference", "source: G 2026-01-01T00:00:00Z\n", "Rule", "Treat empty rows as a bug in every export, never as data (ABC-12 style).");
 
     let ctx = w.pushed("S", "exports fail on empty rows in ABC-12").expect("level 2 injects");
-    assert!(ctx.starts_with("Recalled memories from earlier sessions (OpenRecall). They reflect what was true when written. Full text: mcp__plugin_openrecall_openrecall__recall with the address.\n- "), "{ctx}");
+    assert!(ctx.starts_with("Recalled memories from earlier sessions (Monot). They reflect what was true when written. Full text: mcp__plugin_monot_monot__recall with the address.\n- "), "{ctx}");
     let lines: Vec<&str> = ctx.lines().skip(1).collect();
     assert!(lines.len() <= 3 && ctx.chars().count() <= 1040, "{ctx}");
     let whole = long.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -889,7 +889,7 @@ fn level_two_recalls_the_repos_memories_above_the_gate() {
     for gone in ["own-export-note", "old-export-notes", "claude-md-suggestions", "MEMORY"] {
         assert!(!ctx.contains(gone), "{gone} must not be injected: {ctx}");
     }
-    assert!(fs::read_to_string(w.home.join(".openrecall/status/S")).unwrap().starts_with(&format!("recall {} · ", lines.len())));
+    assert!(fs::read_to_string(w.home.join(".monot/status/S")).unwrap().starts_with(&format!("recall {} · ", lines.len())));
     let again = w.pushed("S", "exports fail on empty rows in ABC-12").unwrap_or_default();
     assert!(
         !again.contains("export-empty-rows") && !again.contains("export-null-rows"),
@@ -908,7 +908,7 @@ fn level_two_recalls_the_repos_memories_above_the_gate() {
     let ctx = w.pushed("U", "exports fail on empty rows in ABC-12").unwrap();
     assert!(ctx.contains("moved the seal after the check") && !ctx.contains("export-null-rows"), "the index follows the files: {ctx}");
 
-    let log = fs::read_to_string(w.home.join(".openrecall/log/openrecall.jsonl")).unwrap();
+    let log = fs::read_to_string(w.home.join(".monot/log/monot.jsonl")).unwrap();
     for event in ["\"reason\":\"short\"", "\"reason\":\"empty-args\"", "\"candidates\":[{\"address\":\"", "\"text_hash\":\"", "\"rot\":1", "\"own\":1", "\"ledger\":"] {
         assert!(log.contains(event), "{event}\n{log}");
     }
@@ -918,7 +918,7 @@ fn level_two_recalls_the_repos_memories_above_the_gate() {
 fn a_memory_goes_in_whole_only_in_the_room_the_other_lines_leave() {
     let w = World::new("whole");
     w.branch("feat/y");
-    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    let repo = w.home.join(".monot/repos/github.com/someone/app");
     w.fillers(&repo);
     let source = "source: E 2026-01-02T03:04:05Z\n";
     let history = "Ledger totals round half-even since ABC-77, because half-up rounding drifted one cent per thousand \
@@ -984,7 +984,7 @@ fn the_longest_prompt_hook_output_stays_under_the_hook_cap() {
         "",
     );
 
-    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    let repo = w.home.join(".monot/repos/github.com/someone/app");
     w.fillers(&repo);
     let source = "source: E 2026-01-02T03:04:05Z\n";
     w.memory(&repo, "ledger-rounding-history", "decision", source, "Ledger totals round half-even since ABC-12",
@@ -1015,7 +1015,7 @@ fn the_longest_prompt_hook_output_stays_under_the_hook_cap() {
 fn the_gate_opens_at_ten_rows_from_every_scope() {
     let w = World::new("small");
     w.branch("feat/z");
-    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    let repo = w.home.join(".monot/repos/github.com/someone/app");
     let source = "source: E 2026-01-02T03:04:05Z\n";
     w.memory(&repo, "ledger-rounding", "decision", source, "Ledger totals round half-even since ABC-77",
         "Ledger totals round half-even since ABC-77; the cents column stays an integer.");
@@ -1023,7 +1023,7 @@ fn the_gate_opens_at_ten_rows_from_every_scope() {
         w.memory(&repo, &format!("note-{i}"), "project", source, "Unrelated", &format!("Note {i} about the deploy runner."));
     }
     assert_eq!(w.pushed("S", "ledger rounding ABC-77 cents"), None, "9 rows: the gate stays closed");
-    let log = fs::read_to_string(w.home.join(".openrecall/log/openrecall.jsonl")).unwrap();
+    let log = fs::read_to_string(w.home.join(".monot/log/monot.jsonl")).unwrap();
     let recall: Value = log
         .lines()
         .filter_map(|l| serde_json::from_str::<Value>(l).ok())
@@ -1042,7 +1042,7 @@ fn the_gate_opens_at_ten_rows_from_every_scope() {
         fs::write(w.folder.join(".git/config"), format!("[remote \"origin\"]\n\turl = git@github.com:someone/{name}.git\n")).unwrap()
     };
     config("other");
-    w.memory(&w.home.join(".openrecall/repos/github.com/someone/other"), "other-note", "project", source, "Other", "A note of another repository.");
+    w.memory(&w.home.join(".monot/repos/github.com/someone/other"), "other-note", "project", source, "Other", "A note of another repository.");
     w.hook(&["recall"], "O", json!({"prompt": "a prompt in the other repository"}));
     config("app");
     let ctx = w.pushed("T", "ledger rounding ABC-77 cents").expect("the other repository's row makes 10");
@@ -1053,7 +1053,7 @@ fn the_gate_opens_at_ten_rows_from_every_scope() {
 fn a_memory_whose_description_names_the_prompts_ticket_passes_under_the_threshold() {
     let w = World::new("ident");
     w.branch("feat/x");
-    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    let repo = w.home.join(".monot/repos/github.com/someone/app");
     w.fillers(&repo);
     let source = "source: E 2026-01-02T03:04:05Z\n";
     w.memory(&repo, "ledger-rounding", "decision", source, "Ledger totals round half-even since ABC-77",
@@ -1065,7 +1065,7 @@ fn a_memory_whose_description_names_the_prompts_ticket_passes_under_the_threshol
     let lines: Vec<&str> = ctx.lines().skip(1).collect();
     assert_eq!(lines.len(), 1, "a ticket in the body alone does not count: {ctx}");
     assert!(lines[0].contains("github.com/someone/app/ledger-rounding: "), "{ctx}");
-    let log = fs::read_to_string(w.home.join(".openrecall/log/openrecall.jsonl")).unwrap();
+    let log = fs::read_to_string(w.home.join(".monot/log/monot.jsonl")).unwrap();
     let recall: Value = log
         .lines()
         .filter_map(|l| serde_json::from_str::<Value>(l).ok())
@@ -1082,7 +1082,7 @@ fn an_echo_frees_its_line_and_stays_out_of_the_ledger() {
     w.branch("feat/x");
     fs::create_dir_all(w.folder.join(".scratch/x")).unwrap();
     fs::write(w.folder.join(".scratch/x/map.md"), "").unwrap();
-    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    let repo = w.home.join(".monot/repos/github.com/someone/app");
     w.fillers(&repo);
     let source = "source: E 2026-01-02T03:04:05Z\n";
     let address = "github.com/someone/app/walrus-migration-map";
@@ -1093,7 +1093,7 @@ fn an_echo_frees_its_line_and_stays_out_of_the_ledger() {
             &format!("Step {i} of the walrus migration runs after the map is read."));
     }
     let recall = |sid: &str| -> Value {
-        fs::read_to_string(w.home.join(".openrecall/log/openrecall.jsonl"))
+        fs::read_to_string(w.home.join(".monot/log/monot.jsonl"))
             .unwrap()
             .lines()
             .filter_map(|l| serde_json::from_str::<Value>(l).ok())
@@ -1118,7 +1118,7 @@ fn an_echo_frees_its_line_and_stays_out_of_the_ledger() {
 fn the_status_line_totals_the_sessions_injections() {
     let w = World::new("total");
     w.branch("feat/x");
-    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    let repo = w.home.join(".monot/repos/github.com/someone/app");
     w.fillers(&repo);
     let source = "source: E 2026-01-02T03:04:05Z\n";
     w.memory(&repo, "kiwi-checksum", "gotcha", source, "The kiwi importer drops rows without a checksum",
@@ -1127,7 +1127,7 @@ fn the_status_line_totals_the_sessions_injections() {
         "The walrus export writes UTF-16 files, so every reader decodes them first.");
     w.memory(&repo, "walrus-export-header", "decision", source, "The walrus export puts the header row first",
         "The walrus export puts the header row first, before any data row.");
-    let status = || fs::read_to_string(w.home.join(".openrecall/status/S")).unwrap();
+    let status = || fs::read_to_string(w.home.join(".monot/status/S")).unwrap();
     let send = |prompt: &str| {
         let injected = w.pushed("S", prompt).unwrap_or_default().lines().filter(|l| l.starts_with("- ")).count();
         let line = status();
@@ -1160,7 +1160,7 @@ fn the_status_line_totals_the_sessions_injections() {
 fn a_prompt_during_the_capture_writer_keeps_both_updates() {
     let w = World::new("lock");
     w.branch("feat/x");
-    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    let repo = w.home.join(".monot/repos/github.com/someone/app");
     w.fillers(&repo);
     let source = "source: E 2026-01-02T03:04:05Z\n";
     w.memory(&repo, "walrus-export-encoding", "gotcha", source, "The walrus export writes UTF-16",
@@ -1177,12 +1177,12 @@ fn a_prompt_during_the_capture_writer_keeps_both_updates() {
     };
     let cwd = w.folder.join("src");
 
-    let lock = fs::File::create(w.home.join(".openrecall/sessions/S.lock")).unwrap();
+    let lock = fs::File::create(w.home.join(".monot/sessions/S.lock")).unwrap();
     lock.lock().unwrap();
     let writer = start(&["capture", "--job"], json!({"session_id": "S", "cwd": cwd, "transcript_path": transcript, "last_assistant_message": "ok"}));
     let prompt = start(&["recall"], json!({"session_id": "S", "cwd": cwd, "prompt": "walrus export header encoding"}));
     std::thread::sleep(Duration::from_millis(300));
-    assert!(w.record("feat--x").is_none() && !w.home.join(".openrecall/status/S").exists(), "both wait for the lock");
+    assert!(w.record("feat--x").is_none() && !w.home.join(".monot/status/S").exists(), "both wait for the lock");
     drop(lock);
     for child in [writer, prompt] {
         assert!(child.wait_with_output().unwrap().status.success());
@@ -1197,7 +1197,7 @@ fn a_prompt_during_the_capture_writer_keeps_both_updates() {
         "github.com/someone/app/walrus-export-header",
     ], "{s}");
     assert_eq!((s["injections"].as_u64(), s["turns"].as_u64()), (Some(2), Some(1)), "{s}");
-    assert!(fs::read_to_string(w.home.join(".openrecall/status/S")).unwrap().starts_with("recall 2 · "));
+    assert!(fs::read_to_string(w.home.join(".monot/status/S")).unwrap().starts_with("recall 2 · "));
 }
 
 /// One JSON-RPC client over the server's pipes: each call reads lines until the reply with its id.
@@ -1263,7 +1263,7 @@ impl Mcp {
 fn mcp_tools_remember_recall_and_forget() {
     let w = World::new("mcp");
     w.branch("feat/x");
-    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    let repo = w.home.join(".monot/repos/github.com/someone/app");
     let builtin = w.builtin_dir();
     w.memory(&builtin, "vendor-quirks", "project", "", "The vendor API rejects unknown slugs", "The vendor API rejects unknown slugs, so every slug is checked first.");
     fs::create_dir_all(repo.join("replaced")).unwrap();
@@ -1283,7 +1283,7 @@ fn mcp_tools_remember_recall_and_forget() {
     assert!(file.ends_with("---\n\nThe asana slug is hard-coded in src/slugs.py (ABC-1234): the vendor API rejects anything else.\n") && !file.contains("expires"), "{file}");
     let (text, _) = m.tool("remember", json!({"text": "ABC-1234 waits on the vendor's slug list; next: ask them.", "description": "ABC-1234 waits on the vendor's slug list", "type": "state", "scope": "global"}));
     assert!(text.starts_with("Stored as global/abc-1234-waits-on-the-vendor-s-slug-list-next-ask-them ("), "{text}");
-    assert!(fs::read_to_string(w.home.join(".openrecall/global/abc-1234-waits-on-the-vendor-s-slug-list-next-ask-them.md")).unwrap().contains("\nexpires: 20"));
+    assert!(fs::read_to_string(w.home.join(".monot/global/abc-1234-waits-on-the-vendor-s-slug-list-next-ask-them.md")).unwrap().contains("\nexpires: 20"));
     let (text, _) = m.tool("remember", json!({"text": "A second asana note.", "description": "A second asana note", "type": "gotcha", "scope": "repo", "name": "asana-slug"}));
     assert!(text.starts_with("Stored as github.com/someone/app/asana-slug-2 ("), "a taken name gets -2: {text}");
     let exact = format!("ABC-77 {}", "d".repeat(143));
@@ -1335,7 +1335,7 @@ fn mcp_tools_remember_recall_and_forget() {
     assert!(builtin.join("vendor-quirks.md").exists());
     m.close();
 
-    let log = fs::read_to_string(w.home.join(".openrecall/log/openrecall.jsonl")).unwrap();
+    let log = fs::read_to_string(w.home.join(".monot/log/monot.jsonl")).unwrap();
     for event in [
         "\"address\":\"github.com/someone/app/asana-slug\",\"at\":",
         "\"event\":\"mcp\",\"session\":\"M\",\"tool\":\"remember\"",
@@ -1363,7 +1363,7 @@ fn remember_files_under_the_working_directorys_repo() {
     let mut m = Mcp::start(&moved_into(&w));
     let (text, err) = m.tool("remember", json!({"text": "The zebra job runs nightly.", "description": "The zebra job runs nightly.", "type": "gotcha", "scope": "repo", "name": "zebra-job"}));
     assert!(!err && text.starts_with("Stored as github.com/someone/app/zebra-job ("), "{text}");
-    assert!(w.home.join(".openrecall/repos/github.com/someone/app/zebra-job.md").is_file());
+    assert!(w.home.join(".monot/repos/github.com/someone/app/zebra-job.md").is_file());
     m.close();
 }
 
@@ -1371,7 +1371,7 @@ fn remember_files_under_the_working_directorys_repo() {
 fn recall_finds_the_working_directorys_memories() {
     let w = World::new("mcp-moved-recall");
     let text = "The zebra job runs nightly.";
-    w.memory(&w.home.join(".openrecall/repos/github.com/someone/app"), "zebra-job", "gotcha", "", text, text);
+    w.memory(&w.home.join(".monot/repos/github.com/someone/app"), "zebra-job", "gotcha", "", text, text);
     let mut m = Mcp::start(&moved_into(&w));
     let (answer, err) = m.tool("recall", json!({"query": "zebra"}));
     assert!(!err && answer.contains("github.com/someone/app/zebra-job: "), "{answer}");
@@ -1400,7 +1400,7 @@ const STATS_HEADER: &str = "day versions sessions prompts injections used_signal
 #[test]
 fn the_stats_tool_prints_the_ranges_rows_and_their_totals() {
     let w = World::new("stats-table");
-    let rows = w.home.join(".openrecall/stats/daily.jsonl");
+    let rows = w.home.join(".monot/stats/daily.jsonl");
     let mut older = stats_row("2026-01-09", 1_768_000_000_000, json!({"versions": ["0.8.0", "0.9.0"], "sessions": 3,
         "prompts": 12, "injections": 4, "used_signal": {"yes": 2, "judged": 4}, "picks_delivered": 1,
         "pushes": {"settle": 1}, "right_pushes": {"right": 1, "wrong": 0, "unjudged": 0},
@@ -1437,7 +1437,7 @@ fn the_stats_tool_prints_the_ranges_rows_and_their_totals() {
     }
 
     use std::os::unix::fs::PermissionsExt;
-    let log = w.home.join(".openrecall/log/openrecall.jsonl");
+    let log = w.home.join(".monot/log/monot.jsonl");
     fs::set_permissions(&log, fs::Permissions::from_mode(0o000)).unwrap();
     let (text, err) = m.tool("stats", range);
     fs::set_permissions(&log, fs::Permissions::from_mode(0o644)).unwrap();
@@ -1455,7 +1455,7 @@ fn stats_world(name: &str, back: &[u64]) -> World {
     let recall = |start: u64, took: u64| {
         format!("{}\n", json!({"event": "recall", "session": "A", "started_at": start, "ended_at": start + took, "at": start + took + 1}))
     };
-    let log = w.home.join(".openrecall/log/openrecall.jsonl");
+    let log = w.home.join(".monot/log/monot.jsonl");
     let mut lines: Vec<String> = back.iter().map(|days| recall(start - days * 86_400_000, 5)).collect();
     lines.push(recall(start, 5));
     put(&log, &lines.concat());
@@ -1465,7 +1465,7 @@ fn stats_world(name: &str, back: &[u64]) -> World {
 }
 
 fn stats_lock(w: &World) -> fs::File {
-    let lock = fs::File::create(w.home.join(".openrecall/stats/lock")).unwrap();
+    let lock = fs::File::create(w.home.join(".monot/stats/lock")).unwrap();
     lock.try_lock().unwrap();
     lock
 }
@@ -1519,7 +1519,7 @@ fn the_stats_tool_shows_the_old_rows_when_the_lock_stays_held() {
 #[test]
 fn the_stats_tool_returns_a_lock_file_error_at_once_then_the_old_rows() {
     let w = stats_world("stats-lock-failed", &[]);
-    let lock = w.home.join(".openrecall/stats/lock");
+    let lock = w.home.join(".monot/stats/lock");
     fs::remove_file(&lock).unwrap();
     fs::create_dir(&lock).unwrap();
     let mut m = Mcp::start(&w);
@@ -1613,9 +1613,9 @@ fn wait_for(path: &Path, needle: &str) -> String {
 fn extraction_writes_dedupes_and_moves_the_cursor() {
     let w = World::new("extract");
     w.branch("feat/x");
-    let home = w.home.join(".openrecall");
+    let home = w.home.join(".monot");
     let repo = home.join("repos/github.com/someone/app");
-    let log = home.join("log/openrecall.jsonl");
+    let log = home.join("log/monot.jsonl");
     w.memory(&repo, "export-empty-rows", "gotcha", "source: E0 2026-01-01T00:00:00.000Z\n", "Exports fail on empty rows", "Exports fail on empty rows in src/export.py.");
     w.memory(&repo, "cargo-fmt-rule", "preference", "source: E0 2026-01-01T00:00:00.000Z\n", "Run cargo fmt", "Run cargo fmt before pushing.");
     let fmt_rule = fs::read_to_string(repo.join("cargo-fmt-rule.md")).unwrap();
@@ -1730,7 +1730,7 @@ fn extraction_writes_dedupes_and_moves_the_cursor() {
 fn dedupe_sees_a_built_in_memory_past_the_top_five_and_past_its_start() {
     let w = World::new("dedupe-builtin");
     w.branch("feat/x");
-    let home = w.home.join(".openrecall");
+    let home = w.home.join(".monot");
     let repo = home.join("repos/github.com/someone/app");
     for i in 0..6 {
         let text = format!("The search tool score gate note {i}: k slots and weak matches.");
@@ -1752,7 +1752,7 @@ fn dedupe_sees_a_built_in_memory_past_the_top_five_and_past_its_start() {
     fs::set_permissions(home.join("api-key"), fs::Permissions::from_mode(0o600)).unwrap();
     w.turn("S1", &[user("Why does the search tool return weak matches for a short query?"), said("It has no gate.", None)], "");
     w.hook(&["extract"], "S1", json!({"hook_event_name": "SessionEnd"}));
-    let log = wait_for(&home.join("log/openrecall.jsonl"), "\"event\":\"extract\",\"from\":0");
+    let log = wait_for(&home.join("log/monot.jsonl"), "\"event\":\"extract\",\"from\":0");
     let dedupe = p.requests()[1].1["messages"][1]["content"].as_str().unwrap().to_string();
     assert!(dedupe.contains("/tools-build [project] ") && dedupe.contains(stated), "{dedupe}");
     assert!(log.contains("\"action\":\"skip\"") && log.contains("\"skipped\":1") && !repo.join("search-tool-fills-k.md").exists(), "{log}");
@@ -1807,7 +1807,7 @@ const OLD: &str = "source: E0 2026-01-01T00:00:00.000Z\n";
 fn a_fact_reconciles_an_older_memory_that_names_its_ticket_only_in_the_body_past_the_bm25_top_ten() {
     let w = World::new("reconcile");
     w.branch("feat/x");
-    let home = w.home.join(".openrecall");
+    let home = w.home.join(".monot");
     let repo = home.join("repos").join(APP);
     w.fillers(&repo);
     for i in 0..12 {
@@ -1869,7 +1869,7 @@ fn a_fact_reconciles_an_older_memory_that_names_its_ticket_only_in_the_body_past
 fn a_memory_the_session_received_reaches_dedupe_when_no_fact_looks_like_it() {
     let w = World::new("received");
     w.branch("feat/x");
-    let home = w.home.join(".openrecall");
+    let home = w.home.join(".monot");
     let repo = home.join("repos").join(APP);
     w.memory(&repo, "tuesday-window", "decision", OLD, "Payroll runs wait for Tuesday", "Payroll runs wait for Tuesday.");
     w.memory(&repo, "gone-plan", "state", &format!("{OLD}expires: 2026-01-15\n"), "Payroll plan", "Payroll plan.");
@@ -1902,7 +1902,7 @@ fn a_memory_the_session_received_reaches_dedupe_when_no_fact_looks_like_it() {
 fn a_dropped_reconcile_writes_nothing_and_a_secret_in_its_rewrite_logs_the_rule() {
     let w = World::new("reconcile-drops");
     w.branch("feat/x");
-    let home = w.home.join(".openrecall");
+    let home = w.home.join(".monot");
     let repo = home.join("repos").join(APP);
     w.memory(&repo, "export-notes", "gotcha", OLD, "Exports read src/export.py", "Exports read src/export.py.");
     w.memory(&repo, "export-owner", "pointer", OLD, "src/export.py owns the export", "src/export.py owns the export.");
@@ -1947,7 +1947,7 @@ fn a_dropped_reconcile_writes_nothing_and_a_secret_in_its_rewrite_logs_the_rule(
     assert_eq!(fs::read_dir(repo.join("replaced")).unwrap().count(), 1, "only the replace keeps a copy");
     let skip = &dedupe_lines(&w, "skip")[0];
     assert!(skip["address"] == format!("{APP}/elsewhere") && skip["why"] == "not a candidate" && run["skipped"] == 1, "{skip}");
-    let log = fs::read_to_string(home.join("log/openrecall.jsonl")).unwrap();
+    let log = fs::read_to_string(home.join("log/monot.jsonl")).unwrap();
     assert!(!log.contains(&token), "the log holds no text");
 }
 
@@ -1955,7 +1955,7 @@ fn a_dropped_reconcile_writes_nothing_and_a_secret_in_its_rewrite_logs_the_rule(
 fn dedupe_sees_the_runs_time_and_each_candidates_to_the_second_and_writes_the_runs_time() {
     let w = World::new("reconcile-times");
     w.branch("feat/x");
-    let home = w.home.join(".openrecall");
+    let home = w.home.join(".monot");
     let repo = home.join("repos").join(APP);
     w.memory(&repo, "export-notes", "gotcha", &format!("{OLD}updated: E1 2026-10-26T17:05:09.123Z\n"), "Exports read src/export.py", "Exports read src/export.py.");
     w.memory(&repo, "export-owner", "pointer", OLD, "src/export.py owns the export", "src/export.py owns the export.");
@@ -2002,7 +2002,7 @@ fn dedupe_sees_the_runs_time_and_each_candidates_to_the_second_and_writes_the_ru
 fn a_memory_remembered_in_the_new_turns_reconciles_others_at_the_next_run() {
     let w = World::new("reconcile-remembered");
     w.branch("feat/x");
-    let home = w.home.join(".openrecall");
+    let home = w.home.join(".monot");
     let repo = home.join("repos").join(APP);
     w.memory(&repo, "queue-owner", "pointer", OLD, "src/queue.py runs the retry queue", "src/queue.py runs the retry queue.");
     w.memory(&repo, "queue-limits", "gotcha", OLD, "src/queue.py caps retries at 3", "src/queue.py caps retries at 3.");
@@ -2029,7 +2029,7 @@ fn a_memory_remembered_in_the_new_turns_reconciles_others_at_the_next_run() {
     assert!(!err, "{text}");
     m.close();
     let moved = fs::read_to_string(repo.join("queue-moved.md")).unwrap();
-    let call = json!({"type": "tool_use", "id": "r1", "name": "mcp__plugin_openrecall_openrecall__remember", "input": args});
+    let call = json!({"type": "tool_use", "id": "r1", "name": "mcp__plugin_monot_monot__remember", "input": args});
     w.turn("M", &[at(user("Move the retry queue to src/worker.py"), "2026-10-26T16:40:00.000Z"),
                   at(said("Moved.", Some(call)), "2026-10-26T16:45:00.000Z")], "");
     let run = extracted_to_end(&w, "M");
@@ -2054,7 +2054,7 @@ fn a_memory_remembered_in_the_new_turns_reconciles_others_at_the_next_run() {
 fn a_memory_an_earlier_run_wrote_at_its_wall_clock_time_is_not_remembered_without_a_remember_call() {
     let w = World::new("remembered-upgrade");
     w.branch("feat/x");
-    let repo = w.home.join(".openrecall/repos").join(APP);
+    let repo = w.home.join(".monot/repos").join(APP);
     let p = Provider::start(vec![
         answer(json!({"facts": [], "claude_md_rules": []})),
         answer(json!({"facts": [{"type": "gotcha", "name": "queue-batch-size", "description": "src/queue.py sends retries in batches of 50",
@@ -2082,7 +2082,7 @@ fn a_memory_an_earlier_run_wrote_at_its_wall_clock_time_is_not_remembered_withou
 
 /// Extraction on through the provider stand-in.
 fn extraction_on(w: &World, p: &Provider) {
-    let home = w.home.join(".openrecall");
+    let home = w.home.join(".monot");
     put(&home.join("extract.toml"), &format!("base_url = \"http://127.0.0.1:{}/v1\"\nmodel = \"test/model\"\n", p.port));
     put(&home.join("api-key"), "sk-test-123\n");
     use std::os::unix::fs::PermissionsExt;
@@ -2111,7 +2111,7 @@ fn queue(w: &World, sid: &str, lines: &[Value], extra: Value) -> PathBuf {
     let path = w.root.join(format!("{sid}.jsonl"));
     let mut run = json!({"transcript": path, "identity": "github.com/someone/app"});
     run.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
-    put(&w.home.join(format!(".openrecall/extract/{sid}.json")), &run.to_string());
+    put(&w.home.join(format!(".monot/extract/{sid}.json")), &run.to_string());
     path
 }
 
@@ -2130,7 +2130,7 @@ fn runs(w: &World, sid: &str, n: usize) -> Vec<Value> {
 
 /// Waits for a running worker to exit: it holds `extract/lock` until then.
 fn worker_done(w: &World) {
-    let lock = fs::File::create(w.home.join(".openrecall/extract/lock")).unwrap();
+    let lock = fs::File::create(w.home.join(".monot/extract/lock")).unwrap();
     while lock.try_lock().is_err() {
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -2206,7 +2206,7 @@ fn the_worker_sends_nothing_after_extraction_is_turned_off() {
     w.branch("feat/x");
     let turn = |text: &str, mins: u64| [ago(mins, user(text)), ago(mins, said("Done.", None))];
     let none = || answer(json!({"facts": [], "claude_md_rules": []}));
-    let toml = w.home.join(".openrecall/extract.toml");
+    let toml = w.home.join(".monot/extract.toml");
     let p = Provider::start_with(vec![none(), none()], move |_| {
         let _ = fs::remove_file(&toml);
     });
@@ -2222,13 +2222,13 @@ fn the_worker_sends_nothing_after_extraction_is_turned_off() {
 fn a_run_of_only_task_notification_turns_with_text_still_runs() {
     let w = World::new("extract-notification");
     w.branch("feat/x");
-    let home = w.home.join(".openrecall");
+    let home = w.home.join(".monot");
     let p = Provider::start(vec![answer(json!({"facts": [], "claude_md_rules": []}))]);
     extraction_on(&w, &p);
     w.turn("S1", &[user("<task-notification><status>completed</status><summary>exit code 0</summary></task-notification>"),
                    said("The deploy check for ABC-12 ended with 1 failed.", None)], "");
     w.hook(&["extract"], "S1", json!({"hook_event_name": "SessionEnd"}));
-    wait_for(&home.join("log/openrecall.jsonl"), "\"event\":\"extract\",\"from\":0");
+    wait_for(&home.join("log/monot.jsonl"), "\"event\":\"extract\",\"from\":0");
     let reqs = p.requests();
     assert_eq!(reqs.len(), 1, "the run calls the model");
     let input = reqs[0].1["messages"][1]["content"].as_str().unwrap();
@@ -2239,7 +2239,7 @@ const PICK_SYSTEM: &str = "You pick memories for a coding assistant (Claude Code
 
 /// Picks on through the provider stand-in: extraction's settings plus `pick = true`.
 fn picks_on(w: &World, p: &Provider) {
-    let home = w.home.join(".openrecall");
+    let home = w.home.join(".monot");
     fs::create_dir_all(&home).unwrap();
     fs::write(home.join("extract.toml"), format!("base_url = \"http://127.0.0.1:{}/v1\"\nmodel = \"test/model\"\npick = true\n", p.port)).unwrap();
     fs::write(home.join("api-key"), "sk-test-123\n").unwrap();
@@ -2258,7 +2258,7 @@ fn transcript(w: &World, sid: &str, lines: &[Value]) {
 }
 
 fn log_of(w: &World, event: &str) -> Vec<Value> {
-    fs::read_to_string(w.home.join(".openrecall/log/openrecall.jsonl"))
+    fs::read_to_string(w.home.join(".monot/log/monot.jsonl"))
         .unwrap_or_default()
         .lines()
         .filter_map(|l| serde_json::from_str::<Value>(l).ok())
@@ -2279,14 +2279,14 @@ fn pick_line(w: &World, id: &str) -> Value {
 }
 
 fn pick_file(w: &World, sid: &str, name: &str) -> PathBuf {
-    w.home.join(".openrecall/picks").join(sid).join(name)
+    w.home.join(".monot/picks").join(sid).join(name)
 }
 
 #[test]
 fn a_pick_that_passes_writes_its_result_for_the_tool_hook() {
     let w = World::new("pick");
     w.branch("feat/x");
-    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    let repo = w.home.join(".monot/repos/github.com/someone/app");
     let source = "source: E 2026-01-02T03:04:05Z\n";
     w.memory(&repo, "alpha-walrus-encoding", "gotcha", source, "The walrus export writes UTF-16", "The walrus export writes UTF-16 files.");
     w.memory(&repo, "bravo-walrus-header", "decision", source, "The walrus export puts the header row first", "The walrus export puts the header row first, before any data row.");
@@ -2316,8 +2316,8 @@ fn a_pick_that_passes_writes_its_result_for_the_tool_hook() {
     assert_eq!(result["address"], address);
     assert_eq!(
         result["text"],
-        "Recalled memories from earlier sessions (OpenRecall). They reflect what was true when written. Full text: \
-         mcp__plugin_openrecall_openrecall__recall with the address.\n- decision 2026-01-02 \
+        "Recalled memories from earlier sessions (Monot). They reflect what was true when written. Full text: \
+         mcp__plugin_monot_monot__recall with the address.\n- decision 2026-01-02 \
          github.com/someone/app/bravo-walrus-header: The walrus export puts the header row first, before any data row."
     );
     assert!(!pick_file(&w, "S", "p1.running").exists());
@@ -2351,7 +2351,7 @@ fn a_pick_that_passes_writes_its_result_for_the_tool_hook() {
 fn the_pick_input_fits_32000_characters_and_cuts_the_oldest_turns_first() {
     let w = World::new("pick-size");
     w.branch("feat/x");
-    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    let repo = w.home.join(".monot/repos/github.com/someone/app");
     w.memory(&repo, "walrus-header", "decision", "", "The walrus export puts the header row first", "The header row comes first.");
     let p = Provider::start(vec![answer(json!({"ids": []})), answer(json!({"ids": []}))]);
     picks_on(&w, &p);
@@ -2381,7 +2381,7 @@ fn the_pick_input_fits_32000_characters_and_cuts_the_oldest_turns_first() {
 
     let w = World::new("pick-big");
     w.branch("feat/x");
-    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    let repo = w.home.join(".monot/repos/github.com/someone/app");
     for i in 0..40 {
         w.memory(&repo, &format!("note-{i:03}"), "decision", "", &format!("Note {i:03}: {}", "the walrus export keeps one rule here. ".repeat(21)), "Body.");
     }
@@ -2418,7 +2418,7 @@ fn put(path: &Path, text: &str) {
 fn a_file_led_prompt_sends_its_documents_after_the_scan_under_one_cap() {
     let w = World::new("pick-named");
     w.branch("feat/x");
-    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    let repo = w.home.join(".monot/repos/github.com/someone/app");
     w.memory(&repo, "walrus-header", "decision", "", "The walrus export puts the header row first", "The header row comes first.");
     let p = Provider::start((0..12).map(|_| answer(json!({"ids": []}))).collect());
     picks_on(&w, &p);
@@ -2492,7 +2492,7 @@ fn a_file_led_prompt_sends_its_documents_after_the_scan_under_one_cap() {
 fn the_named_text_takes_only_the_room_the_memory_list_and_prompt_leave() {
     let w = World::new("pick-named-room");
     w.branch("feat/x");
-    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    let repo = w.home.join(".monot/repos/github.com/someone/app");
     for i in 0..30 {
         w.memory(&repo, &format!("note-{i:03}"), "decision", "", &format!("Note {i:03}: {}", "the walrus export keeps one rule here. ".repeat(23)), "Body.");
     }
@@ -2511,7 +2511,7 @@ fn the_named_text_takes_only_the_room_the_memory_list_and_prompt_leave() {
 fn past_50_memories_a_pick_lists_the_50_that_best_match_the_prompt_and_the_newest_turn() {
     let w = World::new("pick-short");
     w.branch("feat/x");
-    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    let repo = w.home.join(".monot/repos/github.com/someone/app");
     w.memory(&repo, "kiwi-checksum", "gotcha", "", "Kiwi importer skips records without a checksum", "Kiwi importer skips each record that has no checksum.");
     w.memory(&repo, "walrus-header", "decision", "", "Walrus export puts header row first", "Header row comes first.");
     w.memory(&repo, "zebra-lamp", "project", "", "Zebra lamps glow green", "Zebra lamps glow green.");
@@ -2562,7 +2562,7 @@ fn past_50_memories_a_pick_lists_the_50_that_best_match_the_prompt_and_the_newes
     assert!(lines.iter().enumerate().all(|(k, l)| l.starts_with(&format!("- m{}: ", k + 1))), "numbered in that order");
     assert_eq!(line["memory"], "github.com/someone/app/kiwi-checksum", "the ids number the short list");
 
-    fs::write(w.home.join(".openrecall/sessions/S.json"), json!({"ledger": ["github.com/someone/app/kiwi-checksum"]}).to_string()).unwrap();
+    fs::write(w.home.join(".monot/sessions/S.json"), json!({"ledger": ["github.com/someone/app/kiwi-checksum"]}).to_string()).unwrap();
     job("p3");
     let line = pick_line(&w, "p3");
     let lines = listed(2);
@@ -2574,15 +2574,15 @@ fn past_50_memories_a_pick_lists_the_50_that_best_match_the_prompt_and_the_newes
 fn a_pick_lists_no_memory_that_the_session_ledger_holds() {
     let w = World::new("pick-ledger");
     w.branch("feat/x");
-    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    let repo = w.home.join(".monot/repos/github.com/someone/app");
     let source = "source: E 2026-01-02T03:04:05Z\n";
     w.memory(&repo, "kiwi-checksum", "gotcha", source, "The kiwi importer drops rows without a checksum", "The kiwi importer drops every row that has no checksum.");
     w.memory(&repo, "walrus-header", "decision", source, "The walrus export puts the header row first", "The walrus export puts the header row first, before any data row.");
     let p = Provider::start(vec![answer(json!({"ids": []}))]);
     picks_on(&w, &p);
     transcript(&w, "S", &[]);
-    fs::create_dir_all(w.home.join(".openrecall/sessions")).unwrap();
-    fs::write(w.home.join(".openrecall/sessions/S.json"), json!({"ledger": [WALRUS]}).to_string()).unwrap();
+    fs::create_dir_all(w.home.join(".monot/sessions")).unwrap();
+    fs::write(w.home.join(".monot/sessions/S.json"), json!({"ledger": [WALRUS]}).to_string()).unwrap();
 
     prompt(&w, "S", "p1", "why does the walrus export drop the header row today");
     let line = pick_line(&w, "p1");
@@ -2596,7 +2596,7 @@ fn a_pick_lists_no_memory_that_the_session_ledger_holds() {
 fn a_short_prompt_gets_a_pick_and_a_bare_slash_command_does_not() {
     let w = World::new("pick-on-short");
     w.branch("feat/x");
-    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    let repo = w.home.join(".monot/repos/github.com/someone/app");
     w.memory(&repo, "walrus-header", "decision", "", "The walrus export puts the header row first", "The header row comes first.");
     let p = Provider::start(vec![answer(json!({"ids": ["m1"]}))]);
     picks_on(&w, &p);
@@ -2615,7 +2615,7 @@ fn a_short_prompt_gets_a_pick_and_a_bare_slash_command_does_not() {
 fn a_prompt_makes_at_most_one_call_and_a_session_ten() {
     let w = World::new("pick-cap");
     w.branch("feat/x");
-    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    let repo = w.home.join(".monot/repos/github.com/someone/app");
     w.memory(&repo, "walrus-header", "decision", "", "The walrus export puts the header row first", "The header row comes first.");
     let not_json = (200, json!({"choices": [{"finish_reason": "stop", "message": {"content": "m1, I think"}}]}));
     let cut = (200, json!({"choices": [{"finish_reason": "length", "message": {"content": ""}}],
@@ -2660,11 +2660,11 @@ fn a_prompt_makes_at_most_one_call_and_a_session_ten() {
 fn pick_cap_in_extract_toml_sets_the_calls_a_session_makes() {
     let w = World::new("pick-cap-set");
     w.branch("feat/x");
-    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    let repo = w.home.join(".monot/repos/github.com/someone/app");
     w.memory(&repo, "walrus-header", "decision", "", "The walrus export puts the header row first", "The header row comes first.");
     let p = Provider::start((0..3).map(|_| answer(json!({"ids": []}))).collect());
     picks_on(&w, &p);
-    let toml = w.home.join(".openrecall/extract.toml");
+    let toml = w.home.join(".monot/extract.toml");
     fs::write(&toml, fs::read_to_string(&toml).unwrap() + "pick_cap = 2\n").unwrap();
     transcript(&w, "S", &[]);
     for id in ["p1", "p2", "p3"] {
@@ -2681,7 +2681,7 @@ fn own_expired_rot_and_echo_drop_a_pick() {
     w.branch("feat/x");
     fs::create_dir_all(w.folder.join(".scratch/x")).unwrap();
     fs::write(w.folder.join(".scratch/x/map.md"), "").unwrap();
-    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    let repo = w.home.join(".monot/repos/github.com/someone/app");
     let old = "source: E 2026-01-02T03:04:05Z\n";
     w.memory(&repo, "a-own", "decision", "source: S 2026-01-02T03:04:05Z\n", "This session wrote it", "The walrus export runs nightly.");
     w.memory(&repo, "b-expired", "state", &format!("{old}expires: 2020-01-01\n"), "An old state", "PR #345 waits for review.");
@@ -2719,12 +2719,12 @@ fn a_built_in_memory_the_session_wrote_is_dropped_as_own() {
 fn nothing_starts_with_picks_off_or_without_a_plain_prompt_id() {
     let w = World::new("pick-off");
     w.branch("feat/x");
-    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    let repo = w.home.join(".monot/repos/github.com/someone/app");
     w.memory(&repo, "walrus-header", "decision", "", "The walrus export puts the header row first", "The header row comes first.");
     let p = Provider::start(vec![answer(json!({"ids": []}))]);
     picks_on(&w, &p);
     transcript(&w, "S", &[]);
-    let home = w.home.join(".openrecall");
+    let home = w.home.join(".monot");
     let toml = fs::read_to_string(home.join("extract.toml")).unwrap();
     let ask = "what changed in the walrus export header since yesterday";
     for (n, settings) in [toml.replace("pick = true\n", ""), toml.replace("pick = true", "pick = false")].iter().enumerate() {
@@ -2751,14 +2751,14 @@ fn nothing_starts_with_picks_off_or_without_a_plain_prompt_id() {
 }
 
 fn session_of(w: &World, sid: &str) -> Value {
-    serde_json::from_str(&fs::read_to_string(w.home.join(".openrecall/sessions").join(format!("{sid}.json"))).unwrap()).unwrap()
+    serde_json::from_str(&fs::read_to_string(w.home.join(".monot/sessions").join(format!("{sid}.json"))).unwrap()).unwrap()
 }
 
 #[test]
 fn the_first_tool_call_after_a_pick_delivers_it() {
     let w = World::new("deliver");
     w.branch("feat/x");
-    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    let repo = w.home.join(".monot/repos/github.com/someone/app");
     let source = "source: E 2026-01-02T03:04:05Z\n";
     w.memory(&repo, "kiwi-checksum", "gotcha", source, "The kiwi importer drops rows without a checksum", "The kiwi importer drops every row that has no checksum.");
     w.memory(&repo, "walrus-header", "decision", source, "The walrus export puts the header row first", "The walrus export puts the header row first, before any data row.");
@@ -2773,8 +2773,8 @@ fn the_first_tool_call_after_a_pick_delivers_it() {
     assert_eq!(
         serde_json::from_str::<Value>(out.trim()).unwrap(),
         json!({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext":
-            "Recalled memories from earlier sessions (OpenRecall). They reflect what was true when written. Full text: \
-             mcp__plugin_openrecall_openrecall__recall with the address.\n- decision 2026-01-02 \
+            "Recalled memories from earlier sessions (Monot). They reflect what was true when written. Full text: \
+             mcp__plugin_monot_monot__recall with the address.\n- decision 2026-01-02 \
              github.com/someone/app/walrus-header: The walrus export puts the header row first, before any data row."}})
     );
     assert_eq!(session_of(&w, "S")["ledger"], json!([address]));
@@ -2802,8 +2802,8 @@ fn the_session_ledger_drops_a_pick_that_recall_already_injected() {
     let w = World::new("deliver-ledger");
     picks_on(&w, &Provider::start(vec![]));
     ready(&w, "S", "p1");
-    fs::create_dir_all(w.home.join(".openrecall/sessions")).unwrap();
-    fs::write(w.home.join(".openrecall/sessions/S.json"), json!({"ledger": [WALRUS]}).to_string()).unwrap();
+    fs::create_dir_all(w.home.join(".monot/sessions")).unwrap();
+    fs::write(w.home.join(".monot/sessions/S.json"), json!({"ledger": [WALRUS]}).to_string()).unwrap();
 
     assert_eq!(w.hook(&["deliver"], "S", json!({"prompt_id": "p1"})), "");
     let drops = log_of(&w, "pick_drop");
@@ -2836,7 +2836,7 @@ fn parallel_tool_hooks_of_one_turn_deliver_the_pick_once() {
     let input = json!({"session_id": "S", "cwd": w.folder, "prompt_id": "p1"}).to_string();
     for round in 0..3 {
         ready(&w, "S", "p1");
-        fs::remove_file(w.home.join(".openrecall/sessions/S.json")).ok();
+        fs::remove_file(w.home.join(".monot/sessions/S.json")).ok();
         let mut hooks: Vec<Child> = (0..8).map(|_| w.spawn(&["deliver"])).collect();
         for h in &mut hooks {
             h.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
@@ -2860,12 +2860,12 @@ fn nothing_is_delivered_in_a_subagent_for_another_prompt_or_with_picks_off() {
     for extra in [json!({"prompt_id": "p1", "agent_id": "a1"}), json!({"prompt_id": "p2"}), json!({})] {
         assert_eq!(w.hook(&["deliver"], "S", extra.clone()), "", "{extra}");
     }
-    let toml = w.home.join(".openrecall/extract.toml");
+    let toml = w.home.join(".monot/extract.toml");
     fs::write(&toml, fs::read_to_string(&toml).unwrap().replace("pick = true", "pick = false")).unwrap();
     assert_eq!(w.hook(&["deliver"], "S", json!({"prompt_id": "p1"})), "", "picks off");
     assert!(pick_file(&w, "S", "p1.json").exists());
-    assert!(!w.home.join(".openrecall/log/openrecall.jsonl").exists(), "nothing to do writes no log line");
-    assert!(!w.home.join(".openrecall/sessions/S.json").exists());
+    assert!(!w.home.join(".monot/log/monot.jsonl").exists(), "nothing to do writes no log line");
+    assert!(!w.home.join(".monot/sessions/S.json").exists());
 }
 
 #[test]
@@ -2911,7 +2911,7 @@ fn the_log_keeps_the_identifiers_given_to_claude_and_the_pushed_records_branch_a
     let pushed = log_of(&w, "pushed");
     assert_eq!((&pushed[0]["branch"], &pushed[0]["aliases"]), (&json!("feat/x"), &json!(["ABC-12"])), "{pushed:?}");
 
-    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    let repo = w.home.join(".monot/repos/github.com/someone/app");
     w.fillers(&repo);
     w.memory(&repo, "export-null-rows", "gotcha", "source: E 2026-01-02T03:04:05Z\n", "Null rows", "Exports fail on empty rows: ABC-12 needs a null check in src/export.py before PR #345 lands.");
     let ctx = w.pushed("S", "exports fail on empty rows").expect("level 2 injects");
@@ -2925,7 +2925,7 @@ fn the_log_keeps_the_identifiers_given_to_claude_and_the_pushed_records_branch_a
 
     let w = World::new("log-fields-pick");
     w.branch("feat/x");
-    let repo = w.home.join(".openrecall/repos/github.com/someone/app");
+    let repo = w.home.join(".monot/repos/github.com/someone/app");
     w.memory(&repo, "walrus-header", "decision", "source: E 2026-01-02T03:04:05Z\n", "The walrus header", "The walrus export in src/walrus.rs puts the header row first (WAL-42).");
     let p = Provider::start(vec![answer(json!({"ids": ["m1"]}))]);
     picks_on(&w, &p);
@@ -2961,7 +2961,7 @@ fn a_new_fact_a_replace_and_a_reconcile_write_the_full_path_and_log_paths() {
     let w = World::new("full-paths");
     w.branch("feat/x");
     git_repo(&w, &["pkg/app/src/export.py"]);
-    let repo = w.home.join(".openrecall/repos").join(APP);
+    let repo = w.home.join(".monot/repos").join(APP);
     w.memory(&repo, "export-entry", "pointer", OLD, "The export entry point", "The export entry point lives in lib/entry.py.");
     w.memory(&repo, "export-owner", "pointer", OLD, "The export owner", "The export owner is named in lib/owner.py.");
     let (entry, owner) = (fs::read_to_string(repo.join("export-entry.md")).unwrap(), fs::read_to_string(repo.join("export-owner.md")).unwrap());
@@ -3007,7 +3007,7 @@ fn git_runs_once_per_run_and_only_when_a_written_pointer_reads_rotted() {
     w.branch("feat/x");
     git_repo(&w, &["pkg/app/src/export.py", "pkg/app/src/report.py"]);
     let (w, calls) = counted_git(&w);
-    let repo = w.home.join(".openrecall/repos").join(APP);
+    let repo = w.home.join(".monot/repos").join(APP);
     let note = "The retry note names src/export.py.";
     let p = Provider::start(vec![
         answer(json!({"facts": [
@@ -3058,7 +3058,7 @@ fn an_entry_with_no_folder_or_a_gone_folder_keeps_the_text_as_it_came() {
         queue(&w, "S", &[user("Where does the export job live?"), said("In the package.", None)], entry);
         w.run(&["extract", "--job"], "");
         runs(&w, "S", 1);
-        let text = fs::read_to_string(w.home.join(".openrecall/repos").join(APP).join("export-writer.md")).unwrap();
+        let text = fs::read_to_string(w.home.join(".monot/repos").join(APP).join("export-writer.md")).unwrap();
         assert!(text.contains("\ndescription: The writer is src/export.py\n") && text.ends_with("\n\nThe writer is src/export.py.\n"), "{text}");
         assert!(dedupe_lines(&w, "new")[0]["paths"].is_null() && !calls.exists(), "{case}");
     }
@@ -3069,7 +3069,7 @@ fn a_reconcile_goes_by_the_memorys_type_and_a_replace_by_the_facts() {
     let w = World::new("full-paths-kinds");
     w.branch("feat/x");
     git_repo(&w, &["pkg/app/src/export.py"]);
-    let repo = w.home.join(".openrecall/repos").join(APP);
+    let repo = w.home.join(".monot/repos").join(APP);
     w.memory(&repo, "export-owner", "pointer", OLD, "The export owner", "The export owner is named in lib/owner.py.");
     w.memory(&repo, "export-rule", "gotcha", OLD, "The export rule", "The export rule was in lib/rule.py.");
     w.memory(&repo, "export-note", "pointer", OLD, "The export note", "The export note was in lib/note.py.");

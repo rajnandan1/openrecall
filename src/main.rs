@@ -22,7 +22,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 const INSTALL: &str =
-    "curl -fsSL https://raw.githubusercontent.com/rajnandan1/openrecall/main/install.sh | sh";
+    "curl -fsSL https://raw.githubusercontent.com/rajnandan1/monot/main/install.sh | sh";
 /// A prompt this long is pasted material: in the replay it named the branch's record in 1 right and 5 wrong pushes (issue 9).
 const PASTED_CHARS: usize = 2000;
 
@@ -71,7 +71,7 @@ fn run(args: &[String], started: u128) {
 fn session_skipped() -> bool {
     let var = |k| std::env::var(k).unwrap_or_default();
     let project = var("CLAUDE_PROJECT_DIR");
-    var("OPENRECALL") == "0"
+    var("MONOT") == "0"
         || var("CLAUDE_CODE_ENTRYPOINT") == "sdk-cli"
         || ["/private/tmp/claude-", "/tmp/claude-"]
             .iter()
@@ -694,9 +694,9 @@ fn see(s: &mut Value, address: &str) {
 }
 
 fn home() -> PathBuf {
-    match std::env::var_os("OPENRECALL_HOME") {
+    match std::env::var_os("MONOT_HOME") {
         Some(h) if !h.is_empty() => PathBuf::from(h),
-        _ => user_home().join(".openrecall"),
+        _ => user_home().join(".monot"),
     }
 }
 
@@ -759,7 +759,7 @@ fn status(sid: &str, line: &str) -> Result<()> {
 
 fn log(mut event: Value) {
     event["at"] = json!(now_ms());
-    let path = home().join("log").join("openrecall.jsonl");
+    let path = home().join("log").join("monot.jsonl");
     let _ = fs::create_dir_all(home().join("log"));
     if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(path) {
         let _ = f.write_all(format!("{event}\n").as_bytes());
@@ -821,7 +821,7 @@ mod tests {
         );
         assert_eq!(
             hooks["hooks"]["PostToolUse"],
-            serde_json::json!([{"hooks": [{"type": "command", "command": "openrecall", "args": ["deliver"], "timeout": 5}]}])
+            serde_json::json!([{"hooks": [{"type": "command", "command": "monot", "args": ["deliver"], "timeout": 5}]}])
         );
     }
 

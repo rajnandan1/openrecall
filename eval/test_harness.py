@@ -116,7 +116,7 @@ class HarnessTest(unittest.TestCase):
         harness.freeze()
         self.assertEqual(harness.read(os.path.join(harness.EVAL, "cases.jsonl")), cases)
         self.assertEqual(harness.read(os.path.join(harness.EVAL, "pairs.jsonl")), pairs)
-        report = self.report("/nonexistent/openrecall")
+        report = self.report("/nonexistent/monot")
         for row in ("| tickets | not replayed | 100% (1/1,", "| PR numbers | not replayed | 100% (1/1,",
                     "| commits | not replayed | 0% (0/1,", "| paths | not replayed | 0% (0/1,",
                     "| all | not replayed | 50% (2/4, 15–85%) | not replayed | 25% (1/4,", "| branch | 1 | not replayed | 50% (2/4,",
@@ -244,7 +244,7 @@ class HarnessTest(unittest.TestCase):
             fh.writelines(json.dumps(o) + "\n" for o in (turn, expand))
         log = os.path.join(os.path.dirname(harness.EVAL), "log")
         os.makedirs(log)
-        with open(os.path.join(log, "openrecall.jsonl"), "w") as fh:
+        with open(os.path.join(log, "monot.jsonl"), "w") as fh:
             fh.writelines(json.dumps(e) + "\n" for e in (
                 dict(event="recall", session="live", prompt_hash=harness.fnv("why did the export fail on ABC-12"),
                      injected=["github.com/x/app/export-null-rows"]),
@@ -333,7 +333,7 @@ class HarnessTest(unittest.TestCase):
                          label="useful" if x["address"].endswith("/a") else "noise") for x in todo if x["address"] in memories]
 
         def write(events):
-            with open(os.path.join(log, "openrecall.jsonl"), "w") as fh:
+            with open(os.path.join(log, "monot.jsonl"), "w") as fh:
                 fh.writelines(json.dumps(e) + "\n" for e in events)
 
         write(before)
@@ -369,7 +369,7 @@ class HarnessTest(unittest.TestCase):
             json.dump(dict(main="/w/app"), fh)
         os.makedirs(os.path.join(home, "log"))
         ms = 1767225600000
-        with open(os.path.join(home, "log", "openrecall.jsonl"), "w") as fh:
+        with open(os.path.join(home, "log", "monot.jsonl"), "w") as fh:
             fh.writelines(json.dumps(e) + "\n" for e in (
                 dict(event="extract", off="no extract.toml", at=ms),
                 dict(event="extract", session="S1", **{"from": 0}, to=10, proposed=3, new=1, replaced=1, reconciled=2, skipped=0,
@@ -426,7 +426,7 @@ class HarnessTest(unittest.TestCase):
                 fh.write(text)
         os.makedirs(os.path.join(home, "log"))
         ms = 1767225600000
-        with open(os.path.join(home, "log", "openrecall.jsonl"), "w") as fh:
+        with open(os.path.join(home, "log", "monot.jsonl"), "w") as fh:
             fh.writelines(json.dumps(e) + "\n" for e in (
                 dict(event="dedupe", session="S1", name="z", action="new", address="github.com/x/app/c", at=ms, candidates=[]),
                 dict(event="dedupe", session="S1", name="z", action="reconcile", address="github.com/x/app/d",
@@ -575,20 +575,20 @@ class HarnessTest(unittest.TestCase):
             fh.write(toml)
         with open(os.path.join(orhome, "api-key"), "w") as fh:
             fh.write("made-up-key")
-        claude, binary, seen = os.path.join(fake, "claude"), os.path.join(out, "openrecall"), os.path.join(out, "seen.json")
+        claude, binary, seen = os.path.join(fake, "claude"), os.path.join(out, "monot"), os.path.join(out, "seen.json")
         with open(claude, "w") as fh:
             fh.write("#!/bin/sh\nexit 1\n")
         with open(binary, "w") as fh:
             fh.write("#!%s\nimport json, os, sys\nsys.stdin.read()\njson.dump(dict(user=os.environ.get('USER'), "
                      "path=os.environ['PATH'], keychains=os.readlink(os.path.join(os.environ['HOME'], 'Library', 'Keychains')), "
-                     "files=sorted(os.listdir(os.environ['OPENRECALL_HOME']))), open(%r, 'w'))\n" % (sys.executable, seen))
+                     "files=sorted(os.listdir(os.environ['MONOT_HOME']))), open(%r, 'w'))\n" % (sys.executable, seen))
         os.chmod(claude, 0o755)
         os.chmod(binary, 0o755)
         provider = harness.real_provider()
         self.assertEqual(provider, (toml, None), "the Plan provider has no key, even with an api-key on disk")
         case = dict(id="C1", session="plan", at="2030-01-01T00:00:00Z", prompt="why do exports fail on empty rows",
                     repo="", branch="", folder="/nonexistent/app")
-        with unittest.mock.patch.dict(os.environ, PATH=fake + ":/usr/bin:/bin", USER="made-up-user", OPENRECALL_HOME=orhome), \
+        with unittest.mock.patch.dict(os.environ, PATH=fake + ":/usr/bin:/bin", USER="made-up-user", MONOT_HOME=orhome), \
                 unittest.mock.patch.object(harness, "PICK_WAIT", 0):
             harness.replay_cases(binary, [case], {}, provider)
             with open(seen) as fh:
@@ -666,7 +666,7 @@ class HarnessTest(unittest.TestCase):
                      skip=None) for i in range(9)]
         log += [recall(ms(20), p2, [])]
         os.makedirs(os.path.join(os.path.dirname(harness.EVAL), "log"))
-        with open(os.path.join(os.path.dirname(harness.EVAL), "log", "openrecall.jsonl"), "w") as fh:
+        with open(os.path.join(os.path.dirname(harness.EVAL), "log", "monot.jsonl"), "w") as fh:
             fh.writelines(json.dumps(e) + "\n" for e in log)
         folder = os.path.join(harness.EVAL, "week")
         harness.freeze_set(folder, "2030-01-01T00:05:00Z", "2030-01-01T01:00:00Z")
@@ -774,14 +774,14 @@ class HarnessTest(unittest.TestCase):
         shutil.copytree(os.path.join(REPO, "tests", "daily"), copy)
         home = os.path.join(copy, "home")
         out = subprocess.run([sys.executable, os.path.join(REPO, "eval", "harness.py"), "daily", "--home",
-                              os.path.join(home, ".openrecall")], env=dict(os.environ, HOME=home, TZ="IST-5:30"),
+                              os.path.join(home, ".monot")], env=dict(os.environ, HOME=home, TZ="IST-5:30"),
                              capture_output=True, text=True, check=True).stdout
         with open(os.path.join(copy, "expected.jsonl")) as fh:
             self.assertEqual(out.splitlines(), fh.read().splitlines())
 
     def test_a_replay_case_checks_each_applied_reconcile_over_its_runs(self):
         folder = os.path.join(harness.EVAL, "replay", "R8")
-        repo = os.path.join(folder, "home", ".openrecall", "repos", "github.com", "acme", "app")
+        repo = os.path.join(folder, "home", ".monot", "repos", "github.com", "acme", "app")
         os.makedirs(os.path.join(repo, "replaced"))
         os.makedirs(os.path.join(folder, "home", ".claude", "projects", "PROJECT"))
         for rel, text in (("abc-12-shipped.md", "ABC-12 is shipped."), ("abc-12-status.md", "ABC-12 is done."),
@@ -789,9 +789,9 @@ class HarnessTest(unittest.TestCase):
                           ("replaced/pr-345.2026-01-01T000000Z.md", "PR #345 waits on review.")):
             with open(os.path.join(repo, rel), "w") as fh:
                 fh.write(text)
-        os.makedirs(os.path.join(folder, "home", ".openrecall", "log"))
+        os.makedirs(os.path.join(folder, "home", ".monot", "log"))
         app, ms = "github.com/acme/app/", 1767225600000
-        with open(os.path.join(folder, "home", ".openrecall", "log", "openrecall.jsonl"), "w") as fh:
+        with open(os.path.join(folder, "home", ".monot", "log", "monot.jsonl"), "w") as fh:
             fh.writelines(json.dumps(e) + "\n" for e in (
                 dict(event="dedupe", session="S1", name="shipped", action="new", address=app + "abc-12-shipped", at=ms),
                 dict(event="dedupe", session="S1", name="shipped", action="reconcile", address=app + "abc-12-status",
@@ -810,7 +810,7 @@ class HarnessTest(unittest.TestCase):
             return dict(repeat=[0.1] * len(candidates), supersede=[0.9 if "ABC-12" in c else 0.3 for c in candidates],
                         kept=None if old is None else 0.8 if "ABC-12" in old else 0.2)
 
-        lines = harness.replay_case(folder, binary="/nonexistent/openrecall", dedupe_fn=check)
+        lines = harness.replay_case(folder, binary="/nonexistent/monot", dedupe_fn=check)
         self.assertEqual(asked[:4], [("ABC-12 is shipped.", ["ABC-12 is open."], None), ("ABC-12 is done.", [], "ABC-12 is open."),
                                      ("ABC-12 is shipped.", ["PR #345 waits on review."], None),
                                      ("PR #345 is merged.", [], "PR #345 waits on review.")])
@@ -847,8 +847,8 @@ class HarnessTest(unittest.TestCase):
                                         [[True, False], [True, True], [True, False]]),
                          ["1. a memory names ABC-12: 3/3", "2. the run reads to the end: 1/3"])
         self.assertEqual(harness.replay_args(["R4"]), ("R4", None, harness.BINARY), "the case's own run count")
-        self.assertEqual(harness.replay_args(["M1", "--runs", "3", "--binary", "x/openrecall"]),
-                         ("M1", 3, os.path.abspath("x/openrecall")))
+        self.assertEqual(harness.replay_args(["M1", "--runs", "3", "--binary", "x/monot"]),
+                         ("M1", 3, os.path.abspath("x/monot")))
         for wrong in ([], ["--runs", "3"], ["R4", "--runs"], ["R4", "--runs", "x"], ["R4", "--runs", "0"], ["R4", "--picks"]):
             self.assertIsNone(harness.replay_args(wrong), wrong)
 
@@ -867,24 +867,24 @@ class HarnessTest(unittest.TestCase):
         turn_one = len("".join(json.dumps(o) + "\n" for o in lines[:2]).encode())
         memory = lambda body, expires="": "---\nname: m\ndescription: %s\nmetadata:\n  type: state\n%s---\n\n%s\n" % (
             body, "expires: %s\n" % expires if expires else "", body)
-        repo = ".openrecall/repos/github.com/acme/app/"
+        repo = ".monot/repos/github.com/acme/app/"
         for rel, body in ((repo + "abc-12-open.md", memory("ABC-12 is open.", "2099-01-01")),
                           (repo + "abc-12-older.md", memory("ABC-12 is open since January.", "2000-01-01")),
                           (repo + "replaced/abc-12-open.2026-01-01T000000Z.md", memory("ABC-12 is planned.")),
-                          (".openrecall/global/deploy-days.md", memory("Deploys go out on Fridays.")),
+                          (".monot/global/deploy-days.md", memory("Deploys go out on Fridays.")),
                           (".claude/projects/PROJECT/memory/abc-12-notes.md", memory("ABC-12 notes: rows.")),
                           (".claude/projects/PROJECT/memory/MEMORY.md", "- ABC-12 notes")):
             path = os.path.join(folder, "home", rel)
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "w") as fh:
                 fh.write(body)
-        orhome = os.path.join(folder, "home", ".openrecall")
+        orhome = os.path.join(folder, "home", ".monot")
         os.makedirs(os.path.join(orhome, "extract"))
         with open(os.path.join(orhome, "extract", "S1.json"), "w") as fh:
             json.dump(dict(transcript="/gone/S1.jsonl", identity="github.com/acme/app", main="/gone", cursor=120,
                            ended=True), fh)
         os.makedirs(os.path.join(orhome, "log"))
-        with open(os.path.join(orhome, "log", "openrecall.jsonl"), "w") as fh:
+        with open(os.path.join(orhome, "log", "monot.jsonl"), "w") as fh:
             fh.write(json.dumps(dict(event="extract", session="S0", to=10, new=3, reconciled=2, cost=0.01, at=1767225600000)) + "\n")
         case = dict(repo="github.com/acme/app", branch="feat/abc-12",
                     steps=[dict(run="capture", session="S1", bytes=turn_one, branch="feat/abc-12"),
@@ -896,7 +896,7 @@ class HarnessTest(unittest.TestCase):
                                dict(name="no live memory says ABC-12 is open", checks=[
                                    dict(grep="ABC-12", jev="Does it say that ABC-12 is open?", want="none")]),
                                dict(name="the old text is in replaced/ and every memory is live", checks=[
-                                   dict(glob=".openrecall/repos/**/replaced/*.md", grep="planned", want="some"),
+                                   dict(glob=".monot/repos/**/replaced/*.md", grep="planned", want="some"),
                                    dict(jev="Is it live?", want="all")]),
                                dict(name="reconciled 2, and the cursor stays", checks=[
                                    dict(kind="log", event="extract", field="reconciled", at_least=2),
@@ -926,20 +926,20 @@ class HarnessTest(unittest.TestCase):
             entry = json.load(fh)
         project = os.path.basename(os.path.dirname(entry["transcript"]))
         self.assertEqual((project[-2:], entry["main"][-2:]), ("-w", "/w"), "the run file points at the copies")
-        with open(os.path.join(kept, "log", "openrecall.jsonl")) as fh:
+        with open(os.path.join(kept, "log", "monot.jsonl")) as fh:
             self.assertIn('"off":"no extract.toml"', fh.read(), "a case without a provider runs the worker, off")
         self.assertFalse(glob.glob(os.path.join(kept, "index.db*")))
         with open(os.path.join(kept, "checks.json")) as fh:
             checks = json.load(fh)
-        self.assertEqual(checks[1]["checks"][0]["saw"], {".openrecall/repos/github.com/acme/app/abc-12-open.md": 0.9,
+        self.assertEqual(checks[1]["checks"][0]["saw"], {".monot/repos/github.com/acme/app/abc-12-open.md": 0.9,
                                                          ".claude/projects/%s/memory/abc-12-notes.md" % project: 0.1})
         self.assertEqual(checks[4]["checks"][0]["saw"], dict(binary=3, harness=3))
         recalled = checks[5]["checks"][0]["saw"]
-        self.assertEqual((recalled[".openrecall/repos/github.com/acme/app/abc-12-open.md"],
+        self.assertEqual((recalled[".monot/repos/github.com/acme/app/abc-12-open.md"],
                           recalled[".claude/projects/%s/memory/abc-12-notes.md" % project]), (0.9, 0.1),
                          "each memory both searches return is judged once, the built-in one in its scratch folder")
-        self.assertNotIn(".openrecall/global/deploy-days.md", recalled, "live, but no search returns it")
-        with open(os.path.join(kept, "log", "openrecall.jsonl")) as fh:
+        self.assertNotIn(".monot/global/deploy-days.md", recalled, "live, but no search returns it")
+        with open(os.path.join(kept, "log", "monot.jsonl")) as fh:
             self.assertEqual([e["tool"] for e in map(json.loads, fh) if e["event"] == "mcp"], ["recall", "recall"])
         self.assertEqual(asked[0], ("Does it say that ABC-12 is open?", ["ABC-12 is open.\n\nABC-12 is open.",
                                                                          "ABC-12 notes: rows.\n\nABC-12 notes: rows."]),
@@ -974,7 +974,7 @@ class HarnessTest(unittest.TestCase):
                dict(event="extract", session="struck", at=ms(11, 20), strike="invalid json"),
                dict(event="extract", session="before", at=ms(6), to=cuts["before"]),
                dict(event="extract", session="late", at=ms(16), to=999)]
-        with open(os.path.join(live, "log", "openrecall.jsonl"), "w") as fh:
+        with open(os.path.join(live, "log", "monot.jsonl"), "w") as fh:
             fh.writelines(json.dumps(e) + "\n" for e in log)
         return live, cuts
 
@@ -996,7 +996,7 @@ class HarnessTest(unittest.TestCase):
             harness.xr_window(cases + [dict(at="2026-01-17T10:00:00Z")])
 
     def test_extraction_replay_start_store_and_expiry(self):
-        live, orhome = os.path.dirname(harness.EVAL), os.path.join(harness.EVAL, "run", "home", ".openrecall")
+        live, orhome = os.path.dirname(harness.EVAL), os.path.join(harness.EVAL, "run", "home", ".monot")
         repo = os.path.join(live, "repos", "github.com", "someone", "app")
         os.makedirs(os.path.join(repo, "replaced"))
         fact = lambda source, body, expires="": "---\nname: n\nsource: S %s\n%s---\n\n%s\n" % (
@@ -1101,8 +1101,8 @@ class HarnessTest(unittest.TestCase):
     def test_report_args(self):
         self.assertEqual(harness.report_args([]), (harness.BINARY, False), "picks are off by default")
         self.assertEqual(harness.report_args(["--picks"]), (harness.BINARY, True))
-        self.assertEqual(harness.report_args(["--binary", "x/openrecall"]), (os.path.abspath("x/openrecall"), False))
-        self.assertEqual(harness.report_args(["--binary", "x/openrecall", "--picks"]), (os.path.abspath("x/openrecall"), True))
+        self.assertEqual(harness.report_args(["--binary", "x/monot"]), (os.path.abspath("x/monot"), False))
+        self.assertEqual(harness.report_args(["--binary", "x/monot", "--picks"]), (os.path.abspath("x/monot"), True))
         for wrong in (["--pick"], ["--picks", "--picks"], ["--binary"], ["--binary", "--picks"], ["--picks", "--binary", "x"]):
             self.assertIsNone(harness.report_args(wrong), wrong)
 

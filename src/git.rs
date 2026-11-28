@@ -177,7 +177,7 @@ mod tests {
 
     #[test]
     fn tracked_lists_the_folders_files_and_is_empty_when_git_fails() {
-        let tmp = std::env::temp_dir().join(format!("openrecall-tracked-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("monot-tracked-{}", std::process::id()));
         fs::create_dir_all(tmp.join("src")).unwrap();
         fs::write(tmp.join("src/é b.py"), "").unwrap();
         fs::write(tmp.join("untracked.py"), "").unwrap();
@@ -192,7 +192,7 @@ mod tests {
 
     #[test]
     fn worktree_and_refs() {
-        let tmp = std::env::temp_dir().join(format!("openrecall-git-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("monot-git-{}", std::process::id()));
         let main = tmp.join("main");
         let wt = tmp.join("wt");
         fs::create_dir_all(main.join(".git/worktrees/wt")).unwrap();
