@@ -53,7 +53,7 @@ pub fn start(input: &Value, s: &Value) -> crate::Result<()> {
     Ok(())
 }
 
-/// `openrecall pick --job`: at most one call for one prompt. `.running` marks the job until its result or its end.
+/// `monot pick --job`: at most one call for one prompt. `.running` marks the job until its result or its end.
 pub fn job(started: u128) -> crate::Result<()> {
     let input = crate::read_input()?;
     let sid = crate::session_id(&input)?;
@@ -266,7 +266,7 @@ fn message(
     Some((frame(&files, &turns), sent))
 }
 
-/// `openrecall deliver`, the tool hook: the rename to `.taken` lets one of parallel tool calls take the pick (spec 3.7).
+/// `monot deliver`, the tool hook: the rename to `.taken` lets one of parallel tool calls take the pick (spec 3.7).
 pub fn deliver(started: u128) -> crate::Result<()> {
     let input = crate::read_input()?;
     let Some(id) = prompt_id(&input) else {

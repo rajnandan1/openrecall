@@ -50,7 +50,7 @@ struct StatsParams {
     to: Option<String>,
 }
 
-/// OpenRecall's four tools, served over stdio (ticket 18: `openrecall mcp`).
+/// Monot's four tools, served over stdio (ticket 18: `monot mcp`).
 #[derive(Clone)]
 pub struct Server {
     home: PathBuf,
@@ -68,7 +68,7 @@ pub(crate) enum Kind {
 #[tool_router(server_handler)]
 impl Server {
     #[tool(
-        description = "Search OpenRecall's memories for this repository and the global ones, or read one whole memory by its address. Use it for \"what did we decide about X\" and to expand a recalled line."
+        description = "Search Monot's memories for this repository and the global ones, or read one whole memory by its address. Use it for \"what did we decide about X\" and to expand a recalled line."
     )]
     fn recall(&self, Parameters(p): Parameters<RecallParams>) -> Result<String, String> {
         let query = p.query.trim();
@@ -163,7 +163,7 @@ impl Server {
     }
 
     #[tool(
-        description = "Delete one of OpenRecall's own memories by its address. Claude Code's memory files and handoff records are not deleted here."
+        description = "Delete one of Monot's own memories by its address. Claude Code's memory files and handoff records are not deleted here."
     )]
     fn forget(&self, Parameters(p): Parameters<ForgetParams>) -> Result<String, String> {
         let address = p.id.trim();
@@ -172,7 +172,7 @@ impl Server {
         match kind {
             Kind::Builtin => {
                 return Err(format!(
-                    "{address} is a Claude Code memory file, not OpenRecall's: edit or delete {} yourself",
+                    "{address} is a Claude Code memory file, not Monot's: edit or delete {} yourself",
                     path.display()
                 ));
             }
@@ -208,7 +208,7 @@ impl Server {
     }
 
     #[tool(
-        description = "How OpenRecall performed, as counts per day: prompts, injections, picks, pushes, facts, cost and hook time. Use when the user asks how OpenRecall did, helped or cost on a day or over a range of days."
+        description = "How Monot performed, as counts per day: prompts, injections, picks, pushes, facts, cost and hook time. Use when the user asks how Monot did, helped or cost on a day or over a range of days."
     )]
     fn stats(&self, Parameters(p): Parameters<StatsParams>) -> Result<String, String> {
         let (from, to) = stats::range(p.from.as_deref(), p.to.as_deref())?;
@@ -351,7 +351,7 @@ mod tests {
     use super::*;
 
     fn world(name: &str) -> (PathBuf, Server) {
-        let tmp = std::env::temp_dir().join(format!("openrecall-mcp-{}-{name}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("monot-mcp-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(tmp.join("code")).unwrap();
         let server = Server {

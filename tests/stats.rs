@@ -15,16 +15,16 @@ const FIELDS: [&str; 36] = [
     "extraction_ms", "redactions", "own_tool_calls", "update_check", "errors",
 ];
 
-/// A made-up user home: `HOME` is `root`, the OpenRecall home is `root/.openrecall`.
+/// A made-up user home: `HOME` is `root`, the Monot home is `root/.monot`.
 struct Home {
     root: PathBuf,
 }
 
 impl Home {
     fn new(name: &str) -> Home {
-        let root = std::env::temp_dir().join(format!("openrecall-stats-{name}-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("monot-stats-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(root.join(".openrecall/log")).unwrap();
+        fs::create_dir_all(root.join(".monot/log")).unwrap();
         Home { root }
     }
 
@@ -42,7 +42,7 @@ impl Home {
     }
 
     fn log(&self, lines: &[Value]) {
-        self.append(".openrecall/log/openrecall.jsonl", lines);
+        self.append(".monot/log/monot.jsonl", lines);
     }
 
     fn transcript(&self, sid: &str, lines: &[Value]) {
@@ -56,11 +56,11 @@ impl Home {
     }
 
     fn job(&self) {
-        let status = Command::new(env!("CARGO_BIN_EXE_openrecall"))
+        let status = Command::new(env!("CARGO_BIN_EXE_monot"))
             .args(["stats", "--job"])
             .env_clear()
             .env("HOME", &self.root)
-            .env("OPENRECALL_HOME", self.path(".openrecall"))
+            .env("MONOT_HOME", self.path(".monot"))
             .env("TZ", TZ)
             .status()
             .unwrap();
@@ -69,11 +69,11 @@ impl Home {
 
     /// Lets the next job run inside the 24 hours.
     fn again(&self) {
-        let _ = fs::remove_file(self.path(".openrecall/stats/state.json"));
+        let _ = fs::remove_file(self.path(".monot/stats/state.json"));
     }
 
     fn text(&self) -> String {
-        fs::read_to_string(self.path(".openrecall/stats/daily.jsonl")).unwrap_or_default()
+        fs::read_to_string(self.path(".monot/stats/daily.jsonl")).unwrap_or_default()
     }
 
     fn rows(&self) -> Vec<Value> {
@@ -84,13 +84,13 @@ impl Home {
         self.rows().into_iter().find(|r| r["day"] == day).unwrap_or_else(|| panic!("no row for {day}"))
     }
 
-    /// The `stats` tool's text for these arguments, from `openrecall mcp` over stdio.
+    /// The `stats` tool's text for these arguments, from `monot mcp` over stdio.
     fn stats_text(&self, args: Value) -> String {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_openrecall"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_monot"))
             .arg("mcp")
             .env_clear()
             .env("HOME", &self.root)
-            .env("OPENRECALL_HOME", self.path(".openrecall"))
+            .env("MONOT_HOME", self.path(".monot"))
             .env("TZ", TZ)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -287,7 +287,7 @@ fn an_extract_lines_reconciles_count_in_the_row_and_in_the_stats_text() {
 fn an_injection_is_used_when_its_turn_repeats_an_identifier_the_prompt_lacks() {
     let h = Home::new("used");
     h.put(
-        ".openrecall/repos/app/m2.md",
+        ".monot/repos/app/m2.md",
         "---\ndescription: flaky test\n---\nThe flaky test lives in tests/flaky_test.py and needs a retry.\n",
     );
     let ids = |address: &str, list: Value| json!({"identifiers": {address: list}});
@@ -340,11 +340,11 @@ fn an_injection_is_used_when_its_turn_names_its_address_or_file_name() {
     ]);
     h.transcript("S1", &[
         user("2026-01-10T05:00:01.000Z", ask, json!({})),
-        tool("2026-01-10T05:00:05.000Z", "mcp__plugin_openrecall_openrecall__recall", json!({"query": "app/export-rules"})),
+        tool("2026-01-10T05:00:05.000Z", "mcp__plugin_monot_monot__recall", json!({"query": "app/export-rules"})),
     ]);
     h.transcript("S2", &[
         user("2026-01-10T05:10:01.000Z", ask, json!({})),
-        tool("2026-01-10T05:10:05.000Z", "Read", json!({"file_path": "/u/.openrecall/repos/app/export-rules.md"})),
+        tool("2026-01-10T05:10:05.000Z", "Read", json!({"file_path": "/u/.monot/repos/app/export-rules.md"})),
     ]);
     h.transcript("S3", &[
         user("2026-01-10T05:20:01.000Z", ask, json!({})),
@@ -362,7 +362,7 @@ fn an_injection_is_used_when_its_turn_names_its_address_or_file_name() {
 #[test]
 fn a_delivered_pick_is_used_when_its_turn_repeats_an_identifier() {
     let h = Home::new("picks");
-    h.put(".openrecall/repos/app/m2.md", "---\ndescription: release\n---\nThe steps are in docs/release.md.\n");
+    h.put(".monot/repos/app/m2.md", "---\ndescription: release\n---\nThe steps are in docs/release.md.\n");
     let pick = |iso: &str, id: &str, memory: &str, extra: Value| {
         let line = json!({"event": "pick", "session": "S1", "prompt_id": id, "memory": memory, "skip": null, "cost": 0.0, "ms": 10});
         at(iso, with(line, extra))
@@ -419,8 +419,8 @@ fn a_delivered_pick_joins_the_pick_line_of_its_memory() {
 #[test]
 fn a_push_is_right_wrong_or_unjudged_and_late_after_an_edit_on_its_branch() {
     let h = Home::new("pushes");
-    h.put(".openrecall/repos/app/handoffs/retired/feat--y.2026-01-01.md", "---\nbranch: feat/old-y\naliases: ABC-12\n---\n");
-    h.put(".openrecall/repos/app/handoffs/retired/feat--y.2026-01-05.md", "---\nrepo: app\nbranch: feat/y\naliases: ABC-12, ABC-13\n---\n");
+    h.put(".monot/repos/app/handoffs/retired/feat--y.2026-01-01.md", "---\nbranch: feat/old-y\naliases: ABC-12\n---\n");
+    h.put(".monot/repos/app/handoffs/retired/feat--y.2026-01-05.md", "---\nrepo: app\nbranch: feat/y\naliases: ABC-12, ABC-13\n---\n");
     let pushed = |sid: &str, prompt: &str, iso: &str, extra: Value| {
         let line = json!({"event": "pushed", "session": sid, "at": ms(iso) + 10});
         [recall(iso, sid, 50, json!({"prompt_hash": fnv(prompt)})), with(line, extra)]
@@ -478,21 +478,21 @@ fn a_push_is_right_wrong_or_unjudged_and_late_after_an_edit_on_its_branch() {
 /// fields, so their checks take the fallback and read the home's made-up memory and record files.
 #[test]
 fn the_shared_made_up_home_gives_the_expected_rows_and_a_line_without_the_new_fields_reads_the_made_up_files() {
-    let root = std::env::temp_dir().join(format!("openrecall-stats-shared-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!("monot-stats-shared-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     let status = Command::new("cp").arg("-R").arg(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/daily")).arg(&root).status().unwrap();
     assert!(status.success());
     let home = root.join("home");
-    let status = Command::new(env!("CARGO_BIN_EXE_openrecall"))
+    let status = Command::new(env!("CARGO_BIN_EXE_monot"))
         .args(["stats", "--job"])
         .env_clear()
         .env("HOME", &home)
-        .env("OPENRECALL_HOME", home.join(".openrecall"))
+        .env("MONOT_HOME", home.join(".monot"))
         .env("TZ", "IST-5:30")
         .status()
         .unwrap();
     assert!(status.success());
-    let got = fs::read_to_string(home.join(".openrecall/stats/daily.jsonl")).unwrap();
+    let got = fs::read_to_string(home.join(".monot/stats/daily.jsonl")).unwrap();
     assert_eq!(lines_without_written_at(&got), fs::read_to_string(root.join("expected.jsonl")).unwrap());
 }
 
@@ -533,9 +533,9 @@ fn a_final_row_survives_byte_for_byte() {
     h.log(&[recall("2026-01-09T06:00:00Z", "A", 5, json!({})), recall("2026-01-10T06:00:00Z", "A", 5, json!({}))]);
     let head = format!(r#"{{"day":"2026-01-09","written_at":{},"versions":[],"a_later_field":{{"x":[1,2]}},"#, ms("2026-01-20T00:00:00Z"));
     let kept = [head.as_bytes(), b"\"note\":\"\xff\xfe\",\"prompts\":99}\r\n"].concat();
-    h.put(".openrecall/stats/daily.jsonl", &kept);
+    h.put(".monot/stats/daily.jsonl", &kept);
     h.job();
-    let bytes = fs::read(h.path(".openrecall/stats/daily.jsonl")).unwrap();
+    let bytes = fs::read(h.path(".monot/stats/daily.jsonl")).unwrap();
     assert_eq!(&bytes[..kept.len()], kept);
     let next: Value = serde_json::from_slice(&bytes[kept.len()..]).unwrap();
     assert_eq!((&next["day"], &next["prompts"]), (&json!("2026-01-10"), &json!(1)));
@@ -598,11 +598,11 @@ fn a_second_job_within_24_hours_changes_nothing() {
     let h = Home::new("daily");
     h.log(&[recall("2026-01-10T06:00:00Z", "A", 5, json!({}))]);
     h.job();
-    let (rows, state) = (h.text(), fs::read_to_string(h.path(".openrecall/stats/state.json")).unwrap());
+    let (rows, state) = (h.text(), fs::read_to_string(h.path(".monot/stats/state.json")).unwrap());
     h.log(&[recall("2026-01-12T06:00:00Z", "A", 5, json!({}))]);
     h.job();
     assert_eq!(h.text(), rows);
-    assert_eq!(fs::read_to_string(h.path(".openrecall/stats/state.json")).unwrap(), state);
+    assert_eq!(fs::read_to_string(h.path(".monot/stats/state.json")).unwrap(), state);
 }
 
 /// Spec test 10, the job's half: the job tries the lock once and exits while another process holds it.
@@ -610,13 +610,13 @@ fn a_second_job_within_24_hours_changes_nothing() {
 fn the_job_exits_at_once_while_the_lock_is_held() {
     let h = Home::new("locked");
     h.log(&[recall("2026-01-10T06:00:00Z", "A", 5, json!({}))]);
-    h.put(".openrecall/stats/lock", "");
-    let held = fs::File::create(h.path(".openrecall/stats/lock")).unwrap();
+    h.put(".monot/stats/lock", "");
+    let held = fs::File::create(h.path(".monot/stats/lock")).unwrap();
     held.try_lock().unwrap();
     let started = std::time::Instant::now();
     h.job();
     assert!(started.elapsed() < std::time::Duration::from_secs(2));
-    assert!(!h.path(".openrecall/stats/state.json").exists() && h.text().is_empty());
+    assert!(!h.path(".monot/stats/state.json").exists() && h.text().is_empty());
     drop(held);
     h.job();
     assert_eq!(h.rows().len(), 1);
@@ -627,13 +627,13 @@ fn the_job_exits_at_once_while_the_lock_is_held() {
 fn a_failed_run_keeps_the_old_rows_and_logs_an_error() {
     let h = Home::new("failed");
     h.log(&[recall("2026-01-10T06:00:00Z", "A", 5, json!({}))]);
-    fs::create_dir_all(h.path(".openrecall/stats/daily.jsonl")).unwrap();
+    fs::create_dir_all(h.path(".monot/stats/daily.jsonl")).unwrap();
     h.job();
-    assert!(h.path(".openrecall/stats/daily.jsonl").is_dir());
-    let log = fs::read_to_string(h.path(".openrecall/log/openrecall.jsonl")).unwrap();
+    assert!(h.path(".monot/stats/daily.jsonl").is_dir());
+    let log = fs::read_to_string(h.path(".monot/log/monot.jsonl")).unwrap();
     let error: Value = serde_json::from_str(log.lines().last().unwrap()).unwrap();
     assert_eq!((&error["event"], &error["cmd"]), (&json!("error"), &json!("stats")));
-    let left: Vec<_> = fs::read_dir(h.path(".openrecall/stats")).unwrap().map(|e| e.unwrap().file_name()).collect();
+    let left: Vec<_> = fs::read_dir(h.path(".monot/stats")).unwrap().map(|e| e.unwrap().file_name()).collect();
     assert!(!left.iter().any(|n| n.to_string_lossy().contains("tmp")), "{left:?}");
 }
 
@@ -642,9 +642,9 @@ fn a_failed_run_keeps_the_old_rows_and_logs_an_error() {
 fn a_lock_file_the_job_cannot_make_logs_an_error() {
     let h = Home::new("lock-failed");
     h.log(&[recall("2026-01-10T06:00:00Z", "A", 5, json!({}))]);
-    fs::create_dir_all(h.path(".openrecall/stats/lock")).unwrap();
+    fs::create_dir_all(h.path(".monot/stats/lock")).unwrap();
     h.job();
-    let log = fs::read_to_string(h.path(".openrecall/log/openrecall.jsonl")).unwrap();
+    let log = fs::read_to_string(h.path(".monot/log/monot.jsonl")).unwrap();
     let error: Value = serde_json::from_str(log.lines().last().unwrap()).unwrap();
     assert_eq!((&error["event"], &error["cmd"]), (&json!("error"), &json!("stats")));
     assert!(h.text().is_empty());
@@ -655,11 +655,11 @@ fn a_lock_file_the_job_cannot_make_logs_an_error() {
 fn session_start_starts_the_job() {
     let h = Home::new("session-start");
     h.log(&[recall("2026-01-10T06:00:00Z", "A", 5, json!({}))]);
-    let mut child = Command::new(env!("CARGO_BIN_EXE_openrecall"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_monot"))
         .arg("handoff")
         .env_clear()
         .env("HOME", &h.root)
-        .env("OPENRECALL_HOME", h.path(".openrecall"))
+        .env("MONOT_HOME", h.path(".monot"))
         .env("TZ", TZ)
         .stdin(std::process::Stdio::piped())
         .spawn()

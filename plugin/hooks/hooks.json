@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "command -v openrecall >/dev/null 2>&1 || { printf '%s\\n' '{\"systemMessage\": \"OpenRecall is off: no openrecall on PATH. Install: curl -fsSL https://raw.githubusercontent.com/rajnandan1/openrecall/main/install.sh | sh\"}'; exit 0; }; exec openrecall handoff"
+            "command": "command -v monot >/dev/null 2>&1 || { printf '%s\\n' '{\"systemMessage\": \"Monot is off: no monot on PATH. Install: curl -fsSL https://raw.githubusercontent.com/rajnandan1/monot/main/install.sh | sh\"}'; exit 0; }; exec monot handoff"
           }
         ]
       }
@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "openrecall",
+            "command": "monot",
             "args": [
               "recall"
             ],
@@ -29,7 +29,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "openrecall",
+            "command": "monot",
             "args": [
               "deliver"
             ],
@@ -43,7 +43,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "openrecall",
+            "command": "monot",
             "args": [
               "capture"
             ],
@@ -57,7 +57,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "openrecall",
+            "command": "monot",
             "args": [
               "extract"
             ],

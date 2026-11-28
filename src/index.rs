@@ -15,8 +15,8 @@ pub const MAX_LINES: usize = 3;
 /// 400 tokens at 2.6 characters a token, the ratio build step 2 measured.
 pub const MAX_CHARS: usize = 1040;
 /// Ticket 19's three sentences; the third names the MCP tool by the exact name Claude loads it under.
-pub const FRAME: &str = "Recalled memories from earlier sessions (OpenRecall). They reflect what was true when written. \
-                         Full text: mcp__plugin_openrecall_openrecall__recall with the address.";
+pub const FRAME: &str = "Recalled memories from earlier sessions (Monot). They reflect what was true when written. \
+                         Full text: mcp__plugin_monot_monot__recall with the address.";
 /// Claude Code's own MEMORY.md line rule (ticket 19).
 const LINE_TEXT: usize = 200;
 const TERMS: usize = 40;
@@ -120,7 +120,7 @@ pub fn slug(path: &Path) -> String {
         .collect()
 }
 
-/// A memory file: Claude Code's frontmatter (`name`, `description`, `metadata.type`) plus OpenRecall's flat fields.
+/// A memory file: Claude Code's frontmatter (`name`, `description`, `metadata.type`) plus Monot's flat fields.
 #[derive(Default)]
 pub struct Memory {
     pub name: String,
@@ -942,7 +942,7 @@ mod tests {
 
     #[test]
     fn rot() {
-        let tmp = std::env::temp_dir().join(format!("openrecall-rot-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("monot-rot-{}", std::process::id()));
         fs::create_dir_all(tmp.join("src")).unwrap();
         fs::write(tmp.join("src/a.py"), "def run_export():\n    Exporter.flush_rows()\n").unwrap();
         fs::write(tmp.join("src/b.toml"), "base_url = 1\n").unwrap();
@@ -960,7 +960,7 @@ mod tests {
     }
 
     fn rewritten(case: &str, description: &str, body: &str) -> Option<(String, String, HashMap<String, String>)> {
-        let tmp = std::env::temp_dir().join(format!("openrecall-rewritten-{case}-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("monot-rewritten-{case}-{}", std::process::id()));
         let tracked = ["pkg/app/src/export.py", "pkg/app/src/report.py", "svc/a/src/util.py", "svc/b/src/util.py", "pkg/~/notes/a.py"].map(String::from);
         for file in &tracked {
             fs::create_dir_all(tmp.join(file).parent().unwrap()).unwrap();
@@ -1042,7 +1042,7 @@ mod tests {
 
     #[test]
     fn a_schema_number_from_any_other_version_rebuilds_the_index() {
-        let tmp = std::env::temp_dir().join(format!("openrecall-schema-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("monot-schema-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         for other in [SCHEMA - 1, SCHEMA + 1] {
             let ix = Index::open(&tmp).unwrap();
@@ -1058,7 +1058,7 @@ mod tests {
 
     #[test]
     fn hyphens_split_in_the_index() {
-        let tmp = std::env::temp_dir().join(format!("openrecall-ix-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("monot-ix-{}", std::process::id()));
         fs::create_dir_all(tmp.join("global")).unwrap();
         let fact = |name: &str, body: &str| {
             format!("---\nname: {name}\ndescription: d\nmetadata:\n  type: decision\nsource: S 2026-01-02\n---\n\n{body}\n")
@@ -1078,7 +1078,7 @@ mod tests {
 
     #[test]
     fn a_pr_url_finds_the_fact_that_names_its_pr() {
-        let tmp = std::env::temp_dir().join(format!("openrecall-pr-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("monot-pr-{}", std::process::id()));
         fs::create_dir_all(tmp.join("global")).unwrap();
         let fact = |name: &str, body: &str| {
             format!("---\nname: {name}\ndescription: d\nmetadata:\n  type: state\nsource: S 2026-01-02\n---\n\n{body}\n")
@@ -1095,7 +1095,7 @@ mod tests {
 
     #[test]
     fn scores_count_the_rows_of_every_scope() {
-        let tmp = std::env::temp_dir().join(format!("openrecall-score-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("monot-score-{}", std::process::id()));
         let fact = |body: &str| {
             format!("---\nname: n\ndescription: d\nmetadata:\n  type: decision\n---\n\n{body}\n")
         };

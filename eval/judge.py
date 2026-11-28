@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Jev, the eval judge (ticket 09): labels the level-2 candidates of each case, calibrated against spec Appendix A.
 
-    python3 eval/judge.py calibrate    # Jev against the 14 hand labels, written to ~/.openrecall/eval/calibration.jsonl
+    python3 eval/judge.py calibrate    # Jev against the 14 hand labels, written to ~/.monot/eval/calibration.jsonl
 
-Jev is reached only through the sensibility plugin's judge.py (OPENRECALL_JUDGE overrides its path), never from the
+Jev is reached only through the sensibility plugin's judge.py (MONOT_JUDGE overrides its path), never from the
 binary. `harness.py report` calls `label_case` for every candidate that has no label yet; labels are keyed by case,
 address and text hash in labels.jsonl, append-only, and reused until the memory's text changes (ticket 16).
 """
@@ -22,7 +22,7 @@ CRITERIA = {
     "partly": "it is about the subject of `prompt` but adds little the task needs, or only a part of it applies",
     "noise": "it is about something else, or only repeats what `prompt` already says",
 }
-JUDGE = [os.environ.get("OPENRECALL_JUDGE", ""),
+JUDGE = [os.environ.get("MONOT_JUDGE", ""),
          os.path.expanduser("~/.claude/plugins/marketplaces/sensibility/skills/judge/scripts/judge.py"),
          os.path.expanduser("~/Code/sensibility/skills/judge/scripts/judge.py")]
 MEMORY_CHARS = 1500
@@ -40,7 +40,7 @@ def ask(state, questions):
     """One Jev call; a second failure stops the run, as the build notes ask."""
     script = next((p for p in JUDGE if p and os.path.exists(p)), None)
     if not script:
-        raise JudgeError("no judge.py: install the sensibility plugin or set OPENRECALL_JUDGE")
+        raise JudgeError("no judge.py: install the sensibility plugin or set MONOT_JUDGE")
     last = None
     for _ in range(2):
         run = subprocess.run([sys.executable, script, json.dumps(questions), "--state", json.dumps(state)],
