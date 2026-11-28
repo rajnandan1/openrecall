@@ -387,7 +387,12 @@ Skip this section if you never installed OpenRecall.
 Monot was called OpenRecall before version 0.15.0. The rename changed every name: the binary, the plugin, the home folder, the log file and the variables. An OpenRecall install never updates itself to Monot, because its update job looks for the release at the old name and does not find it. So you move it by hand. Do not open a Claude Code session until step 7. The `claude plugin` commands in step 4 run without a session.
 
 1. Quit every Claude Code session. Then run `pgrep -fl openrecall`. If it lists a process, such as the extraction worker, wait and run it again until it prints nothing, because that process can still write to the old folder.
-2. Run the install command from [Install](#install). It installs `monot` at `~/.local/bin/monot`, beside the old binary.
+2. Run only the install command, the first command in [Install](#install), from a plain terminal. It installs `monot` at `~/.local/bin/monot`, beside the old binary `~/.local/bin/openrecall`. Step 4 installs the plugin.
+
+   ```sh
+   curl -fsSL https://raw.githubusercontent.com/rajnandan1/monot/main/install.sh | sh
+   ```
+
 3. Move the home folder `~/.openrecall`, with every fact, handoff record and setting in it, to `~/.monot`, and rename its log file. If `~/.monot` already exists, the `test` stops the commands before anything moves, so that `mv` does not put the old folder inside the new one. Then find out what created `~/.monot` before you go on.
 
    ```sh
