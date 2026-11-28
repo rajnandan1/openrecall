@@ -94,31 +94,6 @@ To update by hand, run the install command again. For the plugin, run `claude pl
 
 When the plugin and the binary have different versions and you must act, the next session tells you when it starts. It also gives you the command to run.
 
-### Move from OpenRecall
-
-Monot was called OpenRecall before version 0.15.0. The rename changed every name: the binary, the plugin, the home, the log file and the variables. An OpenRecall install never updates itself to Monot, so you move it by hand:
-
-1. Quit every Claude Code session. Then make sure that `pgrep -fl openrecall` prints nothing, so no background job still writes to the old home.
-2. Run the install command above. It installs `monot` beside the old binary.
-3. Move the home and its log file:
-
-   ```sh
-   mv ~/.openrecall ~/.monot
-   mv ~/.monot/log/openrecall.jsonl ~/.monot/log/monot.jsonl
-   ```
-
-4. Replace the plugin:
-
-   ```sh
-   claude plugin uninstall openrecall@openrecall
-   claude plugin marketplace remove openrecall
-   claude plugin marketplace add rajnandan1/monot
-   claude plugin install monot@monot
-   ```
-
-5. Rename what you set by hand. Each `OPENRECALL` variable becomes its `MONOT` name, such as `OPENRECALL_UPDATE` to `MONOT_UPDATE`. The tool names `mcp__plugin_openrecall_openrecall__*` in `permissions.allow` become `mcp__plugin_monot_monot__*`. A statusline script reads `~/.monot/status/`.
-6. Remove the old binary: `rm ~/.local/bin/openrecall`.
-
 ### Build from source
 
 To build the binary from source, you need Rust. This command builds it from this repo into `~/.local/bin`. `--locked` builds with the exact dependency versions in `Cargo.lock`.
@@ -384,10 +359,10 @@ To show the line, add these two lines to your own statusline script:
 
 ```sh
 sid=$(printf '%s' "$input" | jq -r .session_id)
-or=$(cat "${MONOT_HOME:-$HOME/.monot}/status/$sid" 2>/dev/null)
+monot=$(cat "${MONOT_HOME:-$HOME/.monot}/status/$sid" 2>/dev/null)
 ```
 
-Then print `$or` where you want the text to appear.
+Then print `$monot` where you want the text to appear.
 
 ## Disable or remove Monot
 
@@ -404,6 +379,38 @@ rm -rf ~/.monot      # every fact, handoff record and setting Monot wrote
 ```
 
 The `rm` command does not delete Claude Code's built-in memory. Monot never writes there.
+
+## Move from OpenRecall
+
+Skip this section if you never installed OpenRecall.
+
+Monot was called OpenRecall before version 0.15.0. The rename changed every name: the binary, the plugin, the home folder, the log file and the variables. An OpenRecall install never updates itself to Monot, so you move it by hand. Do not start Claude Code until the last step is done.
+
+1. Quit every Claude Code session. Then run `pgrep -fl openrecall`. If it lists a process, such as the extraction worker, wait and run it again until it prints nothing, because that process can still write to the old folder.
+2. Run the install command from [Install](#install). It installs `monot` at `~/.local/bin/monot`, beside the old binary.
+3. Move the home folder, with every fact, handoff record and setting in it, and rename its log file. If `~/.monot` already exists, the `test` stops the commands, so that `mv` does not put the old folder inside the new one.
+
+   ```sh
+   test ! -e ~/.monot &&
+     mv ~/.openrecall ~/.monot &&
+     mv ~/.monot/log/openrecall.jsonl ~/.monot/log/monot.jsonl
+   ```
+
+4. Replace the plugin:
+
+   ```sh
+   claude plugin uninstall openrecall@openrecall
+   claude plugin marketplace remove openrecall
+   claude plugin marketplace add rajnandan1/monot
+   claude plugin install monot@monot
+   ```
+
+5. If you set any of these by hand, rename them. They can be in the `env` key and `permissions.allow` of `~/.claude/settings.json`, in your shell profile and in your statusline script:
+   - Each `OPENRECALL` variable becomes its `MONOT` name, such as `OPENRECALL=0` to `MONOT=0` and `OPENRECALL_UPDATE` to `MONOT_UPDATE`.
+   - The tool names `mcp__plugin_openrecall_openrecall__*` become `mcp__plugin_monot_monot__*`.
+   - A statusline script that reads `~/.openrecall/status/` must read `~/.monot/status/`.
+6. Remove the old binary: `rm ~/.local/bin/openrecall`.
+7. Start Claude Code, and check that Monot works as [Install](#install) describes.
 
 ## Where things live
 
